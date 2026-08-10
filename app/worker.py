@@ -1,20 +1,32 @@
-"""워커 — claude CLI(오케스트레이터) 자율 실행 + 한도 감지 + 재개.
+"""워커 — 중앙 폴링 → 에이전트 실행 → 상태 회신 + 한도 감지/재개(워커 전용).
 
 역할:
-    큐에서 잡을 꺼내 `claude -p`로 오케스트레이터를 자율 실행한다. 실행은
-    stream-json으로 파싱하며, 토큰 한도(Max 롤링)를 감지하면 잡을 interrupted로
-    두고 reset_at을 기록한다(스케줄러가 리셋시각에 재개).
+    사용자별 동적 컨테이너(ROLE=worker DISPATCH_USER=<user>)로 뜨는 실행체.
+    Jira를 직접 보지 않고 CENTRAL_URL을 HTTP 폴링해 자기 잡을 받아, 그 사용자
+    정체성으로 오케스트레이터(`claude -p`, agent_runner)를 자율 실행하고, 상태/
+    로그를 중앙에 회신한다. 토큰 한도(Max 롤링)를 감지하면 interrupted+reset_at
+    으로 회신하고 재개를 스케줄한다.
 
-구현 Phase: **Phase 5** (워커 + 스케줄러).
+역할 소속: **worker**.
 
-실행 커맨드(설계 기준):
-    claude -p "<프롬프트/티켓 컨텍스트>"
-        --session-id <deterministic>          # 재개 키
-        --output-format stream-json           # 라인 단위 JSON 이벤트
-        --dangerously-skip-permissions        # 승인할 사람 없음(사내망 한정)
-    재개:
-        claude -p --resume <session-id>       # 세션 재개
-        (폴백) --from-pr <PR#> 또는 저널+브랜치로 컨텍스트 복원
+구현 Phase: **Phase 5** (워커 + 에이전트 실행).
+
+환경(스포너가 주입):
+    ROLE=worker
+    DISPATCH_USER=<username>                # 이 워커가 대리하는 사용자
+    CENTRAL_URL=http://central:8787         # 잡 수신/회신 대상
+    CLAUDE_CODE_OAUTH_TOKEN=<setup-token>   # 사용자 Claude 인증(Max)
+
+central↔worker HTTP 프로토콜:
+    GET  {CENTRAL_URL}/dispatch/<DISPATCH_USER>/next
+        → 다음 잡(JSON) 또는 204(대기).
+    POST {CENTRAL_URL}/dispatch/<DISPATCH_USER>/<job>/status
+        → {status, log?, reset_at?, branch?, session_id?, mr_url?, error?}
+
+실행 위임:
+    agent_runner.AgentRunner.run(job, user)로 `claude -p` 계약을 조립·실행.
+    stream-json 라인 파싱은 여기(또는 runner)에서 하며, 한도 감지 시
+    LimitReached(reset_at)로 interrupted 전이.
 
 Popen 관용(claude-hacker에서 계승):
     text=True, encoding='utf-8', errors='replace', bufsize=1
@@ -22,8 +34,7 @@ Popen 관용(claude-hacker에서 계승):
 
 ⚠️ 보안:
     --dangerously-skip-permissions = 도구권한 자율 에이전트 = RCE 표면.
-    사내망·신뢰 환경 한정. 동시성=1로 폭주 방지.
-    학습층은 개발서버에서 read-only(자기출력 학습 금지) — CLAUDE.md 참조.
+    사내망·신뢰 환경 한정. 동시성=1(concurrency_per_worker)로 폭주 방지.
 """
 
 from __future__ import annotations
@@ -44,31 +55,39 @@ class LimitReached(Exception):
 
 
 class Worker:
-    """오케스트레이터 자율 실행 워커(스텁)."""
+    """중앙 폴링 기반 사용자 워커(스텁)."""
 
-    def __init__(self, config, job_queue, gate) -> None:
-        """의존성 주입(설정·큐·게이트).
+    def __init__(self, config, agent_runner) -> None:
+        """설정 + 에이전트 러너 주입. DISPATCH_USER/CENTRAL_URL은 env에서.
 
-        TODO(Phase 5): 참조 보관 + 동시성/정지 이벤트 준비.
+        TODO(Phase 5): config·runner 보관, env(DISPATCH_USER, CENTRAL_URL) 로드,
+        requests.Session + 정지 이벤트 준비.
         """
         self.config = config
-        self.queue = job_queue
-        self.gate = gate
-        self._stop = None  # threading.Event (Phase 5)
+        self.runner = agent_runner
+        self.user = None        # env DISPATCH_USER (Phase 5)
+        self.central_url = None  # env CENTRAL_URL (Phase 5)
+        self._stop = None        # threading.Event (Phase 5)
 
-    def build_command(self, job, resume: bool = False) -> list:
-        """claude 실행 인자 리스트 구성(신규/재개 분기).
+    def fetch_next(self) -> Optional[dict]:
+        """중앙에서 다음 잡 수신(GET /dispatch/<user>/next).
 
-        TODO(Phase 5): claude_bin -p ... --session-id/--resume/--output-format
-        /--dangerously-skip-permissions 조립.
+        TODO(Phase 5): requests.get(next_url) → 잡 JSON 또는 None(204).
         """
-        raise NotImplementedError("TODO(Phase 5): build_command")
+        raise NotImplementedError("TODO(Phase 5): fetch_next")
 
-    def run_job(self, job) -> None:
-        """단일 잡 실행 — Popen 스트리밍 + stream-json 파싱 + 상태 전이.
+    def report_status(self, job_id: str, payload: dict) -> None:
+        """중앙에 상태/로그 회신(POST /dispatch/<user>/<job>/status).
 
-        TODO(Phase 5): Popen(text/utf-8/replace) → 라인별 JSON 파싱 →
-        한도 감지 시 LimitReached → interrupted/done/failed 전이.
+        TODO(Phase 5): requests.post(status_url, json=payload).
+        """
+        raise NotImplementedError("TODO(Phase 5): report_status")
+
+    def run_job(self, job, resume: bool = False) -> None:
+        """단일 잡 실행 — agent_runner 위임 + stream-json 파싱 + 상태 회신.
+
+        TODO(Phase 5): runner.run(job, user) → 라인별 JSON 파싱 → 한도 감지 시
+        LimitReached → interrupted(reset_at)/done/failed 회신.
         """
         raise NotImplementedError("TODO(Phase 5): run_job")
 
@@ -80,9 +99,9 @@ class Worker:
         raise NotImplementedError("TODO(Phase 5): parse_reset_at")
 
     def run_forever(self) -> None:
-        """큐 소비 루프(백그라운드 스레드 진입점).
+        """중앙 폴링 루프(worker 프로세스 진입점).
 
-        TODO(Phase 5): next_queued → run_job 반복 + 예외 격리.
+        TODO(Phase 5): stop까지 fetch_next → run_job 반복 + 예외 격리 + 백오프.
         """
         raise NotImplementedError("TODO(Phase 5): run_forever")
 

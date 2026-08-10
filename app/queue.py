@@ -1,8 +1,11 @@
-"""잡 스토어 + 상태머신.
+"""잡 스토어 + 상태머신(중앙 전용).
 
 역할:
-    claim 된 티켓을 잡(Job)으로 만들어 보관하고, 상태를 관리한다. 워커가
-    이 큐에서 잡을 꺼내 실행하며, 재개 스케줄러가 interrupted 잡을 되살린다.
+    claim 된 티켓을 잡(Job)으로 만들어 보관하고, 상태를 관리한다. 잡은 소유
+    사용자(user)로 태깅되며, dispatch.py가 이 스토어를 사용자별 큐로 인덱싱해
+    worker에 HTTP로 넘긴다. 재개 스케줄러가 interrupted 잡을 되살린다.
+
+역할 소속: **central** (dispatch.py의 하부 저장/상태 계층).
 
 구현 Phase: **Phase 3** (dedup 게이트 + 큐).
 
@@ -37,10 +40,12 @@ class Job:
     """단일 디스패치 잡."""
 
     ticket: str = ""
+    user: str = ""                     # 소유 사용자(DISPATCH_USER) — per-user 귀속
     status: str = QUEUED
     session_id: Optional[str] = None   # claude --session-id (재개 키)
     branch: Optional[str] = None       # auto/<TICKET>
     reset_at: Optional[str] = None     # interrupted 시 재개 예정 시각
+    mr_url: Optional[str] = None       # 완료 시 worker가 회신하는 MR URL
     attempts: int = 0
     meta: dict = field(default_factory=dict)
 
@@ -62,10 +67,10 @@ class JobQueue:
         """
         raise NotImplementedError("TODO(Phase 3): enqueue")
 
-    def next_queued(self) -> Optional[Job]:
-        """실행 대기 잡 하나를 반환(없으면 None).
+    def next_queued(self, user: Optional[str] = None) -> Optional[Job]:
+        """실행 대기 잡 하나를 반환(user 지정 시 그 사용자 것만, 없으면 None).
 
-        TODO(Phase 3): queued(또는 재개 대상 interrupted) 중 하나 선택.
+        TODO(Phase 3): (user 필터) queued(또는 재개 대상 interrupted) 중 하나.
         """
         raise NotImplementedError("TODO(Phase 3): next_queued")
 

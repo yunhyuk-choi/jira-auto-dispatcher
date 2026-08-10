@@ -2,9 +2,12 @@
 
 역할:
     재시작에도 살아남아야 하는 상태를 파일로 영속한다:
-        - jobs        잡 스토어(queue.py가 사용)
+        - jobs        사용자별 잡 스토어(queue.py/dispatch.py가 사용)
         - watermark   폴러 high-watermark(마지막으로 처리한 updated 시각/커서)
         - dedup       이미 claim 된 티켓 집합(gate.py가 사용)
+        - registry    등록 사용자 레코드(registry.py가 사용, 온보딩으로 채워짐)
+
+역할 소속: **central** (worker는 state를 영속하지 않는다 — 무상태 실행체).
 
 구현 Phase: **Phase 1** (config + state 영속).
 
@@ -22,6 +25,8 @@ STATE_DIR = "state"
 JOBS_FILE = "state/jobs.json"
 WATERMARK_FILE = "state/watermark.json"
 DEDUP_FILE = "state/dedup.json"
+REGISTRY_FILE = "state/registry.json"
+SECRETS_DIR = "state/secrets"  # 사용자 시크릿(참조 대상). gitignore.
 
 
 def ensure_state_dir() -> None:
@@ -62,3 +67,19 @@ def save_watermark(value: Any) -> None:
     TODO(Phase 1): WATERMARK_FILE 원자적 저장.
     """
     raise NotImplementedError("TODO(Phase 1): watermark 저장")
+
+
+def load_registry() -> Any:
+    """등록 사용자 레지스트리 로드(registry.py가 사용).
+
+    TODO(Phase 1): REGISTRY_FILE 읽기(없으면 빈 목록).
+    """
+    raise NotImplementedError("TODO(Phase 1): registry 로드")
+
+
+def save_registry(value: Any) -> None:
+    """등록 사용자 레지스트리 저장(registry.py가 사용).
+
+    TODO(Phase 1): REGISTRY_FILE 원자적 저장(시크릿 값 미포함 방어).
+    """
+    raise NotImplementedError("TODO(Phase 1): registry 저장")

@@ -1,70 +1,110 @@
 # jira-auto-dispatcher
 
-Jira(HAN) 티켓이 새로 생겨 지정 사용자에게 할당되면 이를 감지해, 개발서버 도커
-컨테이너에서 **오케스트레이터(`claude` CLI = ai-dlc-orchestrator)를 자율 실행**해
-브랜치·MR 초안을 만드는 상시 **디스패처**다.
+Jira(HAN) 티켓이 **등록 사용자**에게 새로 할당되면 이를 감지해, **그 사용자
+정체성으로** 오케스트레이터(`claude` CLI = ai-dlc-orchestrator)를 자율 실행해
+브랜치·MR을 만드는 시스템이다.
+
+단일 도커 이미지를 env `ROLE`로 두 역할로 분기한다:
+
+- **central** (상시 컨테이너, 이 프로젝트): Jira 폴링/웹훅 → dedup 게이트 →
+  티켓 담당자를 등록 사용자에 매핑 → 그 사용자 worker에 잡 배포. + 사용자
+  레지스트리/온보딩/관리 UI + 사용자 worker 컨테이너 동적 spawn(Docker SDK).
+- **worker** (사용자별 동적 컨테이너, `ROLE=worker DISPATCH_USER=<user>`): Jira를
+  직접 보지 않는다. 중앙을 HTTP 폴링 → 잡 수신 → 그 사용자 정체성(Claude 계정·
+  Jira 토큰·GitLab 토큰·git author)으로 `claude -p` 실행 → 상태/로그 회신.
+  토큰 한도 감지 시 interrupted + reset_at으로 회신하고 재개한다.
 
 베이스는 `claude-web-wrapper`(claude-hacker): Flask로 `claude` CLI를 감싼 웹 래퍼
 (브라우저 로그인 + `claude -p` 스트리밍)에서 재사용 자산을 이식했다.
 
-## 목적
+## per-user attribution (완전 사용자 귀속)
 
-- Jira에 새 할당 티켓이 뜨면 사람 개입 없이 1차 개발(브랜치/MR 초안)을 자동 착수한다.
-- 상태 전이·티켓 팔로우·브랜치/MR 생성 자체는 **디스패처가 흉내내지 않고
-  오케스트레이터에게 위임**한다. 이 앱은 "감지 → 기동 → 재개" 만 책임진다.
+모든 산출물이 실제 사용자에게 귀속된다:
+
+- **git 커밋 author** = 사용자 (`git config user.name/email` = 레지스트리 identity)
+- **Jira actor** = 사용자 Jira 토큰
+- **MR 생성자** = 사용자 GitLab 토큰
+- **GitHub** 만 central(=나) 소유. worker는 GitHub 토큰을 받지 않는다.
+
+## Claude 인증
+
+각 사용자가 로컬에서 `claude setup-token`(Max, long-lived)으로 토큰을 발급 →
+온보딩 폼에 붙여넣기 → worker가 `CLAUDE_CODE_OAUTH_TOKEN` env로 사용한다.
+브라우저 방식(`claude auth login`, `auth_login.py`)은 **폴백**으로 유지한다.
 
 ## 아키텍처
 
-```
-Jira(HAN)
-  │  (1) 신규 할당 감지
-  ├── poller       high-watermark JQL 폴링(상시)
-  └── webhook      얇은 웹훅(기본 비활성, 포트 열릴 때)
-         │
-         ▼  (2) 수렴
-      gate         단일 원자적 dedup claim (중복 흡수)
-         │
-         ▼  (3) 큐잉
-      queue        잡 스토어 + 상태머신
-                   queued → running → (interrupted) → done/failed
-         │
-         ▼  (4) 실행
-      worker       claude -p (오케스트레이터) 자율 실행
-                   stream-json 파싱 → 토큰 한도 감지 → interrupted
-         │
-         ▼  (5) 재개
-      scheduler    리셋시각 재개 + 야간 드레인 배치
+```text
+                        ┌─────────────────────── central (상시) ───────────────────────┐
+Jira(HAN)               │                                                              │
+  │ (1) 신규 할당 감지   │   poller ── high-watermark JQL 폴링                           │
+  ├── poller ───────────┼──▶ gate  ── 단일 원자적 dedup claim                           │
+  └── webhook(옵션) ─────┤    │                                                         │
+                        │    ▼ (2) 담당자 account_id → registry 매핑(enabled만)         │
+                        │  registry ── 등록 사용자 CRUD(state/registry.json)            │
+                        │    │                                                         │
+                        │    ▼ (3) dispatch.enqueue(user, job)                          │
+                        │  dispatch ── 사용자별 잡 큐 + HTTP                            │
+                        │    │  GET /dispatch/<user>/next   POST /dispatch/<u>/<job>/status
+                        │  spawner ── 온보딩 시 worker 컨테이너 동적 spawn(Docker SDK)  │
+                        └────┼─────────────────────────────────────────────────────────┘
+                             │ (4) HTTP (worker가 폴링/회신)
+              ┌──────────────┼──────────────┐  ...사용자마다 1개
+        ┌─────▼─────┐  ┌─────▼─────┐   worker (동적, ROLE=worker DISPATCH_USER=<u>)
+        │ worker A  │  │ worker B  │   ── central 폴링 → agent_runner → claude -p → 회신
+        └───────────┘  └───────────┘      토큰 한도 감지 → interrupted(reset_at) → 재개
 ```
 
-- **영속(state/)**: jobs·watermark·dedup을 JSON으로 영속 → 재시작에도 복원.
-- **웹훅-레디**: 폴러가 기본. 웹훅은 켜면 동일한 게이트로 수렴한다(중복 안전).
-- **auth_login**: 브라우저 2-스텝 로그인(`claude auth login`)을 웹에서 완료
-  (컨테이너 `~/.claude` 볼륨에 영속).
+- **영속(state/)**: jobs·watermark·dedup·registry를 JSON으로 영속(central만).
+  worker는 무상태 실행체다.
+- **웹훅-레디**: 폴러가 기본. 웹훅은 켜면 동일 게이트/매핑으로 수렴(중복 안전).
+- **재개**: 중앙이 interrupted 잡을 reset_at에 사용자 큐로 재-enqueue → 그 worker가
+  `claude -p --resume`로 이어간다(야간 드레인 / UI "지금 재개" 동일 경로).
+
+## central ↔ worker HTTP 프로토콜
+
+| 메서드 | 경로 | 방향 | 내용 |
+|---|---|---|---|
+| GET | `/dispatch/<user>/next` | worker→central | 다음 잡 1건(JSON) 수신, running 전이. 없으면 204 |
+| POST | `/dispatch/<user>/<job>/status` | worker→central | `{status, log?, reset_at?, branch?, session_id?, mr_url?, error?}` 회신 |
+| GET | `/healthz` | 프로브 | 역할/사용자 헬스 |
+| POST | `/onboard` | UI→central | 사용자 등록 + worker spawn (Phase 3) |
 
 ## 실행
 
 ```bash
 pip install -r requirements.txt
 
-# 설정 준비
-cp config/config.example.yaml config/config.yaml   # 값 채우기(계정ID/토큰 경로 등)
+# 설정 준비(시크릿 값은 넣지 말 것 — 파일 참조만)
+cp config/config.example.yaml config/config.yaml
 
-python -m app.main        # 관리 콘솔: http://127.0.0.1:5000 (기본 0.0.0.0:5000)
+# central (관리 콘솔 + 감시/디스패치)
+ROLE=central python -m app.main       # http://127.0.0.1:8787
+
+# worker (보통 central이 동적 spawn; 수동 기동 시)
+ROLE=worker DISPATCH_USER=yh.choi CENTRAL_URL=http://central:8787 \
+  CLAUDE_CODE_OAUTH_TOKEN=... python -m app.main
 ```
 
-> 현재는 스캐폴딩 단계다. 동작하는 것은 관리 UI 렌더 + 브라우저 로그인
-> (`/start-login`·`/complete-login`) + `/healthz` 뿐이며, 폴러/워커/스케줄러 등
-> 핵심 로직은 이후 Phase에서 구현된다(각 모듈 docstring의 Phase 마커 참조).
+> 현재는 스캐폴딩 단계다. 동작하는 것은 ROLE 분기 + 관리 UI 렌더 + 브라우저
+> 로그인(`/start-login`·`/complete-login`) + `/healthz` 뿐이며, 레지스트리/디스패치/
+> 스포너/폴러/워커/스케줄러 등 핵심 로직은 이후 Phase에서 구현된다(각 모듈
+> docstring의 Phase 마커 참조).
 
-## ⚠️ 보안 (설계상 중요)
+## ⚠️ 리스크 (설계상 중요)
 
-- 워커는 `claude -p ... --dangerously-skip-permissions`로 **도구 권한을 가진 자율
-  에이전트**를 실행한다 — 파일 편집·셸 실행 가능. 이는 사실상 **원격 코드 실행(RCE)
-  표면**이다.
-- 승인할 사람이 없는 자율 실행 전제이므로 권한을 죽일 수 없다. 대신
-  **사내망·신뢰 환경 한정**으로만 구동하고 외부에 노출하지 않는다.
-- 폭주 방지: `concurrency: 1`, 결정적 브랜치(`auto/<TICKET>`)로 멱등 재개,
-  사고 시 브랜치 삭제로 리셋(가역성).
+- **docker.sock 특권**: central이 worker를 spawn하려면 docker.sock에 접근한다 —
+  사실상 호스트 root 권한과 동치인 특권 상승 표면이다. 완화책: docker-socket-proxy를
+  앞단에 두고 CONTAINERS/POST만 최소 허용(`spawn.docker_host=tcp://socket-proxy:2375`),
+  central 비-root 실행, 사내망 한정. (compose에 프록시 골격 주석 포함)
+- **RCE 표면**: worker는 `claude -p ... --dangerously-skip-permissions`로 도구 권한을
+  가진 자율 에이전트를 실행한다. 승인할 사람이 없는 자율 실행 전제이므로 권한을
+  죽일 수 없다 → **사내망·신뢰 환경 한정**, 외부 노출 금지. 폭주 방지는
+  `concurrency_per_worker: 1` + dedup + 결정적 브랜치(`auto/<TICKET>`) 가역성으로 한다.
+- **서버 용량**: 사용자마다 상시 worker 컨테이너 1개(mem_limit 기본 4g)가 뜬다.
+  사용자 수 × 리소스가 개발서버 용량을 압박할 수 있다(스케일 상한/유휴 정지 정책 필요).
+- **per-user Max**: 각 사용자가 개별 Claude Max 구독(setup-token)을 붙여야 한다.
+  토큰 한도(롤링)는 사용자별로 따로 걸리며, worker가 감지해 reset_at까지 재개를 미룬다.
 
 ## 연동 레포 (런타임 clone, gitignore됨)
 
@@ -76,6 +116,8 @@ python -m app.main        # 관리 콘솔: http://127.0.0.1:5000 (기본 0.0.0.0
 
 ## 설정
 
-`config/config.example.yaml`이 스키마 정본이다. `config/config.yaml`(gitignore됨)로
-복사해 채운다. 시크릿(Jira 토큰·웹훅 시크릿)은 값이 아니라 **파일 경로**로 참조한다
-(`token_file`, `shared_secret_file`).
+`config/config.example.yaml`이 스키마 정본이다(시스템 수준 설정, 시크릿 없음).
+`config/config.yaml`(gitignore됨)로 복사해 채운다. 사용자별 트리거 목록은 config가
+아니라 **레지스트리**(`state/registry.json`, 온보딩 UI로 채움)가 소유한다 —
+스키마 예시는 `config/registry.example.json`. 시크릿(Jira/GitLab/Claude 토큰,
+웹훅 시크릿)은 값이 아니라 **파일 참조**(`secrets.base_dir` 상대 경로)로만 다룬다.

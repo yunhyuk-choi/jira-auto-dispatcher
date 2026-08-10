@@ -1,8 +1,12 @@
-"""Jira REST 클라이언트.
+"""Jira REST 클라이언트(중앙 전용).
 
 역할:
     Jira Cloud REST로 이슈를 조회/전이/코멘트하고, JQL로 신규 할당 티켓을
-    검색한다. 인증은 Basic auth(email:token, token_file에서 로드).
+    검색한다. 인증은 Basic auth(email:token). 중앙은 감시 토큰
+    (jira.watcher_token_file, secrets.base_dir 상대)으로만 Jira를 읽는다.
+
+역할 소속: **central** (worker는 Jira를 직접 보지 않는다. 티켓 상태 전이는
+    worker가 실행하는 오케스트레이터가 "사용자" 토큰으로 직접 수행한다).
 
 구현 Phase: **Phase 2** (Jira 연동).
 

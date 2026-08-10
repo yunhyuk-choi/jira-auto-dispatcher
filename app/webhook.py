@@ -1,9 +1,12 @@
-"""얇은 Jira 웹훅 엔드포인트(기본 비활성).
+"""얇은 Jira 웹훅 엔드포인트(기본 비활성, 중앙 전용).
 
 역할:
     Jira 웹훅 콜백을 받아 shared_secret으로 검증하고, 페이로드를 신뢰하지 않고
-    Jira에서 이슈를 **재검증**한 뒤 dedup 게이트로 넘긴다(gate.claim()).
-    폴러와 동일한 수렴점을 쓰므로 중복은 게이트가 흡수한다.
+    Jira에서 이슈를 **재검증**한 뒤 dedup 게이트로 넘긴다(gate.claim()). 이후
+    폴러와 동일하게 담당자를 등록 사용자로 매핑해(enabled만) 그 사용자 큐에
+    디스패치한다(dispatch.enqueue). 폴러와 동일 수렴점이라 중복은 게이트가 흡수.
+
+역할 소속: **central**.
 
 구현 Phase: **Phase 4** (폴러 + 웹훅).
 
@@ -30,10 +33,11 @@ def verify_signature(request, shared_secret: str) -> bool:
     raise NotImplementedError("TODO(Phase 4): verify_signature")
 
 
-def handle_webhook(request, jira_client, gate, job_queue):
-    """웹훅 처리 — 검증 → 재검증 → gate.claim → enqueue.
+def handle_webhook(request, jira_client, gate, registry, dispatcher):
+    """웹훅 처리 — 검증 → 재검증 → gate.claim → 사용자 매핑 → 디스패치.
 
     TODO(Phase 4): 서명 검증 → 이슈키 추출 → Jira 재조회 → 조건 재검증
-    → gate.claim → queue.enqueue. 응답은 즉시 2xx(비동기 처리).
+    → gate.claim → registry.find_by_account_id(enabled) → dispatch.enqueue.
+    미매핑/비활성은 skip+로그. 응답은 즉시 2xx(비동기 처리).
     """
     raise NotImplementedError("TODO(Phase 4): handle_webhook")

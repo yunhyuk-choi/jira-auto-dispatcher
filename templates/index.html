@@ -3,11 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>jira-auto-dispatcher — 관리 콘솔</title>
+    <title>jira-auto-dispatcher — central 관리 콘솔</title>
     <style>
       body {
         font-family: "Segoe UI", sans-serif;
-        max-width: 900px;
+        max-width: 1000px;
         margin: 0 auto;
         padding: 20px;
         background-color: #1e1e1e;
@@ -53,8 +53,23 @@
         gap: 10px;
         margin-top: 10px;
       }
-      input[type="text"] {
-        flex: 1;
+      .grid-form {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        margin-top: 10px;
+      }
+      label {
+        display: block;
+        font-size: 0.8em;
+        color: #9cdcfe;
+        margin-bottom: 4px;
+      }
+      input[type="text"],
+      input[type="password"],
+      select {
+        width: 100%;
+        box-sizing: border-box;
         padding: 10px;
         border-radius: 4px;
         border: 1px solid #3c3c3c;
@@ -87,7 +102,7 @@
         text-align: left;
         padding: 8px;
         border-bottom: 1px solid #3c3c3c;
-        font-size: 0.9em;
+        font-size: 0.85em;
       }
       th {
         color: #569cd6;
@@ -95,19 +110,110 @@
     </style>
   </head>
   <body>
-    <h2>⚙️ jira-auto-dispatcher 관리 콘솔</h2>
+    <h2>⚙️ jira-auto-dispatcher — central 관리 콘솔</h2>
 
-    <!-- 1. 세션 로그인 (Phase 0 — 동작) -->
+    <!-- 1. 사용자 온보딩 (Phase 3 — 자리표시자) -->
+    <section id="onboard-section">
+      <h3>사용자 온보딩</h3>
+      <div class="todo-box">
+        TODO(Phase 3): 아래 폼 → <code>POST /onboard</code> →
+        <code>registry.upsert</code> + <code>spawner.start</code>(worker 컨테이너
+        기동). 시크릿(토큰)은 값이 아니라 시크릿 스토어에 저장되고 레지스트리엔
+        참조만 남는다.
+      </div>
+      <div class="info-box">
+        💡 <b>Claude 인증(setup-token):</b> 각 사용자는 로컬 터미널에서
+        <code>claude setup-token</code>(Max, long-lived)으로 토큰을 발급해 아래
+        <b>Claude setup-token</b> 칸에 붙여넣는다. worker가 이를
+        <code>CLAUDE_CODE_OAUTH_TOKEN</code>으로 사용한다.
+      </div>
+      <form id="onboard-form" onsubmit="return false;">
+        <div class="grid-form">
+          <div><label>username</label><input type="text" name="username" placeholder="yh.choi" /></div>
+          <div><label>display_name</label><input type="text" name="display_name" placeholder="yh.choi" /></div>
+          <div><label>jira_account_id</label><input type="text" name="jira_account_id" placeholder="712020:..." /></div>
+          <div><label>jira_email</label><input type="text" name="jira_email" placeholder="yh.choi@interxlab.com" /></div>
+          <div><label>jira_token</label><input type="password" name="jira_token" placeholder="Jira API 토큰" /></div>
+          <div><label>gitlab_token</label><input type="password" name="gitlab_token" placeholder="GitLab PAT" /></div>
+          <div><label>claude_setup_token</label><input type="password" name="claude_setup_token" placeholder="claude setup-token 결과" /></div>
+          <div>
+            <label>autonomy_mode</label>
+            <select name="autonomy_mode">
+              <option value="A">A — 완전자율 MR초안</option>
+              <option value="B" selected>B — 경량1차+로컬완성</option>
+            </select>
+          </div>
+          <div><label>git_name</label><input type="text" name="git_name" placeholder="yunhyuk-choi" /></div>
+          <div><label>git_email</label><input type="text" name="git_email" placeholder="yh.choi@interxlab.com" /></div>
+          <div><label>scope (projects, 쉼표구분)</label><input type="text" name="scope" placeholder="HAN" /></div>
+        </div>
+        <div class="flex-form">
+          <button id="onboard-btn" type="submit" disabled>사용자 등록 + worker 기동</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- 2. 사용자 목록 (Phase 3 — 자리표시자) -->
+    <section id="users-section">
+      <h3>등록 사용자</h3>
+      <div class="todo-box">
+        TODO(Phase 3): <code>GET /api/users</code> 폴링. enabled 토글 →
+        <code>POST /api/users/&lt;u&gt;/enabled</code>, start/stop →
+        <code>POST /api/users/&lt;u&gt;/container</code>(spawner).
+      </div>
+      <table id="users-table">
+        <thead>
+          <tr>
+            <th>username</th>
+            <th>enabled(자동트리거)</th>
+            <th>autonomy_mode</th>
+            <th>container status</th>
+            <th>동작</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td colspan="5">(자리표시자 — 구현 예정)</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- 3. 잡 현황 (Phase 3~5 — 자리표시자) -->
+    <section id="jobs-section">
+      <h3>잡 현황 (전 사용자)</h3>
+      <div class="todo-box">
+        TODO(Phase 3~5): <code>GET /api/jobs</code> 폴링. 재개 →
+        <code>POST /api/resume</code>(scheduler.resume_now → 사용자 큐 재-enqueue).
+      </div>
+      <table id="jobs-table">
+        <thead>
+          <tr>
+            <th>ticket</th>
+            <th>user</th>
+            <th>status</th>
+            <th>reset_at</th>
+            <th>재개</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td colspan="5">(자리표시자 — queued/running/interrupted/done/failed)</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- 4. Claude 인증(폴백) — 브라우저 로그인 (Phase 0 — 동작) -->
     <section id="login-section">
-      <h3>세션 로그인</h3>
+      <h3>Claude 인증(폴백)</h3>
+      <div class="info-box">
+        기본 온보딩은 <code>claude setup-token</code> 붙여넣기 방식이다. 아래
+        브라우저 2-스텝 로그인(<code>claude auth login</code>)은 <b>폴백</b>으로만
+        유지한다(컨테이너 <code>~/.claude</code> 볼륨에 영속).
+      </div>
       <button id="start-login-btn">로그인 URL 발급받기</button>
 
       <div id="login-step2" style="display: none">
         <p>1. 아래 링크를 클릭하여 브라우저에서 로그인을 완료하세요.</p>
         <p>
-          <a href="#" id="auth-link" target="_blank"
-            >여기에 링크가 표시됩니다</a
-          >
+          <a href="#" id="auth-link" target="_blank">여기에 링크가 표시됩니다</a>
         </p>
 
         <div class="info-box">
@@ -125,52 +231,6 @@
           <button id="complete-login-btn">인증 완료</button>
         </div>
       </div>
-    </section>
-
-    <!-- 2. 현황 (Phase 3~5 — 자리표시자) -->
-    <section id="status-section">
-      <h3>현황</h3>
-      <div class="todo-box">
-        TODO(Phase 3~5): <code>GET /api/status</code> 폴링으로 워터마크·잡 목록을
-        채운다. 아래 표는 자리표시자.
-      </div>
-      <table id="jobs-table">
-        <thead>
-          <tr>
-            <th>티켓</th>
-            <th>상태</th>
-            <th>세션</th>
-            <th>브랜치</th>
-            <th>reset_at</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td colspan="5">(자리표시자 — 구현 예정)</td>
-          </tr>
-        </tbody>
-      </table>
-    </section>
-
-    <!-- 3. 자율 모드 스위치 (Phase 5 — 자리표시자) -->
-    <section id="mode-section">
-      <h3>자율 모드</h3>
-      <div class="todo-box">
-        TODO(Phase 5): <code>POST /api/mode</code>로 A(완전자율 MR초안)/
-        B(경량1차+로컬완성) 스위치. 레포별 오버라이드 표시.
-      </div>
-      <button id="mode-a-btn" disabled>모드 A</button>
-      <button id="mode-b-btn" disabled>모드 B</button>
-    </section>
-
-    <!-- 4. 재개 (Phase 5 — 자리표시자) -->
-    <section id="resume-section">
-      <h3>재개</h3>
-      <div class="todo-box">
-        TODO(Phase 5): <code>POST /api/resume</code>로 interrupted 잡을 수동
-        재개(리셋시각 스케줄러/야간드레인과 동일 경로).
-      </div>
-      <button id="resume-btn" disabled>지금 재개</button>
     </section>
 
     <script>
@@ -226,7 +286,7 @@
         }
       });
 
-      // TODO(Phase 3~5): 현황 폴링 / 모드 스위치 / 재개 버튼 배선.
+      // TODO(Phase 3~5): 온보딩 제출(/onboard) / 사용자 목록·토글 / 잡 현황·재개 배선.
     </script>
   </body>
 </html>

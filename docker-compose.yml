@@ -1,29 +1,54 @@
-# jira-auto-dispatcher — 컴포즈 정의
-# 자리표시자 골격만. 실제 완성은 Phase 6(배포)에서.
+# jira-auto-dispatcher — compose 정의
 #
-# 완성 시 담을 것(Phase 6):
-#   - 단일 서비스(dispatcher): 개발서버 도커에 상시 구동
-#   - 볼륨:
-#       ~/.claude       세션/auth 영속(재시작에도 로그인 유지)
-#       ./state         잡/워터마크/dedup 영속
-#       ./workspace     오케스트레이터 작업 공간
-#       ./config        config.yaml 마운트(시크릿은 파일 참조)
-#   - 시크릿: C:/temp/.jira-token 등은 파일 마운트/시크릿으로 주입(이미지에 굽지 말 것)
-#   - 포트: 관리 UI(기본 5000) — ⚠️ 사내망 한정, 외부 노출 금지(RCE 표면)
-#   - webhook.enabled=true일 때만 인바운드 포트 개방
-#   - restart: unless-stopped (상시 디스패처)
+# central 서비스만 여기 선언한다. worker는 central이 온보딩 시 Docker SDK로
+# 동적 spawn(app/spawner.py)하므로 compose에 고정 서비스로 두지 않는다
+# (사용자마다 1개씩, ROLE=worker DISPATCH_USER=<user>로 뜬다).
 #
-# TODO(Phase 6): 아래를 실제 서비스 정의로 채운다.
-# services:
-#   dispatcher:
-#     build: .
-#     restart: unless-stopped
-#     ports:
-#       - "5000:5000"
-#     volumes:
-#       - claude-home:/root/.claude
-#       - ./state:/app/state
-#       - ./workspace:/app/workspace
-#       - ./config:/app/config:ro
-# volumes:
-#   claude-home:
+# 이번 페이즈: 동작 가능한 최소 골격. 완성/보안 하드닝은 Phase 6.
+# ⚠️ 보안: 관리 UI/워커는 도구권한 자율 에이전트(RCE 표면). 사내망 한정, 외부 노출 금지.
+
+services:
+  central:
+    build: .
+    image: jira-auto-dispatcher:latest   # spawner가 worker를 이 이미지로 띄운다
+    container_name: jad-central
+    restart: unless-stopped
+    environment:
+      ROLE: central
+      SECRETS_DIR: /run/secrets           # config secrets.base_dir(${SECRETS_DIR})
+    ports:
+      - "8787:8787"                        # 관리 UI — ⚠️ 사내망 한정
+    networks:
+      - jad-net
+    volumes:
+      - ./state:/app/state                 # jobs/watermark/dedup/registry 영속
+      - ./workspace:/app/workspace         # 오케스트레이터 작업 공간
+      - ./config:/app/config:ro            # config.yaml(시크릿은 파일 참조)
+      - ./secrets:/run/secrets:ro          # 시크릿 파일(값). 이미지에 굽지 말 것
+      # --- worker 동적 spawn을 위한 docker 접근 (택1) ---
+      # (기본) docker.sock 직결 — 편하지만 호스트 root 동치(특권 상승 표면).
+      - /var/run/docker.sock:/var/run/docker.sock
+      # (권장) 위 sock 마운트 대신 socket-proxy를 앞단에 두고 central은
+      #   spawn.docker_host=tcp://socket-proxy:2375 로만 접근(CONTAINERS/POST 최소 허용).
+      #   아래 socket-proxy 서비스 주석 해제 + docker.sock 직결 제거.
+
+  # --- (권장) docker-socket-proxy: docker.sock 최소권한 완화책 ---
+  # socket-proxy:
+  #   image: tecnativa/docker-socket-proxy
+  #   restart: unless-stopped
+  #   environment:
+  #     CONTAINERS: 1      # 컨테이너 조회/생성만 허용
+  #     POST: 1            # 생성/기동 허용
+  #     IMAGES: 1
+  #     NETWORKS: 1
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock:ro
+  #   networks:
+  #     - jad-net
+
+networks:
+  jad-net:
+    name: jad-net        # central과 동적 worker가 공유하는 사설망(spawn.network)
+
+# 참고: worker 볼륨(사용자 ~/.claude 영속)은 spawner가 사용자별로 생성한다
+#       (예: jad-claude-<username>). compose에 고정 선언하지 않는다.

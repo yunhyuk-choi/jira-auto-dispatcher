@@ -3,6 +3,9 @@ config/config.yaml
 
 # --- 런타임 영속/작업 산출물 ---
 state/
+state/secrets/           # 사용자 시크릿 파일(값) — 절대 추적 금지
+state/registry.json      # 등록 사용자(운영 데이터, 온보딩으로 채워짐)
+secrets/                 # 컨테이너 마운트용 시크릿 파일(값)
 workspace/
 .env
 
