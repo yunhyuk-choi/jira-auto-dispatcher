@@ -453,8 +453,13 @@ def build_command(
         prompt,
         "--output-format",
         output_format,
-        "--dangerously-skip-permissions",
     ]
+    # stream-json은 --print(-p)와 함께 쓸 때 CLI가 --verbose를 강제한다
+    # (없으면 "requires --verbose" 에러로 즉시 실패 → session_id 유실). 방어적으로
+    # output_format이 stream-json일 때만 붙인다(신규·resume 공통).
+    if output_format == "stream-json":
+        cmd.append("--verbose")
+    cmd.append("--dangerously-skip-permissions")
 
     if resume:
         sid = session_id or deterministic_session_id(ticket)

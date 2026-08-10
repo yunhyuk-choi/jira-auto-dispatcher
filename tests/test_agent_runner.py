@@ -135,6 +135,8 @@ def test_build_command_new_flags_and_deterministic_session_id():
     cmd = ar.build_command(job, cfg)
     assert cmd[0] == "claude" and cmd[1] == "-p"
     assert "--output-format" in cmd and "stream-json" in cmd
+    # stream-json + --print은 CLI가 --verbose를 강제한다(실배포 확인 버그).
+    assert "--verbose" in cmd
     assert "--dangerously-skip-permissions" in cmd
     assert "--session-id" in cmd
     sid = cmd[cmd.index("--session-id") + 1]
@@ -153,6 +155,19 @@ def test_build_command_resume_uses_resume_and_from_pr():
     assert "--resume" in cmd and cmd[cmd.index("--resume") + 1] == "sess-1"
     assert "--from-pr" in cmd and cmd[cmd.index("--from-pr") + 1] == "5"
     assert "--session-id" not in cmd
+    # resume 경로도 stream-json이면 --verbose를 포함해야 한다.
+    assert "--verbose" in cmd
+
+
+def test_build_command_omits_verbose_when_not_stream_json():
+    job = {"ticket": "HAN-142"}
+    cfg = SimpleNamespace(run=SimpleNamespace(claude_bin="claude", output_format="json"))
+    cmd = ar.build_command(job, cfg)
+    assert "--output-format" in cmd and "json" in cmd
+    # stream-json이 아니면 --verbose를 붙이지 않는다(방어적).
+    assert "--verbose" not in cmd
+    cmd_resume = ar.build_command(job, cfg, resume=True, session_id="s")
+    assert "--verbose" not in cmd_resume
 
 
 # --- build_env ---------------------------------------------------------------
