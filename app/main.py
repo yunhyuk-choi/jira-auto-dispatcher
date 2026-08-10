@@ -37,6 +37,13 @@ from app.auth_login import auth_bp
 
 log = logging.getLogger("jad.main")
 
+# 템플릿·정적파일은 레포 루트(app/ 의 부모)에 있다. main.py가 app/ 패키지
+# 안이라 Flask 기본값(app/templates·app/static)은 빗나간다 → cwd 무관 절대경로 고정.
+_PKG_DIR = os.path.dirname(os.path.abspath(__file__))  # .../app
+_ROOT = os.path.dirname(_PKG_DIR)                        # repo root
+_TEMPLATE_DIR = os.path.join(_ROOT, "templates")
+_STATIC_DIR = os.path.join(_ROOT, "static")
+
 # central 컴포넌트 싱글턴 핸들(create_central_app이 채운다).
 _components: dict = {}
 
@@ -105,7 +112,7 @@ def create_central_app(config_path: str = "config/config.yaml") -> Flask:
     설정 로드 → 컴포넌트 조립 → 로그인/인덱스/헬스 + 관리 API + dispatch_bp +
     (enabled 시)webhook 배선. 백그라운드(poller/scheduler)는 start_central_background.
     """
-    app = Flask(__name__)
+    app = Flask(__name__, template_folder=_TEMPLATE_DIR, static_folder=_STATIC_DIR)
     app.register_blueprint(auth_bp)
 
     @app.route("/")
