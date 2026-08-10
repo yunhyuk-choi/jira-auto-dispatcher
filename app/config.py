@@ -95,6 +95,7 @@ class SpawnConfig:
     central_url: str = "http://central:8787"
     mem_limit: str = "4g"
     docker_host: str = "unix:///var/run/docker.sock"
+    run_as: str = "1000:1000"  # worker 컨테이너 비-root 실행 사용자(특권 축소)
 
 
 @dataclass
@@ -265,6 +266,7 @@ def _build_config(raw: dict) -> AppConfig:
             central_url=str(spawn.get("central_url", "http://central:8787")),
             mem_limit=str(spawn.get("mem_limit", "4g")),
             docker_host=str(spawn.get("docker_host", "unix:///var/run/docker.sock")),
+            run_as=str(spawn.get("run_as", "1000:1000")),
         ),
         git=GitConfig(
             branch_prefix=str(git.get("branch_prefix", "auto/")),

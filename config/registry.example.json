@@ -8,6 +8,7 @@
       "jira_email": "yh.choi@interxlab.com",
       "enabled": true,
       "autonomy_mode": "B",
+      "permission_level": "bypass",
       "agent": "default",
       "per_repo": {
         "portal-frontend": "A",
@@ -25,9 +26,9 @@
         "status": "absent"
       },
       "secrets_ref": {
-        "jira_token": "users/yh.choi/jira-token",
-        "gitlab_token": "users/yh.choi/gitlab-token",
-        "claude_oauth_token": "users/yh.choi/claude-oauth-token"
+        "jira_token": "yh.choi/jira-token",
+        "gitlab_token": "yh.choi/gitlab-token",
+        "claude_oauth_token": "yh.choi/claude-oauth-token"
       }
     }
   ]

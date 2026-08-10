@@ -93,6 +93,11 @@ ROLE=worker DISPATCH_USER=yh.choi CENTRAL_URL=http://central:8787 \
 
 ## ⚠️ 리스크 (설계상 중요)
 
+> 🔒 **보안 태세 & 자율 실행 인가 기록은 [SECURITY.md](SECURITY.md) 정본.** worker는 사람
+> 승인 없이 bypass 사전 인가로 도구 권한 에이전트를 헤드리스 실행한다 — 그 인가 근거와
+> 보완 통제(사내망 한정·MR 게이트·가역성·격리·비-root·시크릿 ro·`permission_level` 조임)는
+> SECURITY.md에 명시적으로 기록돼 있다.
+
 - **docker.sock 특권**: central이 worker를 spawn하려면 docker.sock에 접근한다 —
   사실상 호스트 root 권한과 동치인 특권 상승 표면이다. 완화책: docker-socket-proxy를
   앞단에 두고 CONTAINERS/POST만 최소 허용(`spawn.docker_host=tcp://socket-proxy:2375`),

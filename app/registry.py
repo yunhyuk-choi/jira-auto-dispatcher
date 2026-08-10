@@ -16,6 +16,9 @@
     jira_email          Jira 계정 이메일(Basic auth actor)
     enabled             자동 트리거 토글(false면 폴러가 skip)
     autonomy_mode       "A"(완전자율 MR초안) | "B"(경량1차+로컬완성)
+    permission_level    worker 컨테이너 사전 인가 레벨(기본 "bypass").
+                        스포너가 Claude settings.json으로 번역(SECURITY.md).
+                        향후 "sandbox"·"allowlist"로 조일 수 있다(현재 TODO).
     agent               dlc-meta/agents/<user>/ 오버레이 키
     per_repo            {repo: "A"|"B"} 레포별 모드 오버라이드
     identity            {git_name, git_email} — worker git 커밋 author
@@ -85,6 +88,7 @@ class UserRecord:
     jira_email: str = ""
     enabled: bool = True
     autonomy_mode: str = "B"
+    permission_level: str = "bypass"
     agent: str = "default"
     per_repo: dict = field(default_factory=dict)
     identity: Identity = field(default_factory=Identity)
@@ -111,6 +115,7 @@ class UserRecord:
             jira_email=str(d.get("jira_email", "")),
             enabled=bool(d.get("enabled", True)),
             autonomy_mode=str(d.get("autonomy_mode", "B")),
+            permission_level=str(d.get("permission_level", "bypass") or "bypass"),
             agent=str(d.get("agent", "default")),
             per_repo=dict(d.get("per_repo", {}) or {}),
             identity=Identity(

@@ -112,30 +112,30 @@
   <body>
     <h2>⚙️ jira-auto-dispatcher — central 관리 콘솔</h2>
 
-    <!-- 1. 사용자 온보딩 (Phase 3 — 자리표시자) -->
+    <!-- 1. 사용자 온보딩 -->
     <section id="onboard-section">
       <h3>사용자 온보딩</h3>
-      <div class="todo-box">
-        TODO(Phase 3): 아래 폼 → <code>POST /onboard</code> →
-        <code>registry.upsert</code> + <code>spawner.start</code>(worker 컨테이너
-        기동). 시크릿(토큰)은 값이 아니라 시크릿 스토어에 저장되고 레지스트리엔
-        참조만 남는다.
+      <div class="info-box">
+        💡 <b>Claude 인증(setup-token):</b> 각 사용자는 <b>본인 노트북</b> 터미널에서
+        <code>claude setup-token</code>(Max, long-lived)을 실행해 나온 토큰을 아래
+        <b>claude_setup_token</b> 칸에 붙여넣는다. worker가 이를
+        <code>CLAUDE_CODE_OAUTH_TOKEN</code>으로 사용한다. 권한 승인 단계는 없다 —
+        컨테이너 사전 인가(bypass)는 시스템이 자동 주입한다(SECURITY.md).
       </div>
       <div class="info-box">
-        💡 <b>Claude 인증(setup-token):</b> 각 사용자는 로컬 터미널에서
-        <code>claude setup-token</code>(Max, long-lived)으로 토큰을 발급해 아래
-        <b>Claude setup-token</b> 칸에 붙여넣는다. worker가 이를
-        <code>CLAUDE_CODE_OAUTH_TOKEN</code>으로 사용한다.
+        🔒 등록된 사용자는 <b>안전을 위해 enabled=false로 시작</b>한다. 아래 표에서
+        운영자가 검토 후 <b>enable</b>하면 worker 컨테이너가 기동된다. 토큰 값은
+        서버에만 0600으로 저장되고 응답·로그에 노출되지 않는다.
       </div>
       <form id="onboard-form" onsubmit="return false;">
         <div class="grid-form">
-          <div><label>username</label><input type="text" name="username" placeholder="yh.choi" /></div>
+          <div><label>username *</label><input type="text" name="username" placeholder="yh.choi" /></div>
           <div><label>display_name</label><input type="text" name="display_name" placeholder="yh.choi" /></div>
-          <div><label>jira_account_id</label><input type="text" name="jira_account_id" placeholder="712020:..." /></div>
-          <div><label>jira_email</label><input type="text" name="jira_email" placeholder="yh.choi@interxlab.com" /></div>
-          <div><label>jira_token</label><input type="password" name="jira_token" placeholder="Jira API 토큰" /></div>
+          <div><label>jira_account_id *</label><input type="text" name="jira_account_id" placeholder="712020:..." /></div>
+          <div><label>jira_email *</label><input type="text" name="jira_email" placeholder="yh.choi@interxlab.com" /></div>
+          <div><label>jira_token *</label><input type="password" name="jira_token" placeholder="Jira API 토큰" /></div>
           <div><label>gitlab_token</label><input type="password" name="gitlab_token" placeholder="GitLab PAT" /></div>
-          <div><label>claude_setup_token</label><input type="password" name="claude_setup_token" placeholder="claude setup-token 결과" /></div>
+          <div><label>claude_setup_token *</label><input type="password" name="claude_setup_token" placeholder="claude setup-token 결과" /></div>
           <div>
             <label>autonomy_mode</label>
             <select name="autonomy_mode">
@@ -143,47 +143,47 @@
               <option value="B" selected>B — 경량1차+로컬완성</option>
             </select>
           </div>
+          <div>
+            <label>permission_level</label>
+            <select name="permission_level">
+              <option value="bypass" selected>bypass (기본 — 헤드리스 자율)</option>
+            </select>
+          </div>
           <div><label>git_name</label><input type="text" name="git_name" placeholder="yunhyuk-choi" /></div>
           <div><label>git_email</label><input type="text" name="git_email" placeholder="yh.choi@interxlab.com" /></div>
           <div><label>scope (projects, 쉼표구분)</label><input type="text" name="scope" placeholder="HAN" /></div>
         </div>
         <div class="flex-form">
-          <button id="onboard-btn" type="submit" disabled>사용자 등록 + worker 기동</button>
+          <button id="onboard-btn" type="submit">사용자 등록 (enabled=false)</button>
         </div>
+        <p id="onboard-msg" style="font-size: 0.85em; margin-top: 8px"></p>
       </form>
     </section>
 
-    <!-- 2. 사용자 목록 (Phase 3 — 자리표시자) -->
+    <!-- 2. 사용자 목록 -->
     <section id="users-section">
       <h3>등록 사용자</h3>
-      <div class="todo-box">
-        TODO(Phase 3): <code>GET /api/users</code> 폴링. enabled 토글 →
-        <code>POST /api/users/&lt;u&gt;/enabled</code>, start/stop →
-        <code>POST /api/users/&lt;u&gt;/container</code>(spawner).
-      </div>
       <table id="users-table">
         <thead>
           <tr>
             <th>username</th>
+            <th>display_name</th>
             <th>enabled(자동트리거)</th>
-            <th>autonomy_mode</th>
-            <th>container status</th>
+            <th>autonomy</th>
+            <th>permission</th>
+            <th>container</th>
             <th>동작</th>
           </tr>
         </thead>
-        <tbody>
-          <tr><td colspan="5">(자리표시자 — 구현 예정)</td></tr>
+        <tbody id="users-tbody">
+          <tr><td colspan="7">불러오는 중…</td></tr>
         </tbody>
       </table>
     </section>
 
-    <!-- 3. 잡 현황 (Phase 3~5 — 자리표시자) -->
+    <!-- 3. 잡 현황 -->
     <section id="jobs-section">
       <h3>잡 현황 (전 사용자)</h3>
-      <div class="todo-box">
-        TODO(Phase 3~5): <code>GET /api/jobs</code> 폴링. 재개 →
-        <code>POST /api/resume</code>(scheduler.resume_now → 사용자 큐 재-enqueue).
-      </div>
       <table id="jobs-table">
         <thead>
           <tr>
@@ -194,8 +194,8 @@
             <th>재개</th>
           </tr>
         </thead>
-        <tbody>
-          <tr><td colspan="5">(자리표시자 — queued/running/interrupted/done/failed)</td></tr>
+        <tbody id="jobs-tbody">
+          <tr><td colspan="5">불러오는 중…</td></tr>
         </tbody>
       </table>
     </section>
@@ -286,7 +286,183 @@
         }
       });
 
-      // TODO(Phase 3~5): 온보딩 제출(/onboard) / 사용자 목록·토글 / 잡 현황·재개 배선.
+      // --- [온보딩 제출] (Phase 6) ---
+      const onboardForm = document.getElementById("onboard-form");
+      const onboardBtn = document.getElementById("onboard-btn");
+      const onboardMsg = document.getElementById("onboard-msg");
+
+      onboardBtn.addEventListener("click", async () => {
+        const fd = new FormData(onboardForm);
+        const payload = {};
+        fd.forEach((v, k) => {
+          payload[k] = v;
+        });
+        onboardBtn.disabled = true;
+        onboardMsg.style.color = "#9cdcfe";
+        onboardMsg.innerText = "등록 중…";
+        try {
+          const res = await fetch("/onboard", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          const data = await res.json();
+          if (res.ok) {
+            onboardMsg.style.color = "#4ec9b0";
+            onboardMsg.innerText =
+              "등록 완료: " + data.username + " (enabled=false — 표에서 활성화하세요)";
+            onboardForm.reset();
+            loadUsers();
+          } else {
+            onboardMsg.style.color = "#f48771";
+            onboardMsg.innerText =
+              "실패: " + (data.error || res.status) + (data.missing ? " [" + data.missing.join(", ") + "]" : "");
+          }
+        } catch (e) {
+          onboardMsg.style.color = "#f48771";
+          onboardMsg.innerText = "네트워크 오류: " + e;
+        } finally {
+          onboardBtn.disabled = false;
+        }
+      });
+
+      // --- [사용자 목록/토글] (Phase 6) ---
+      function esc(s) {
+        return String(s == null ? "" : s).replace(
+          /[&<>"']/g,
+          (c) =>
+            ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
+        );
+      }
+
+      async function post(url, body) {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: body ? JSON.stringify(body) : "{}",
+        });
+        let data = {};
+        try {
+          data = await res.json();
+        } catch (e) {
+          /* 204 등 */
+        }
+        return { ok: res.ok, status: res.status, data };
+      }
+
+      async function loadUsers() {
+        const tbody = document.getElementById("users-tbody");
+        try {
+          const res = await fetch("/api/users");
+          const users = await res.json();
+          if (!users.length) {
+            tbody.innerHTML = '<tr><td colspan="7">(등록된 사용자 없음)</td></tr>';
+            return;
+          }
+          tbody.innerHTML = users
+            .map((u) => {
+              const cs = (u.container && u.container.status) || "absent";
+              const en = u.enabled;
+              return (
+                "<tr>" +
+                "<td>" + esc(u.username) + "</td>" +
+                "<td>" + esc(u.display_name) + "</td>" +
+                "<td>" +
+                '<button data-act="' + (en ? "disable" : "enable") + '" data-user="' + esc(u.username) + '">' +
+                (en ? "✅ enabled" : "⛔ disabled") +
+                "</button></td>" +
+                "<td>" +
+                '<select data-act="autonomy" data-user="' + esc(u.username) + '">' +
+                '<option value="A"' + (u.autonomy_mode === "A" ? " selected" : "") + ">A</option>" +
+                '<option value="B"' + (u.autonomy_mode === "B" ? " selected" : "") + ">B</option>" +
+                "</select></td>" +
+                "<td>" + esc(u.permission_level || "bypass") + "</td>" +
+                "<td>" + esc(cs) + "</td>" +
+                "<td>" +
+                '<button data-act="start" data-user="' + esc(u.username) + '">start</button> ' +
+                '<button data-act="stop" data-user="' + esc(u.username) + '">stop</button>' +
+                "</td>" +
+                "</tr>"
+              );
+            })
+            .join("");
+        } catch (e) {
+          tbody.innerHTML = '<tr><td colspan="7">불러오기 실패: ' + esc(e) + "</td></tr>";
+        }
+      }
+
+      document.getElementById("users-tbody").addEventListener("click", async (ev) => {
+        const btn = ev.target.closest("button[data-act]");
+        if (!btn) return;
+        const user = btn.dataset.user;
+        const act = btn.dataset.act;
+        btn.disabled = true;
+        let url = null;
+        if (act === "enable") url = "/users/" + encodeURIComponent(user) + "/enable";
+        else if (act === "disable") url = "/users/" + encodeURIComponent(user) + "/disable";
+        else if (act === "start") url = "/users/" + encodeURIComponent(user) + "/container/start";
+        else if (act === "stop") url = "/users/" + encodeURIComponent(user) + "/container/stop";
+        if (url) {
+          const r = await post(url, {});
+          if (!r.ok) alert("실패(" + r.status + "): " + (r.data.error || r.data.spawn_error || r.data.stop_error || ""));
+          loadUsers();
+        }
+      });
+
+      document.getElementById("users-tbody").addEventListener("change", async (ev) => {
+        const sel = ev.target.closest('select[data-act="autonomy"]');
+        if (!sel) return;
+        const r = await post("/users/" + encodeURIComponent(sel.dataset.user) + "/autonomy", {
+          autonomy_mode: sel.value,
+        });
+        if (!r.ok) alert("autonomy 변경 실패: " + (r.data.error || r.status));
+      });
+
+      // --- [잡 현황/재개] (Phase 6) ---
+      async function loadJobs() {
+        const tbody = document.getElementById("jobs-tbody");
+        try {
+          const res = await fetch("/api/jobs");
+          const jobs = await res.json();
+          if (!jobs.length) {
+            tbody.innerHTML = '<tr><td colspan="5">(잡 없음)</td></tr>';
+            return;
+          }
+          tbody.innerHTML = jobs
+            .map(
+              (j) =>
+                "<tr>" +
+                "<td>" + esc(j.ticket) + "</td>" +
+                "<td>" + esc(j.user) + "</td>" +
+                "<td>" + esc(j.status) + "</td>" +
+                "<td>" + esc(j.reset_at || "") + "</td>" +
+                "<td>" +
+                (j.status === "interrupted"
+                  ? '<button data-act="resume">재개</button>'
+                  : "—") +
+                "</td>" +
+                "</tr>"
+            )
+            .join("");
+        } catch (e) {
+          tbody.innerHTML = '<tr><td colspan="5">불러오기 실패: ' + esc(e) + "</td></tr>";
+        }
+      }
+
+      document.getElementById("jobs-tbody").addEventListener("click", async (ev) => {
+        const btn = ev.target.closest('button[data-act="resume"]');
+        if (!btn) return;
+        btn.disabled = true;
+        // reset_at 도래분 즉시 재적격(수동 tick).
+        await post("/api/resume", {});
+        loadJobs();
+      });
+
+      // 초기 로드 + 주기 폴링.
+      loadUsers();
+      loadJobs();
+      setInterval(loadUsers, 5000);
+      setInterval(loadJobs, 5000);
     </script>
   </body>
 </html>

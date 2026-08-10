@@ -108,6 +108,8 @@ secrets_ref{jira_token,gitlab_token,claude_oauth_token}`. 스키마 예시는
 
 ## ⚠️ 리스크
 
+> 🔒 자율 full-permission 실행 인가 기록·보완 통제는 [SECURITY.md](SECURITY.md) 정본.
+
 - **docker.sock 특권**: central의 spawner가 docker.sock에 접근 = 호스트 root 동치
   (특권 상승 표면). 완화책: docker-socket-proxy로 CONTAINERS/POST 최소 허용
   (`spawn.docker_host=tcp://socket-proxy:2375`), central 비-root, 사내망 한정.

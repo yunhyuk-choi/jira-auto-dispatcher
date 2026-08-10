@@ -1,0 +1,206 @@
+"""온보딩 + 사용자 라이프사이클 관리 API(중앙 전용).
+
+역할:
+    관리 UI(templates/index.html)에서 신규 사용자를 등록(자격증명 수신 →
+    시크릿 파일 저장 → 레지스트리 upsert)하고, enabled(자동 트리거)·autonomy
+    (A|B)·worker 컨테이너(start/stop)를 토글한다.
+
+역할 소속: **central**.
+
+구현 Phase: **Phase 6** (온보딩 + 관리 UI + spawner).
+
+보안:
+    - 온보딩은 **자격증명만** 받는다 — 권한 승인 단계는 없다. worker 컨테이너의
+      사전 인가(bypass)는 스포너가 시스템 레벨로 주입한다(SECURITY.md·spawner.py).
+    - 시크릿 "값"은 secrets.base_dir/<user>/ 에 0600으로 저장하고, 레지스트리엔
+      **참조 경로만**(secrets_ref) 남긴다. 토큰 값은 응답·로그에 절대 싣지 않는다.
+    - upsert 시 enabled=false(안전 기본) — 운영자가 검토 후 명시적으로 활성화한다.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+
+from flask import jsonify, request
+
+from app.registry import UserRecord
+
+log = logging.getLogger("jad.onboarding")
+
+# 온보딩 필수 자격증명 필드.
+_REQUIRED = ("username", "jira_account_id", "jira_email", "jira_token", "claude_setup_token")
+
+# 시크릿 파일명(secrets.base_dir/<user>/ 하위). secrets_ref는 "<user>/<파일명>".
+_SECRET_FILES = {
+    "jira_token": "jira-token",
+    "gitlab_token": "gitlab-token",
+    "claude_setup_token": "claude-oauth-token",
+}
+
+
+def _write_secret(base_dir: str, username: str, filename: str, value: str) -> str:
+    """시크릿 값을 secrets.base_dir/<user>/<filename> 에 0600으로 저장, 참조 반환.
+
+    Returns:
+        secrets.base_dir 상대 참조 경로("<user>/<filename>").
+    """
+    user_dir = os.path.join(base_dir, username)
+    os.makedirs(user_dir, exist_ok=True)
+    path = os.path.join(user_dir, filename)
+    # 0600으로 생성(경합 최소화를 위해 opener로 mode 지정).
+    def _opener(p, flags):
+        return os.open(p, flags, 0o600)
+
+    with open(path, "w", encoding="utf-8", newline="\n", opener=_opener) as fh:
+        fh.write(value)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:  # Windows chmod 미지원 — 무해
+        pass
+    return f"{username}/{filename}"
+
+
+def _parse_scope(raw) -> list:
+    """scope(projects)를 리스트로 정규화(쉼표구분 문자열 또는 리스트)."""
+    if isinstance(raw, list):
+        return [str(x).strip() for x in raw if str(x).strip()]
+    if isinstance(raw, str):
+        return [x.strip() for x in raw.split(",") if x.strip()]
+    return []
+
+
+def register_onboarding_api(app, comps: dict) -> None:
+    """온보딩 + 사용자 라이프사이클 라우트 배선.
+
+    필요한 컴포넌트: registry, spawner, config. (spawner 없으면 컨테이너 조작은 501)
+    """
+    registry = comps["registry"]
+    config = comps["config"]
+    spawner = comps.get("spawner")
+
+    def _spawner_or_501():
+        if spawner is None:
+            return None, (jsonify({"error": "spawner unavailable"}), 501)
+        return spawner, None
+
+    @app.route("/onboard", methods=["POST"])
+    def onboard():
+        data = request.get_json(silent=True) or request.form.to_dict() or {}
+
+        # 1) 필수 필드 검증.
+        missing = [k for k in _REQUIRED if not str(data.get(k, "")).strip()]
+        if missing:
+            return jsonify({"error": "필수 필드 누락", "missing": missing}), 400
+
+        username = str(data["username"]).strip()
+
+        # 2) username 중복 검증.
+        if registry.get(username) is not None:
+            return jsonify({"error": "이미 등록된 username", "username": username}), 409
+
+        base_dir = config.secrets.base_dir or ""
+        if not base_dir:
+            return jsonify({"error": "secrets.base_dir 미설정(서버 구성 오류)"}), 500
+
+        # 3) 시크릿 값을 파일로 저장(0600) → 참조만 레지스트리에.
+        secrets_ref = {}
+        for field, filename in _SECRET_FILES.items():
+            value = str(data.get(field, "")).strip()
+            if value:
+                ref = _write_secret(base_dir, username, filename, value)
+                key = "claude_oauth_token" if field == "claude_setup_token" else field
+                secrets_ref[key] = ref
+
+        # 4) 레코드 조립(enabled=false 안전 기본). 토큰 값은 담지 않는다.
+        record = UserRecord.from_dict(
+            {
+                "username": username,
+                "display_name": str(data.get("display_name", "")).strip() or username,
+                "jira_account_id": str(data.get("jira_account_id", "")).strip(),
+                "jira_email": str(data.get("jira_email", "")).strip(),
+                "enabled": False,  # 안전 기본 — 운영자가 검토 후 활성화
+                "autonomy_mode": str(data.get("autonomy_mode", "B")).strip().upper() or "B",
+                "permission_level": str(data.get("permission_level", "bypass")).strip().lower()
+                or "bypass",
+                "identity": {
+                    "git_name": str(data.get("git_name", "")).strip(),
+                    "git_email": str(data.get("git_email", "")).strip(),
+                },
+                "scope": {"projects": _parse_scope(data.get("scope"))},
+                "container": {"name": f"jad-worker-{username}", "status": "absent"},
+                "secrets_ref": secrets_ref,
+            }
+        )
+        try:
+            registry.upsert(record)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        log.info("사용자 온보딩: %s (enabled=false)", username)  # 토큰 값 로깅 금지
+        return jsonify({"status": "ok", "username": username, "enabled": False}), 201
+
+    @app.route("/users/<username>/enable", methods=["POST"])
+    def user_enable(username):
+        if registry.get(username) is None:
+            return jsonify({"error": "unknown user"}), 404
+        registry.set_enabled(username, True)
+        sp, err = _spawner_or_501()
+        if err:
+            return err
+        try:
+            sp.ensure_worker(registry.get(username))
+        except Exception as exc:  # noqa: BLE001 — 실패해도 enabled 유지, 에러 보고
+            log.exception("enable 시 worker 기동 실패: %s", username)
+            return jsonify({"status": "enabled", "spawn_error": type(exc).__name__}), 502
+        return jsonify({"status": "enabled", "container": "running"})
+
+    @app.route("/users/<username>/disable", methods=["POST"])
+    def user_disable(username):
+        if registry.get(username) is None:
+            return jsonify({"error": "unknown user"}), 404
+        registry.set_enabled(username, False)
+        sp, err = _spawner_or_501()
+        if err:
+            return err
+        try:
+            sp.stop_worker(username)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("disable 시 worker 중지 실패: %s", username)
+            return jsonify({"status": "disabled", "stop_error": type(exc).__name__}), 502
+        return jsonify({"status": "disabled", "container": "stopped"})
+
+    @app.route("/users/<username>/autonomy", methods=["POST"])
+    def user_autonomy(username):
+        rec = registry.get(username)
+        if rec is None:
+            return jsonify({"error": "unknown user"}), 404
+        data = request.get_json(silent=True) or request.form.to_dict() or {}
+        mode = str(data.get("autonomy_mode", "")).strip().upper()
+        if mode not in ("A", "B"):
+            return jsonify({"error": "autonomy_mode는 A|B"}), 400
+        rec.autonomy_mode = mode
+        registry.upsert(rec)
+        return jsonify({"status": "ok", "autonomy_mode": mode})
+
+    @app.route("/users/<username>/container/<action>", methods=["POST"])
+    def user_container(username, action):
+        rec = registry.get(username)
+        if rec is None:
+            return jsonify({"error": "unknown user"}), 404
+        sp, err = _spawner_or_501()
+        if err:
+            return err
+        try:
+            if action == "start":
+                sp.ensure_worker(rec)
+                status = "running"
+            elif action == "stop":
+                sp.stop_worker(username)
+                status = "stopped"
+            else:
+                return jsonify({"error": "action은 start|stop"}), 400
+        except Exception as exc:  # noqa: BLE001
+            log.exception("container %s 실패: %s", action, username)
+            return jsonify({"error": type(exc).__name__}), 502
+        return jsonify({"status": "ok", "container": status})

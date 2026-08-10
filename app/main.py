@@ -60,6 +60,7 @@ def build_central_components(config_path: str = "config/config.yaml") -> dict:
     from app.queue import JobQueue
     from app.registry import Registry
     from app.scheduler import Scheduler
+    from app.spawner import Spawner
 
     cfg = load_config(config_path)
     state.ensure_state_dir()
@@ -74,6 +75,8 @@ def build_central_components(config_path: str = "config/config.yaml") -> dict:
     scheduler = Scheduler(cfg, job_queue)
     dispatcher = Dispatcher(registry, scheduler, worker_secret=cfg.worker_shared_secret)
     poller = Poller(cfg, jira, gate, registry, dispatcher)
+    # 스포너: docker 클라이언트는 지연 생성(최초 컨테이너 조작 시). 사내망 전제.
+    spawner = Spawner(cfg, registry)
 
     components = {
         "config": cfg,
@@ -84,6 +87,7 @@ def build_central_components(config_path: str = "config/config.yaml") -> dict:
         "scheduler": scheduler,
         "dispatcher": dispatcher,
         "poller": poller,
+        "spawner": spawner,
     }
     _components.clear()
     _components.update(components)
@@ -121,26 +125,19 @@ def create_central_app(config_path: str = "config/config.yaml") -> Flask:
     )
 
     _register_admin_api(app, comps)
+
+    # 온보딩 + 사용자 라이프사이클(enable/disable/autonomy/container) — Phase 6.
+    from app.onboarding import register_onboarding_api
+
+    register_onboarding_api(app, comps)
     return app
 
 
 def _register_admin_api(app: Flask, comps: dict) -> None:
-    """온보딩/사용자/잡 현황 관리 API 배선."""
-    from app.registry import UserRecord
-
+    """사용자/잡 현황 조회 관리 API 배선(온보딩·라이프사이클은 onboarding.py)."""
     registry = comps["registry"]
     dispatcher = comps["dispatcher"]
     scheduler = comps["scheduler"]
-
-    @app.route("/onboard", methods=["POST"])
-    def onboard():
-        data = request.get_json(silent=True) or request.form.to_dict() or {}
-        try:
-            registry.upsert(UserRecord.from_dict(data))
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        # 스포너(worker 컨테이너 기동)는 Phase 6 — 여기서는 등록만.
-        return jsonify({"status": "ok", "username": data.get("username")})
 
     @app.route("/api/users", methods=["GET"])
     def api_users():
