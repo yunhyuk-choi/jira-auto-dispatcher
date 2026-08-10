@@ -29,13 +29,19 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import threading
+from typing import Optional
 
 from flask import Flask, jsonify, render_template, request
 
 from app.auth_login import auth_bp
 
 log = logging.getLogger("jad.main")
+
+# worker 컨테이너 내부 Claude 설정 디렉토리(명명 볼륨 jad-<user> 마운트 지점, rw).
+# env CLAUDE_CONFIG_DIR로 오버라이드 가능(기본 /home/app/.claude).
+DEFAULT_CLAUDE_CONFIG_DIR = "/home/app/.claude"
 
 # 템플릿·정적파일은 레포 루트(app/ 의 부모)에 있다. main.py가 app/ 패키지
 # 안이라 Flask 기본값(app/templates·app/static)은 빗나간다 → cwd 무관 절대경로 고정.
@@ -236,6 +242,64 @@ def create_worker_app() -> Flask:
     return app
 
 
+def copy_worker_settings(env=None, *, copyfile=None, makedirs=None) -> Optional[str]:
+    """worker 부팅 시 사전 인가 settings.json을 명명 볼륨으로 복사(멱등).
+
+    두 번째 spawn 버그 픽스: 명명 볼륨(``jad-<user>``)이 ``/home/app/.claude`` 를
+    덮으므로 그 볼륨 마운트 *하위 파일 경로*(``/home/app/.claude/settings.json``)에
+    settings.json을 다시 **파일 바인드**하면 runc가 거부한다("not a directory: Are you
+    trying to mount a directory onto a file"). 대신 per-user 시크릿 디렉토리에 마운트된
+    소스 ``${SECRETS_DIR}/${DISPATCH_USER}/claude-settings.json`` 를
+    ``${CLAUDE_CONFIG_DIR}/settings.json`` 으로 **복사**한다.
+
+    이 복사가 있어야 claude가 ``$CLAUDE_CONFIG_DIR/settings.json`` (bypass 사전 인가:
+    ``permissions.defaultMode=bypassPermissions`` · ``skipDangerousModePermissionPrompt``
+    등)을 읽어 헤드리스로 **승인 프롬프트 없이** 자율 실행된다.
+
+    - ``~/.claude`` 는 rw 명명 볼륨이라 uid 1000이 쓸 수 있다. dest 디렉토리가 없으면 생성.
+    - 소스가 없으면 **경고 로그만** 남기고 넘어간다(치명 아님 — 헤드리스라도 죽지 않게).
+    - 덮어쓰기(멱등): 매 부팅마다 최신 소스로 갱신.
+
+    Args:
+        env: 환경 dict(기본 ``os.environ``). ``SECRETS_DIR`` · ``DISPATCH_USER`` ·
+            ``CLAUDE_CONFIG_DIR`` 참조.
+        copyfile: 파일 복사 함수 주입(테스트용, 기본 ``shutil.copyfile``).
+        makedirs: 디렉토리 생성 함수 주입(테스트용, 기본 ``os.makedirs``).
+
+    Returns:
+        복사가 수행됐으면 dest 경로, 아니면 ``None``.
+    """
+    env = os.environ if env is None else env
+    copyfile = copyfile or shutil.copyfile
+    makedirs = makedirs or os.makedirs
+
+    config_dir = env.get("CLAUDE_CONFIG_DIR") or DEFAULT_CLAUDE_CONFIG_DIR
+    secrets_dir = env.get("SECRETS_DIR") or ""
+    user = env.get("DISPATCH_USER") or ""
+
+    if not secrets_dir or not user:
+        log.warning(
+            "worker 사전 인가 settings 복사 생략 — SECRETS_DIR/DISPATCH_USER 미설정."
+        )
+        return None
+
+    src = os.path.join(secrets_dir, user, "claude-settings.json")
+    dest = os.path.join(config_dir, "settings.json")
+
+    if not os.path.exists(src):
+        log.warning(
+            "worker 사전 인가 settings 소스 없음(%s) — 복사 생략. 헤드리스 승인 "
+            "프롬프트가 뜰 수 있음(치명 아님).",
+            src,
+        )
+        return None
+
+    makedirs(config_dir, exist_ok=True)
+    copyfile(src, dest)  # 덮어쓰기(멱등) — 매 부팅마다 최신 사전 인가 반영.
+    log.info("worker 사전 인가 settings 복사 완료 → %s", dest)
+    return dest
+
+
 def run_worker(
     config_path: str = "config/config.yaml",
     *,
@@ -258,6 +322,14 @@ def run_worker(
 
     cfg = config if config is not None else load_config(config_path)
     loop = worker_loop_fn or worker_mod.worker_loop
+
+    # worker_loop 기동 전, 사전 인가 settings.json을 명명 볼륨(~/.claude)으로 복사한다.
+    # (두 번째 spawn 버그 픽스: settings.json 파일 바인드 제거 → 부팅 복사로 대체.)
+    # 소스가 없어도 죽지 않는다(경고만) — 헤드리스 생존 우선.
+    try:
+        copy_worker_settings()
+    except Exception:  # noqa: BLE001 — 복사 실패가 worker 기동을 막지 않게 격리.
+        log.exception("worker 사전 인가 settings 복사 중 오류(무시하고 계속)")
 
     stop = threading.Event()
     t = threading.Thread(

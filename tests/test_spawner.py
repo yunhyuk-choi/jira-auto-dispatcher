@@ -129,10 +129,11 @@ def test_ensure_worker_run_args(tmp_path, isolated_state):
 
     vols = kwargs["volumes"]
     assert vols["jad-yh.choi"] == {"bind": "/home/app/.claude", "mode": "rw"}
-    # 사전 인가 settings.json은 read-only 바인드.
+    # 사전 인가 settings.json은 더 이상 파일 바인드하지 않는다(두 번째 spawn 버그 픽스 —
+    # 명명 볼륨 하위 파일 경로에 바인드하면 runc가 거부). worker 부팅 시 복사로 대체.
     settings_binds = [v for v in vols.values() if v["bind"] == SETTINGS_PATH_IN_CONTAINER]
-    assert settings_binds and settings_binds[0]["mode"] == "ro"
-    # per-user 시크릿 디렉토리는 read-only.
+    assert settings_binds == []
+    # per-user 시크릿 디렉토리는 read-only(claude-settings.json도 여기 포함).
     secret_binds = [v for v in vols.values() if v["bind"] == "/run/secrets/yh.choi"]
     assert secret_binds and secret_binds[0]["mode"] == "ro"
 
@@ -292,11 +293,9 @@ def test_build_volumes_uses_host_paths_when_host_deploy_dir_set(tmp_path, isolat
     assert vols[host + "/config"] == {"bind": CONFIG_DIR_IN_CONTAINER, "mode": "ro"}
     # per-user 시크릿: 호스트 경로 → /run/secrets/<user> (ro).
     assert vols[host + "/secrets/yh.choi"] == {"bind": "/run/secrets/yh.choi", "mode": "ro"}
-    # settings.json: 호스트 경로 → 컨테이너 settings.json (ro).
-    assert vols[host + "/secrets/yh.choi/claude-settings.json"] == {
-        "bind": SETTINGS_PATH_IN_CONTAINER,
-        "mode": "ro",
-    }
+    # settings.json은 더 이상 파일 바인드하지 않는다(두 번째 spawn 버그 픽스).
+    assert host + "/secrets/yh.choi/claude-settings.json" not in vols
+    assert all(v["bind"] != SETTINGS_PATH_IN_CONTAINER for v in vols.values())
     # 명명 볼륨은 호스트 경로 무관 — 그대로.
     assert vols["jad-yh.choi"] == {"bind": "/home/app/.claude", "mode": "rw"}
     # central 내부 경로(settings_path·base_dir/<user>)는 worker 바인드 source로 쓰이지 않는다.
@@ -314,8 +313,9 @@ def test_build_volumes_fallback_warns_and_uses_direct_paths(tmp_path, isolated_s
         vols = sp.build_volumes(_user(), settings_path)
     # 경고 로그.
     assert any("host_deploy_dir" in r.getMessage() for r in caplog.records)
-    # 직접 경로 폴백: settings_path·base_dir/<user> 를 source로.
-    assert settings_path in vols
+    # 직접 경로 폴백: base_dir/<user> 를 source로. settings.json은 바인드 안 함.
+    assert settings_path not in vols
+    assert all(v["bind"] != SETTINGS_PATH_IN_CONTAINER for v in vols.values())
     assert os.path.join(base, "yh.choi") in vols
     # config 마운트는 폴백에서도 포함.
     config_binds = [v for v in vols.values() if v["bind"] == CONFIG_DIR_IN_CONTAINER]
@@ -331,3 +331,32 @@ def test_build_volumes_config_mount_always_present(tmp_path, isolated_state):
         vols = sp.build_volumes(_user(), settings_path)
         binds = [v["bind"] for v in vols.values()]
         assert CONFIG_DIR_IN_CONTAINER in binds
+
+
+def test_build_volumes_no_settings_file_bind(tmp_path, isolated_state):
+    """두 번째 spawn 버그 픽스: settings.json을 명명 볼륨 하위 파일 경로에 바인드하면
+    runc가 거부한다 → 파일 바인드는 없어야 하고, config·per-user 시크릿 dir·claude
+    명명 볼륨 3개만 남는다(양쪽 host_deploy_dir 모드).
+    """
+    base = str(tmp_path / "secrets")
+    for cfg in (_cfg(base), _cfg(base, host_deploy_dir="/host/deploy")):
+        sp = Spawner(cfg, Registry(), client=_client_absent())
+        settings_path = sp.write_settings("yh.choi", "bypass")
+        vols = sp.build_volumes(_user(), settings_path)
+        # settings.json 파일 바인드가 어느 source·bind로도 존재하지 않는다.
+        assert all(v["bind"] != SETTINGS_PATH_IN_CONTAINER for v in vols.values())
+        assert not any(
+            str(src).endswith("claude-settings.json") for src in vols.keys()
+        )
+        # 정확히 config·claude 명명 볼륨·per-user 시크릿 dir 3개만.
+        binds = sorted(v["bind"] for v in vols.values())
+        assert binds == sorted(
+            [CONFIG_DIR_IN_CONTAINER, "/home/app/.claude", "/run/secrets/yh.choi"]
+        )
+
+
+def test_build_volumes_settings_path_optional(tmp_path, isolated_state):
+    """settings_path 인자는 하위호환(무시)이라 없이도 호출 가능하고 결과가 같다."""
+    base = str(tmp_path / "secrets")
+    sp = Spawner(_cfg(base, host_deploy_dir="/host/deploy"), Registry(), client=_client_absent())
+    assert sp.build_volumes(_user()) == sp.build_volumes(_user(), "ignored/path")

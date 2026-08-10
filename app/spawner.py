@@ -238,8 +238,8 @@ class Spawner:
 
         return env
 
-    def build_volumes(self, user, settings_path: str) -> dict:
-        """컨테이너 volumes dict 조립(config + 영속 .claude + 사전 인가 settings + per-user 시크릿 ro).
+    def build_volumes(self, user, settings_path: Optional[str] = None) -> dict:
+        """컨테이너 volumes dict 조립(config + 영속 .claude + per-user 시크릿 ro).
 
         ⚠️ sibling container 문제: central이 Docker SDK(socket-proxy 경유)로 worker를
         띄울 때 바인드 마운트의 **source 경로는 호스트 docker 데몬이 해석**한다(central
@@ -253,13 +253,26 @@ class Spawner:
         - ``<host_deploy_dir>/config`` → ``/app/config`` (ro)  ← 크래시 픽스. worker가
           config/config.yaml 을 읽어 ConfigError 크래시 루프를 벗어난다.
         - ``<host_deploy_dir>/secrets/<user>`` → ``/run/secrets/<user>`` (ro).
-        - ``<host_deploy_dir>/secrets/<user>/claude-settings.json`` →
-          ``/home/app/.claude/settings.json`` (ro).
+          이 디렉토리에 ``claude-settings.json`` 이 이미 포함돼 컨테이너 내부에서는
+          ``/run/secrets/<user>/claude-settings.json`` 로 접근 가능하다.
         - ``jad-<user>`` 명명 볼륨 → ``/home/app/.claude`` (rw). 볼륨명은 호스트경로 무관.
+
+        ⚠️ 사전 인가 ``settings.json`` 은 **파일 바인드하지 않는다**(두 번째 spawn 버그
+        픽스). 명명 볼륨(``jad-<user>``)이 이미 ``/home/app/.claude`` 를 덮어쓰므로 그
+        볼륨 마운트 *하위 파일 경로*(``/home/app/.claude/settings.json``)에 파일을 다시
+        바인드하려 하면 runc가 거부한다("not a directory: Are you trying to mount a
+        directory onto a file"). 대신 worker 부팅 시
+        ``/run/secrets/<user>/claude-settings.json`` → ``$CLAUDE_CONFIG_DIR/settings.json``
+        으로 **복사**한다(:func:`app.main.copy_worker_settings`).
 
         ``host_deploy_dir`` 가 비어 있으면(로컬 개발 등 — 호스트==central 파일시스템)
         직접 경로로 폴백하고 경고를 남긴다.
+
+        Args:
+            settings_path: 하위호환용(무시됨) — settings.json은 더 이상 바인드되지 않고
+                per-user 시크릿 디렉토리 안에서 worker가 부팅 시 복사한다.
         """
+        del settings_path  # 더 이상 바인드 source로 쓰지 않음(하위호환 시그니처 유지).
         cfg = self.config
         username = user.username
         base_dir = getattr(getattr(cfg, "secrets", None), "base_dir", "") or ""
@@ -270,9 +283,8 @@ class Spawner:
             host_secrets = posixpath.join(host_deploy_dir, "secrets")
             config_src = posixpath.join(host_deploy_dir, "config")
             user_secret_src = posixpath.join(host_secrets, username)
-            settings_src = posixpath.join(host_secrets, username, "claude-settings.json")
         else:
-            # 폴백(로컬 개발): 호스트==central 파일시스템 전제. base_dir·settings_path·
+            # 폴백(로컬 개발): 호스트==central 파일시스템 전제. base_dir·
             # 로컬 config 디렉토리를 직접 source로 쓴다.
             log.warning(
                 "spawn.host_deploy_dir 미설정 — worker 바인드에 직접 경로 폴백. "
@@ -281,16 +293,14 @@ class Spawner:
             )
             config_src = os.path.abspath("config")
             user_secret_src = os.path.join(base_dir, username)
-            settings_src = settings_path
 
         volumes: dict = {
             # config (ro) — 항상 포함(크래시 픽스: worker가 /app/config/config.yaml 을 읽음).
             config_src: {"bind": CONFIG_DIR_IN_CONTAINER, "mode": "ro"},
             # 사용자 ~/.claude 영속(인증/세션).
             self.volume_name(username): {"bind": CLAUDE_CONFIG_DIR, "mode": "rw"},
-            # 사전 인가 settings.json (read-only — 컨테이너가 못 바꾼다).
-            settings_src: {"bind": SETTINGS_PATH_IN_CONTAINER, "mode": "ro"},
-            # per-user 시크릿 디렉토리(값) read-only. 다른 사용자 시크릿은 안 보인다.
+            # per-user 시크릿 디렉토리(값 + claude-settings.json) read-only.
+            # 다른 사용자 시크릿은 안 보인다.
             user_secret_src: {"bind": posixpath.join(SECRETS_MOUNT, username), "mode": "ro"},
         }
         return volumes

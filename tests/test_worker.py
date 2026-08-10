@@ -166,3 +166,92 @@ def test_run_worker_starts_loop_thread_serve_false():
     assert seen["cfg"] is cfg
     assert seen["stop"] is not None      # stop 이벤트 주입
     assert not t.is_alive()
+
+
+# --- copy_worker_settings (두 번째 spawn 버그 픽스: 파일 바인드 → 부팅 복사) ---------
+
+
+def test_copy_worker_settings_copies_when_source_present(tmp_path):
+    secrets = tmp_path / "secrets"
+    src = secrets / "u1" / "claude-settings.json"
+    src.parent.mkdir(parents=True)
+    src.write_text('{"permissions": {"defaultMode": "bypassPermissions"}}', encoding="utf-8")
+    config_dir = tmp_path / "claude"
+
+    env = {
+        "SECRETS_DIR": str(secrets),
+        "DISPATCH_USER": "u1",
+        "CLAUDE_CONFIG_DIR": str(config_dir),
+    }
+    dest = main.copy_worker_settings(env=env)
+    assert dest == str(config_dir / "settings.json")
+    # dest 파일이 실제로 만들어졌고 내용이 소스와 동일(멱등 복사).
+    assert (config_dir / "settings.json").read_text(encoding="utf-8") == src.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_copy_worker_settings_idempotent_overwrites(tmp_path):
+    secrets = tmp_path / "secrets"
+    src = secrets / "u1" / "claude-settings.json"
+    src.parent.mkdir(parents=True)
+    src.write_text("V1", encoding="utf-8")
+    config_dir = tmp_path / "claude"
+    config_dir.mkdir()
+    # 이미 낡은 dest가 존재해도 최신 소스로 덮어쓴다.
+    (config_dir / "settings.json").write_text("OLD", encoding="utf-8")
+
+    env = {"SECRETS_DIR": str(secrets), "DISPATCH_USER": "u1",
+           "CLAUDE_CONFIG_DIR": str(config_dir)}
+    # 두 번 호출해도 예외 없이 최신 내용으로 수렴(멱등).
+    main.copy_worker_settings(env=env)
+    src.write_text("V2", encoding="utf-8")
+    dest = main.copy_worker_settings(env=env)
+    assert (config_dir / "settings.json").read_text(encoding="utf-8") == "V2"
+    assert dest == str(config_dir / "settings.json")
+
+
+def test_copy_worker_settings_missing_source_warns_no_exception(tmp_path, caplog):
+    import logging
+
+    secrets = tmp_path / "secrets"  # 존재하지 않는 소스
+    config_dir = tmp_path / "claude"
+    env = {"SECRETS_DIR": str(secrets), "DISPATCH_USER": "u1",
+           "CLAUDE_CONFIG_DIR": str(config_dir)}
+    with caplog.at_level(logging.WARNING, logger="jad.main"):
+        dest = main.copy_worker_settings(env=env)
+    assert dest is None                       # 복사 없음
+    assert not (config_dir / "settings.json").exists()
+    assert any("소스 없음" in r.getMessage() for r in caplog.records)
+
+
+def test_copy_worker_settings_missing_env_warns_no_exception(caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="jad.main"):
+        dest = main.copy_worker_settings(env={})   # SECRETS_DIR/DISPATCH_USER 미설정
+    assert dest is None
+    assert any("SECRETS_DIR" in r.getMessage() for r in caplog.records)
+
+
+def test_copy_worker_settings_default_config_dir_and_injection(tmp_path):
+    """CLAUDE_CONFIG_DIR 미설정 시 기본 상수 사용 + copyfile/makedirs 주입 검증."""
+    secrets = tmp_path / "secrets"
+    src = secrets / "u1" / "claude-settings.json"
+    src.parent.mkdir(parents=True)
+    src.write_text("X", encoding="utf-8")
+
+    made = []
+    copied = []
+    env = {"SECRETS_DIR": str(secrets), "DISPATCH_USER": "u1"}  # CLAUDE_CONFIG_DIR 없음
+    dest = main.copy_worker_settings(
+        env=env,
+        copyfile=lambda s, d: copied.append((s, d)),
+        makedirs=lambda p, exist_ok=False: made.append((p, exist_ok)),
+    )
+    import os as _os
+
+    expected_dest = _os.path.join(main.DEFAULT_CLAUDE_CONFIG_DIR, "settings.json")
+    assert dest == expected_dest
+    assert made == [(main.DEFAULT_CLAUDE_CONFIG_DIR, True)]
+    assert copied == [(str(src), expected_dest)]
