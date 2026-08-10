@@ -62,11 +62,14 @@ class Scheduler:
         config,
         job_queue: JobQueue,
         now_provider: Optional[Callable[[], datetime]] = None,
+        gate=None,
     ) -> None:
         self.config = config
         self.jobs = job_queue
         self._lock = threading.RLock()
         self._now = now_provider or (lambda: datetime.now(timezone.utc))
+        # dedup 게이트(취소/재오픈 시 dedup 해제 — §10.4). 없으면 no-op(테스트 격리).
+        self.gate = gate
 
         run = getattr(config, "run", None)
         self.global_cap = int(getattr(run, "global_concurrency", 3)) if run else 3
@@ -136,9 +139,13 @@ class Scheduler:
     def report(self, job_id: str, status: str, **fields) -> list:
         """채널 F 통합 라우터(dispatch.report_status가 사용).
 
-        terminal → on_complete, interrupted → on_interrupt, 그 외 → on_progress.
+        cancelled → confirm_cancelled(락+dedup 해제), terminal → on_complete,
+        interrupted → on_interrupt, 그 외 → on_progress.
         """
         norm = q.normalize_status(status)
+        # cancelled는 TERMINAL에 속하지만 dedup 해제까지 해야 하므로 먼저 분기.
+        if norm == q.CANCELLED:
+            return self.confirm_cancelled(job_id, **fields)
         if norm in q.TERMINAL_STATUSES:
             return self.on_complete(job_id, norm, **fields)
         if norm == q.INTERRUPTED:
@@ -146,6 +153,69 @@ class Scheduler:
             return self.on_interrupt(job_id, reset_at=reset_at, **fields)
         self.on_progress(job_id, **fields)
         return []
+
+    # ------------------------------------------------------------------
+    # 취소 / 재오픈 (RECURSIVE-DISPATCH §10)
+    # ------------------------------------------------------------------
+
+    def _release_dedup(self, ticket: str) -> None:
+        """dedup 게이트에서 티켓 claim 해제(재오픈 대비). 게이트 없으면 no-op."""
+        if self.gate is not None:
+            self.gate.release(ticket)
+
+    def cancel_job(self, job_id: str) -> list:
+        """취소 신호 반영(§10.3).
+
+        - 이미 종결(done/failed/cancelled): no-op.
+        - 실행 중(running/cancelling): `cancelling` 표시 + worker 취소 플래그 세팅.
+          레포 락은 **유지**한다(worker의 cancelled 회신을 기다린다). tick 안 함.
+        - 큐 대기(queued/interrupted): 즉시 `cancelled`로 드롭 + dedup 해제 → tick
+          (막혀 있던 다음 잡을 dispatch할 수 있음).
+        """
+        do_tick = False
+        with self._lock:
+            job = self.jobs.get(job_id)
+            if job is None:
+                raise KeyError(f"알 수 없는 잡: {job_id}")
+            if job.status in q.TERMINAL_STATUSES:
+                return []
+            if job.status in q.ACTIVE_STATUSES:
+                # 실행 중 → worker에 취소 위임(회신 대기). 레포 락 유지.
+                self.jobs.set_status(job_id, q.CANCELLING, cancel_requested=True)
+                return []
+            # 큐 대기(락 미점유) → 즉시 드롭 + dedup 해제.
+            self.jobs.set_status(job_id, q.CANCELLED, cancel_requested=False)
+            self._release_dedup(job_id)
+            do_tick = True
+        return self.tick() if do_tick else []
+
+    def confirm_cancelled(self, job_id: str, **fields) -> list:
+        """worker의 cancelled 회신 확정(§10.4) — 락 해제 + dedup 해제 → tick.
+
+        레포 락은 상태의 함수이므로 cancelled로 바꾸면 자동 해제된다. dedup까지
+        풀어야 재오픈(취소됨→해야할일) 때 같은 티켓을 다시 claim할 수 있다.
+        """
+        with self._lock:
+            if self.jobs.get(job_id) is None:
+                raise KeyError(f"알 수 없는 잡: {job_id}")
+            self.jobs.set_status(job_id, q.CANCELLED, cancel_requested=False, **fields)
+            self._release_dedup(job_id)
+        return self.tick()
+
+    def is_cancel_requested(self, job_id: str) -> bool:
+        """worker control 폴링용 — 이 잡에 취소가 요청됐는지."""
+        job = self.jobs.get(job_id)
+        return bool(job and job.cancel_requested)
+
+    def reopen(self, job: Job) -> list:
+        """취소된 티켓을 재작업으로 재-enqueue(§10.4) → tick.
+
+        호출부(status_watcher)가 gate.claim으로 dedup 재확보한 뒤 부른다. 잡 슬롯을
+        새 실행으로 초기화(queued)하고 스케줄링에 다시 태운다.
+        """
+        with self._lock:
+            self.jobs.reopen(job)
+        return self.tick()
 
     def next_for_user(self, user: str) -> Optional[Job]:
         """그 user에게 dispatch된(running) 잡 1개 반환(worker GET /next 용).
@@ -164,22 +234,27 @@ class Scheduler:
     # ------------------------------------------------------------------
 
     def _snapshot(self) -> dict:
-        """현재 running 잡으로부터 락/카운트 상태를 재계산."""
-        running = [j for j in self.jobs.list_jobs() if j.status == q.RUNNING]
+        """현재 활성 잡으로부터 락/카운트 상태를 재계산.
+
+        활성 = running + cancelling. cancelling 잡은 worker가 아직 abort/롤백 중이라
+        레포를 붙들고 있으므로 락·cap 점유로 센다(§10.3) — 회신(cancelled) 전까지는
+        같은 레포에 다른 잡이 들어오지 못한다.
+        """
+        active = [j for j in self.jobs.list_jobs() if j.status in q.ACTIVE_STATUSES]
         locked_repos: set = set()
         global_lock = False
-        for j in running:
+        for j in active:
             if j.target_repos:
                 locked_repos.update(j.target_repos)
             else:
-                # 미해석 잡이 running = 전역 직렬 점유.
+                # 미해석 잡이 활성 = 전역 직렬 점유.
                 global_lock = True
         return {
-            "running": running,
-            "running_count": len(running),
+            "running": active,
+            "running_count": len(active),
             "locked_repos": locked_repos,
             "global_lock": global_lock,
-            "per_user_running": Counter(j.user for j in running),
+            "per_user_running": Counter(j.user for j in active),
         }
 
     def _eligible_now(self, job: Job) -> bool:

@@ -61,6 +61,7 @@ def build_central_components(config_path: str = "config/config.yaml") -> dict:
     from app.registry import Registry
     from app.scheduler import Scheduler
     from app.spawner import Spawner
+    from app.status_watcher import StatusWatcher
 
     cfg = load_config(config_path)
     state.ensure_state_dir()
@@ -72,9 +73,12 @@ def build_central_components(config_path: str = "config/config.yaml") -> dict:
     registry = Registry()
     job_queue = JobQueue()
     gate = DedupGate()
-    scheduler = Scheduler(cfg, job_queue)
+    # 스케줄러에 gate 주입 — 취소/재오픈 시 dedup 해제(RECURSIVE-DISPATCH §10.4).
+    scheduler = Scheduler(cfg, job_queue, gate=gate)
     dispatcher = Dispatcher(registry, scheduler, worker_secret=cfg.worker_shared_secret)
     poller = Poller(cfg, jira, gate, registry, dispatcher)
+    # 상태 감시축(취소/외부완료/재오픈) — 전진축 폴러와 별개 루프(§10.2).
+    status_watcher = StatusWatcher(cfg, jira, gate, registry, dispatcher)
     # 스포너: docker 클라이언트는 지연 생성(최초 컨테이너 조작 시). 사내망 전제.
     spawner = Spawner(cfg, registry)
 
@@ -87,6 +91,7 @@ def build_central_components(config_path: str = "config/config.yaml") -> dict:
         "scheduler": scheduler,
         "dispatcher": dispatcher,
         "poller": poller,
+        "status_watcher": status_watcher,
         "spawner": spawner,
     }
     _components.clear()
@@ -165,7 +170,8 @@ def _register_admin_api(app: Flask, comps: dict) -> None:
 def start_central_background(tick_interval_sec: int = 30) -> None:
     """central 백그라운드 — poller 스레드 + 스케줄러 tick 루프(데몬).
 
-    - Poller.run_forever: Jira 폴링 → claim → 매핑 → enqueue.
+    - Poller.run_forever: Jira 폴링(전진축) → claim → 매핑 → enqueue.
+    - StatusWatcher.run_forever: 상태 감시축 → 취소/외부완료/재오픈(§10).
     - scheduler tick 루프: interrupted+reset_at 도래분을 주기적으로 재-dispatch
       (완료-구동 외의 시간 기반 재적격 반영).
     """
@@ -174,9 +180,15 @@ def start_central_background(tick_interval_sec: int = 30) -> None:
 
     poller = _components["poller"]
     scheduler = _components["scheduler"]
+    status_watcher = _components["status_watcher"]
 
     t_poll = threading.Thread(target=poller.run_forever, name="jad-poller", daemon=True)
     t_poll.start()
+
+    t_watch = threading.Thread(
+        target=status_watcher.run_forever, name="jad-status-watcher", daemon=True
+    )
+    t_watch.start()
 
     stop = threading.Event()
 
@@ -191,7 +203,9 @@ def start_central_background(tick_interval_sec: int = 30) -> None:
     t_tick = threading.Thread(target=_tick_loop, name="jad-scheduler-tick", daemon=True)
     t_tick.start()
 
-    _components["_threads"] = {"poller": t_poll, "tick": t_tick, "tick_stop": stop}
+    _components["_threads"] = {
+        "poller": t_poll, "status_watcher": t_watch, "tick": t_tick, "tick_stop": stop,
+    }
 
 
 # =========================================================================

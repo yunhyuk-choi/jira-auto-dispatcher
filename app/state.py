@@ -33,6 +33,8 @@ _state_dir = _DEFAULT_STATE_DIR
 # 파일 basename(디렉토리는 _state_dir로 조합).
 JOBS_NAME = "jobs.json"
 WATERMARK_NAME = "watermark.json"
+CANCEL_WATERMARK_NAME = "cancel_watermark.json"  # 취소 감시축 updated 커서(§10.2)
+REOPEN_WATERMARK_NAME = "reopen_watermark.json"  # 재오픈 감시축 updated 커서(§10.2)
 DEDUP_NAME = "dedup.json"
 REGISTRY_NAME = "registry.json"
 SECRETS_SUBDIR = "secrets"  # 사용자 시크릿(참조 대상). gitignore.
@@ -144,6 +146,26 @@ def load_watermark() -> Any:
 def save_watermark(value: Any) -> None:
     """폴러 high-watermark 저장(원자적)."""
     atomic_write_json(_path(WATERMARK_NAME), value)
+
+
+def load_cancel_watermark() -> Any:
+    """취소 감시축 updated-watermark 로드(§10.2; 없으면 None)."""
+    return load_json(_path(CANCEL_WATERMARK_NAME), None)
+
+
+def save_cancel_watermark(value: Any) -> None:
+    """취소 감시축 updated-watermark 저장(원자적)."""
+    atomic_write_json(_path(CANCEL_WATERMARK_NAME), value)
+
+
+def load_reopen_watermark() -> Any:
+    """재오픈 감시축 updated-watermark 로드(§10.2; 없으면 None)."""
+    return load_json(_path(REOPEN_WATERMARK_NAME), None)
+
+
+def save_reopen_watermark(value: Any) -> None:
+    """재오픈 감시축 updated-watermark 저장(원자적)."""
+    atomic_write_json(_path(REOPEN_WATERMARK_NAME), value)
 
 
 def load_registry() -> Any:

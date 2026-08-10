@@ -66,6 +66,10 @@ SESSION_NAMESPACE = uuid.UUID("7d3e0a2c-2b6f-5e14-9c3a-1f5b8d0e4a67")
 STATUS_DONE = "done"
 STATUS_FAILED = "failed"
 STATUS_INTERRUPTED = "interrupted"
+STATUS_CANCELLED = "cancelled"      # 취소 신호로 abort된 실행(§10.3) — worker가 롤백 후 회신
+
+# 취소 시 subprocess terminate → kill 대기 상한(초).
+TERMINATE_GRACE_SEC = 5
 
 # stream-json 이벤트에서 session_id가 담길 수 있는 후보 키(버전차 방어).
 _SESSION_ID_KEYS = ("session_id", "sessionId", "sessionID", "session")
@@ -573,21 +577,54 @@ def _summarize_event(event: dict) -> Optional[str]:
     return None
 
 
-def _consume(proc, secret_values: list) -> AgentResult:
+def _terminate_proc(proc) -> None:
+    """실행 중 subprocess를 종료(terminate → 유예 후 kill). best-effort."""
+    try:
+        proc.terminate()
+    except Exception:  # noqa: BLE001 — 이미 죽었거나 대역 객체일 수 있음
+        pass
+    try:
+        proc.wait(timeout=TERMINATE_GRACE_SEC)
+        return
+    except TypeError:
+        # wait()가 timeout 인자를 받지 않는 대역/구현.
+        try:
+            proc.wait()
+            return
+        except Exception:  # noqa: BLE001
+            pass
+    except Exception:  # noqa: BLE001 — 유예 초과 등
+        pass
+    try:
+        proc.kill()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _consume(proc, secret_values: list, *, cancel_check: Optional[Callable[[], bool]] = None) -> AgentResult:
     """프로세스 stdout(라인 이터러블)을 소비해 AgentResult로 환원.
 
     proc는 ``.stdout``(라인 이터러블) + ``.wait()``/``.returncode`` 를 갖는 객체.
+
+    ``cancel_check``가 주어지면 **이벤트 라인 단위**로 취소 여부를 폴링한다(§10.4).
+    True면 subprocess를 종료하고 ``STATUS_CANCELLED`` 결과를 반환한다(롤백/회신은
+    호출부인 worker가 담당).
     """
     session_id: Optional[str] = None
     mr_url: Optional[str] = None
     reset_at: Optional[str] = None
     limit_hit = False
     error_seen = False
+    cancelled = False
     summary_parts: list = []
 
     stdout = getattr(proc, "stdout", None)
     if stdout is not None:
         for raw in stdout:
+            # 취소 폴링(이벤트마다). 신호 감지 시 즉시 종료.
+            if cancel_check is not None and cancel_check():
+                cancelled = True
+                break
             event = parse_stream_event(raw)
             if event is None:
                 continue
@@ -609,6 +646,18 @@ def _consume(proc, secret_values: list) -> AgentResult:
             line = _summarize_event(event)
             if line:
                 summary_parts.append(line)
+
+    if cancelled:
+        _terminate_proc(proc)
+        summary_parts.append("[cancelled] 취소 신호로 실행 중단")
+        summary = _redact("\n".join(summary_parts)[-_SUMMARY_MAX_CHARS:], secret_values)
+        return AgentResult(
+            status=STATUS_CANCELLED,
+            session_id=session_id,
+            mr_url=mr_url,
+            log_summary=summary,
+            returncode=getattr(proc, "returncode", None),
+        )
 
     rc = proc.wait()
 
@@ -638,8 +687,12 @@ def run_job(
     *,
     popen_factory: Optional[Callable] = None,
     base_env: Optional[dict] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> AgentResult:
-    """잡 1건을 사용자 정체성으로 신규 실행하고 AgentResult를 반환."""
+    """잡 1건을 사용자 정체성으로 신규 실행하고 AgentResult를 반환.
+
+    ``cancel_check``가 주어지면 실행 중 취소 신호를 폴링해 abort할 수 있다(§10.4).
+    """
     cmd = build_command(job, config, resume=False)
     env, secret_values = build_env(job, creds, config, base_env=base_env)
     cwd = getattr(getattr(config, "run", None), "orchestrator_repo", "") or ""
@@ -652,7 +705,7 @@ def run_job(
             log_summary=_redact(f"[spawn-error] {exc}", secret_values),
             returncode=None,
         )
-    return _consume(proc, secret_values)
+    return _consume(proc, secret_values, cancel_check=cancel_check)
 
 
 def resume_job(
@@ -664,6 +717,7 @@ def resume_job(
     from_pr: Optional[Any] = None,
     popen_factory: Optional[Callable] = None,
     base_env: Optional[dict] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> AgentResult:
     """중단된 잡을 ``--resume``(+옵션 ``--from-pr``)로 재개 실행."""
     cmd = build_command(job, config, resume=True, session_id=session_id, from_pr=from_pr)
@@ -679,7 +733,7 @@ def resume_job(
             log_summary=_redact(f"[spawn-error] {exc}", secret_values),
             returncode=None,
         )
-    result = _consume(proc, secret_values)
+    result = _consume(proc, secret_values, cancel_check=cancel_check)
     if not result.session_id:
         result.session_id = session_id
     return result

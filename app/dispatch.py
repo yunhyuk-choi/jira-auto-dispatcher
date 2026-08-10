@@ -16,9 +16,13 @@ HTTP 계약(dispatch_bp, main.py가 등록):
         반환. 없으면 204. (재폴링 시 같은 잡 멱등 반환 → --resume)
     POST /dispatch/<user>/<job>/status
         worker가 상태/로그/결과를 회신(채널 F). 본문: {status, log_summary?,
-        reset_at?, branch?, session_id?, mr_url?, audit_refs?, error?}.
+        reset_at?, branch?, session_id?, mr_url?, audit_refs?, rolledback?, error?}.
         terminal(완료/실패)이면 scheduler.on_complete(레포락 해제→다음 dispatch),
-        interrupted면 scheduler.on_interrupt(reset_at 재적격), 그 외는 진행 갱신.
+        interrupted면 scheduler.on_interrupt(reset_at 재적격), cancelled면
+        scheduler.confirm_cancelled(레포락+dedup 해제), 그 외는 진행 갱신.
+    GET  /dispatch/<user>/<job>/control
+        worker가 실행 중 주기적으로 폴링하는 취소 제어 채널(§10.4). 응답:
+        {"cancel": bool}. cancel=true면 worker가 abort+롤백 후 cancelled 회신.
 
 인증:
     - worker 인증 = ``X-Worker-Secret`` 헤더(config WORKER_SHARED_SECRET). 설정 시
@@ -80,7 +84,8 @@ class Dispatcher:
         status = (payload or {}).get("status", "")
         # 채널 F가 넘길 수 있는 부가 필드만 화이트리스트로 전달.
         fields = {}
-        for k in ("log_summary", "reset_at", "branch", "session_id", "mr_url", "audit_refs"):
+        for k in ("log_summary", "reset_at", "branch", "session_id", "mr_url",
+                  "audit_refs", "rolledback"):
             if k in (payload or {}):
                 fields[k] = payload[k]
         # 별칭: worker가 'log'로 보낼 수도.
@@ -89,6 +94,18 @@ class Dispatcher:
 
         dispatched = self.scheduler.report(job_id, status, **fields)
         return {"ok": True, "dispatched": dispatched}
+
+    def control(self, user: str, job_id: str) -> dict:
+        """취소 제어 채널(§10.4) — worker 폴링용 {"cancel": bool}.
+
+        Raises: PermissionError(교차 사용자), KeyError(미존재 잡).
+        """
+        job = self.scheduler.jobs.get(job_id)
+        if job is None:
+            raise KeyError(job_id)
+        if job.user != user:
+            raise PermissionError(f"교차 사용자 클레임 거부: {user} != {job.user}")
+        return {"cancel": bool(job.cancel_requested)}
 
     def list_jobs(self, user: Optional[str] = None) -> list:
         """잡 현황(관리 UI용). user 지정 시 필터."""
@@ -140,6 +157,19 @@ def handle_status(dispatcher: Dispatcher, user: str, job: str, req):
     return jsonify(result)
 
 
+def handle_control(dispatcher: Dispatcher, user: str, job: str, req):
+    """GET /dispatch/<user>/<job>/control — 취소 제어 채널 폴링(§10.4)."""
+    if not dispatcher.verify_secret(req.headers.get("X-Worker-Secret")):
+        return jsonify({"error": "unauthorized"}), 401
+    try:
+        result = dispatcher.control(user, job)
+    except KeyError:
+        return jsonify({"error": "unknown job", "job": job}), 404
+    except PermissionError as exc:
+        return jsonify({"error": str(exc)}), 403
+    return jsonify(result)
+
+
 @dispatch_bp.route("/dispatch/<user>/next", methods=["GET"])
 def route_next(user: str):
     return handle_next(_get_dispatcher(), user)
@@ -148,3 +178,8 @@ def route_next(user: str):
 @dispatch_bp.route("/dispatch/<user>/<job>/status", methods=["POST"])
 def route_status(user: str, job: str):
     return handle_status(_get_dispatcher(), user, job, request)
+
+
+@dispatch_bp.route("/dispatch/<user>/<job>/control", methods=["GET"])
+def route_control(user: str, job: str):
+    return handle_control(_get_dispatcher(), user, job, request)
