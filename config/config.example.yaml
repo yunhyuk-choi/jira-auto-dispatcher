@@ -27,6 +27,12 @@ spawn:
   mem_limit: 4g
   docker_host: tcp://socket-proxy:2375       # compose 기본(socket-proxy 경유). 직결 대안: unix:///var/run/docker.sock
   run_as: "1000:1000"                         # worker 컨테이너 비-root 실행(특권 축소)
+  # ⚠️ 호스트 배포 디렉토리의 절대경로(central 컨테이너 내부 경로 아님).
+  # central이 socket-proxy 경유로 worker를 띄우면 바인드 source는 호스트 docker
+  # 데몬이 해석한다(sibling container) → worker 바인드 source가 호스트 경로여야 한다.
+  # 예: /home/yhchoi/deploy/jira-auto-dispatcher. env HOST_DEPLOY_DIR 폴백 우선.
+  # 비우면(로컬 개발) 직접 경로 폴백. worker의 config/시크릿 마운트에 필수.
+  host_deploy_dir: "${HOST_DEPLOY_DIR}"
 
 git: { branch_prefix: auto/, github_owner: yunhyuk-choi }   # github은 central만
 

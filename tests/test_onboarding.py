@@ -158,3 +158,30 @@ def test_container_without_spawner_501(tmp_path, isolated_state):
     client, reg, _ = _wire(tmp_path, spawner=None)
     client.post("/onboard", json=_FULL)
     assert client.post("/users/yh.choi/container/start").status_code == 501
+
+
+def test_onboard_error_returns_json_not_html(tmp_path, isolated_state):
+    """예상치 못한 예외는 HTML 500이 아니라 JSON 500으로(프론트 파싱 실패 방지).
+
+    시크릿 값은 응답에 절대 노출되지 않아야 한다.
+    """
+    base = str(tmp_path / "secrets")
+    reg = MagicMock()
+    reg.get.return_value = None  # 중복 아님 → 진행
+    reg.upsert.side_effect = RuntimeError("boom-internal")  # ValueError 아닌 예외
+    cfg = SimpleNamespace(secrets=SimpleNamespace(base_dir=base))
+    app = Flask(__name__)
+    register_onboarding_api(app, {"registry": reg, "config": cfg, "spawner": None})
+    client = app.test_client()
+
+    res = client.post("/onboard", json=_FULL)
+    assert res.status_code == 500
+    # JSON(콘텐츠 타입 + 파싱 가능) — HTML 아님.
+    assert res.content_type.startswith("application/json")
+    body = res.get_json()
+    assert body is not None and "error" in body
+    # 시크릿 값은 에러 응답에 절대 노출되지 않는다.
+    raw = res.get_data(as_text=True)
+    assert "JIRA-TOK-VAL" not in raw
+    assert "GL-TOK-VAL" not in raw
+    assert "CLAUDE-TOK-VAL" not in raw

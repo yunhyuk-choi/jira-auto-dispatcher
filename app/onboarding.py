@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 
@@ -61,6 +62,26 @@ def _write_secret(base_dir: str, username: str, filename: str, value: str) -> st
     return f"{username}/{filename}"
 
 
+def _json_errors(fn):
+    """예상치 못한 예외를 HTML 500이 아니라 **JSON 500**으로 반환하는 래퍼.
+
+    Flask 기본 에러 페이지는 HTML이라 프론트가 ``Unexpected token '<'`` 로 실패한다.
+    핸들러가 던진 예외를 잡아 원인을 JSON으로 돌려 프론트가 메시지를 표시하게 한다.
+    ⚠️ 시크릿 값은 절대 노출하지 않는다 — 이 코드는 예외 메시지에 시크릿 "값"을
+    넣지 않으며(값은 파일로만 다룸), 서버 로그에만 전체 트레이스를 남긴다.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 — 어떤 예외든 JSON 500으로 정규화
+            log.exception("%s 처리 중 예외", fn.__name__)  # 서버 로그(값 미노출)
+            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 500
+
+    return wrapper
+
+
 def _parse_scope(raw) -> list:
     """scope(projects)를 리스트로 정규화(쉼표구분 문자열 또는 리스트)."""
     if isinstance(raw, list):
@@ -85,6 +106,7 @@ def register_onboarding_api(app, comps: dict) -> None:
         return spawner, None
 
     @app.route("/onboard", methods=["POST"])
+    @_json_errors
     def onboard():
         data = request.get_json(silent=True) or request.form.to_dict() or {}
 
@@ -141,6 +163,7 @@ def register_onboarding_api(app, comps: dict) -> None:
         return jsonify({"status": "ok", "username": username, "enabled": False}), 201
 
     @app.route("/users/<username>/enable", methods=["POST"])
+    @_json_errors
     def user_enable(username):
         if registry.get(username) is None:
             return jsonify({"error": "unknown user"}), 404
@@ -156,6 +179,7 @@ def register_onboarding_api(app, comps: dict) -> None:
         return jsonify({"status": "enabled", "container": "running"})
 
     @app.route("/users/<username>/disable", methods=["POST"])
+    @_json_errors
     def user_disable(username):
         if registry.get(username) is None:
             return jsonify({"error": "unknown user"}), 404
@@ -171,6 +195,7 @@ def register_onboarding_api(app, comps: dict) -> None:
         return jsonify({"status": "disabled", "container": "stopped"})
 
     @app.route("/users/<username>/autonomy", methods=["POST"])
+    @_json_errors
     def user_autonomy(username):
         rec = registry.get(username)
         if rec is None:
@@ -184,6 +209,7 @@ def register_onboarding_api(app, comps: dict) -> None:
         return jsonify({"status": "ok", "autonomy_mode": mode})
 
     @app.route("/users/<username>/container/<action>", methods=["POST"])
+    @_json_errors
     def user_container(username, action):
         rec = registry.get(username)
         if rec is None:

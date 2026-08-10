@@ -96,6 +96,13 @@ class SpawnConfig:
     mem_limit: str = "4g"
     docker_host: str = "unix:///var/run/docker.sock"
     run_as: str = "1000:1000"  # worker 컨테이너 비-root 실행 사용자(특권 축소)
+    # ⚠️ 호스트 배포 디렉토리의 **절대경로**(central 컨테이너 내부 경로가 아님).
+    # central이 Docker SDK(socket-proxy 경유)로 worker를 띄울 때 바인드 마운트의
+    # source 경로는 **호스트 docker 데몬**이 해석한다(sibling container). 따라서
+    # worker 바인드 source를 호스트 경로로 주려면 central이 자신의 호스트 배포
+    # 경로를 알아야 한다. 예: /home/yhchoi/deploy/jira-auto-dispatcher.
+    # env HOST_DEPLOY_DIR 폴백 우선. 비어 있으면(로컬 개발 등) 직접 경로 폴백.
+    host_deploy_dir: str = ""
 
 
 @dataclass
@@ -267,6 +274,7 @@ def _build_config(raw: dict) -> AppConfig:
             mem_limit=str(spawn.get("mem_limit", "4g")),
             docker_host=str(spawn.get("docker_host", "unix:///var/run/docker.sock")),
             run_as=str(spawn.get("run_as", "1000:1000")),
+            host_deploy_dir=str(spawn.get("host_deploy_dir", "")),
         ),
         git=GitConfig(
             branch_prefix=str(git.get("branch_prefix", "auto/")),
@@ -314,6 +322,15 @@ def _apply_env_overrides(cfg: AppConfig) -> None:
     worker_secret = os.environ.get("WORKER_SHARED_SECRET")
     if worker_secret:
         cfg.worker_shared_secret = worker_secret
+
+    # 호스트 배포 디렉토리(worker 바인드 source용). env HOST_DEPLOY_DIR 폴백 우선.
+    host_deploy_dir = os.environ.get("HOST_DEPLOY_DIR")
+    if host_deploy_dir:
+        cfg.spawn.host_deploy_dir = host_deploy_dir
+    # env 미설정으로 ${HOST_DEPLOY_DIR} 토큰이 미치환으로 남았으면 빈 값으로
+    # 취급한다(→ spawner가 직접 경로 폴백 + 경고). 조용한 broken bind 방지.
+    if "${" in cfg.spawn.host_deploy_dir:
+        cfg.spawn.host_deploy_dir = ""
 
 
 def _validate(cfg: AppConfig) -> None:

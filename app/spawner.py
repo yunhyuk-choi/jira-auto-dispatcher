@@ -70,6 +70,9 @@ DEFAULT_RUN_AS = "1000:1000"
 CLAUDE_CONFIG_DIR = "/home/app/.claude"
 SETTINGS_PATH_IN_CONTAINER = CLAUDE_CONFIG_DIR + "/settings.json"
 SECRETS_MOUNT = "/run/secrets"
+# worker가 load_config로 읽는 config 디렉토리(컨테이너 내부). worker 워킹디렉토리는
+# /app 이라 DEFAULT_CONFIG_PATH(config/config.yaml)가 /app/config/config.yaml 로 해석된다.
+CONFIG_DIR_IN_CONTAINER = "/app/config"
 
 # 사전 인가 기본 레벨.
 DEFAULT_PERMISSION_LEVEL = "bypass"
@@ -236,21 +239,59 @@ class Spawner:
         return env
 
     def build_volumes(self, user, settings_path: str) -> dict:
-        """컨테이너 volumes dict 조립(영속 .claude + 사전 인가 settings + per-user 시크릿 ro)."""
+        """컨테이너 volumes dict 조립(config + 영속 .claude + 사전 인가 settings + per-user 시크릿 ro).
+
+        ⚠️ sibling container 문제: central이 Docker SDK(socket-proxy 경유)로 worker를
+        띄울 때 바인드 마운트의 **source 경로는 호스트 docker 데몬이 해석**한다(central
+        컨테이너 내부 경로가 아님). 따라서 worker 바인드 source는 반드시 **호스트 경로**
+        여야 한다. central은 시크릿을 base_dir(컨테이너 내부, 예: /run/secrets)에 **기록**
+        하지만, worker 바인드용 source는 그 같은 호스트 디렉토리의 다른 관점인
+        ``spawn.host_deploy_dir`` 기준 경로로 매핑한다:
+
+            base_dir(central 기록용)  == <host_deploy_dir>/secrets  (같은 호스트 dir, 두 관점)
+
+        - ``<host_deploy_dir>/config`` → ``/app/config`` (ro)  ← 크래시 픽스. worker가
+          config/config.yaml 을 읽어 ConfigError 크래시 루프를 벗어난다.
+        - ``<host_deploy_dir>/secrets/<user>`` → ``/run/secrets/<user>`` (ro).
+        - ``<host_deploy_dir>/secrets/<user>/claude-settings.json`` →
+          ``/home/app/.claude/settings.json`` (ro).
+        - ``jad-<user>`` 명명 볼륨 → ``/home/app/.claude`` (rw). 볼륨명은 호스트경로 무관.
+
+        ``host_deploy_dir`` 가 비어 있으면(로컬 개발 등 — 호스트==central 파일시스템)
+        직접 경로로 폴백하고 경고를 남긴다.
+        """
         cfg = self.config
         username = user.username
         base_dir = getattr(getattr(cfg, "secrets", None), "base_dir", "") or ""
+        host_deploy_dir = getattr(getattr(cfg, "spawn", None), "host_deploy_dir", "") or ""
+
+        if host_deploy_dir:
+            # 호스트 docker 데몬이 해석하는 호스트 경로(sibling container).
+            host_secrets = posixpath.join(host_deploy_dir, "secrets")
+            config_src = posixpath.join(host_deploy_dir, "config")
+            user_secret_src = posixpath.join(host_secrets, username)
+            settings_src = posixpath.join(host_secrets, username, "claude-settings.json")
+        else:
+            # 폴백(로컬 개발): 호스트==central 파일시스템 전제. base_dir·settings_path·
+            # 로컬 config 디렉토리를 직접 source로 쓴다.
+            log.warning(
+                "spawn.host_deploy_dir 미설정 — worker 바인드에 직접 경로 폴백. "
+                "socket-proxy 경유 실배포에서는 HOST_DEPLOY_DIR(호스트 배포 절대경로)를 "
+                "설정해야 worker 바인드 source가 호스트 데몬 기준으로 올바르게 해석된다."
+            )
+            config_src = os.path.abspath("config")
+            user_secret_src = os.path.join(base_dir, username)
+            settings_src = settings_path
+
         volumes: dict = {
+            # config (ro) — 항상 포함(크래시 픽스: worker가 /app/config/config.yaml 을 읽음).
+            config_src: {"bind": CONFIG_DIR_IN_CONTAINER, "mode": "ro"},
             # 사용자 ~/.claude 영속(인증/세션).
             self.volume_name(username): {"bind": CLAUDE_CONFIG_DIR, "mode": "rw"},
             # 사전 인가 settings.json (read-only — 컨테이너가 못 바꾼다).
-            settings_path: {"bind": SETTINGS_PATH_IN_CONTAINER, "mode": "ro"},
-        }
-        # per-user 시크릿 디렉토리(값) read-only 마운트. 다른 사용자 시크릿은 안 보인다.
-        user_secret_dir = os.path.join(base_dir, username)
-        volumes[user_secret_dir] = {
-            "bind": posixpath.join(SECRETS_MOUNT, username),
-            "mode": "ro",
+            settings_src: {"bind": SETTINGS_PATH_IN_CONTAINER, "mode": "ro"},
+            # per-user 시크릿 디렉토리(값) read-only. 다른 사용자 시크릿은 안 보인다.
+            user_secret_src: {"bind": posixpath.join(SECRETS_MOUNT, username), "mode": "ro"},
         }
         return volumes
 
