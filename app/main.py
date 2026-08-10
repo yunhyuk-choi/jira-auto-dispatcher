@@ -218,13 +218,41 @@ def create_worker_app() -> Flask:
     return app
 
 
-def run_worker() -> None:
-    """worker 진입 — 설정/러너 조립 후 폴링 루프 기동.
+def run_worker(
+    config_path: str = "config/config.yaml",
+    *,
+    serve: bool = True,
+    config=None,
+    worker_loop_fn=None,
+):
+    """worker 진입 — 설정 로드 → worker_loop를 데몬 스레드로 기동 + 헬스 서빙.
 
-    TODO(Phase 5): cfg = load_config(); runner = AgentRunner(cfg);
-    Worker(cfg, runner).run_forever(). (헬스 앱은 선택적으로 별도 스레드)
+    worker 폴링 루프(CENTRAL_URL → 잡 → claude 실행 → 상태 회신)는 백그라운드
+    스레드에서 돌고, 메인 스레드는 컨테이너 헬스 프로브용 최소 Flask(/healthz)를
+    서빙한다. ``serve=False``면 헬스 앱을 띄우지 않고 루프 스레드만 반환한다
+    (테스트/임베드용).
+
+    Returns:
+        기동한 worker 루프 스레드(threading.Thread).
     """
-    raise NotImplementedError("TODO(Phase 5): worker 루프 기동")
+    from app.config import load_config
+    from app import worker as worker_mod
+
+    cfg = config if config is not None else load_config(config_path)
+    loop = worker_loop_fn or worker_mod.worker_loop
+
+    stop = threading.Event()
+    t = threading.Thread(
+        target=loop, args=(cfg,), kwargs={"stop_event": stop},
+        name="jad-worker-loop", daemon=True,
+    )
+    t.start()
+    _components["_worker"] = {"thread": t, "stop": stop}
+
+    if serve:
+        app = create_worker_app()
+        app.run(host="0.0.0.0", port=8787)
+    return t
 
 
 # =========================================================================
@@ -242,9 +270,8 @@ def main() -> None:
     role = os.environ.get("ROLE", "central").strip().lower()
 
     if role == "worker":
-        # Phase 5에서 run_worker()로 대체. 지금은 헬스 앱만 서빙(동작).
-        app = create_worker_app()
-        app.run(host="0.0.0.0", port=8787)
+        # worker: 폴링 루프(데몬 스레드) + 최소 헬스 앱 서빙.
+        run_worker()
         return
 
     # central(기본)
