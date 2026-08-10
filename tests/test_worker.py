@@ -234,6 +234,34 @@ def test_copy_worker_settings_missing_env_warns_no_exception(caplog):
     assert any("SECRETS_DIR" in r.getMessage() for r in caplog.records)
 
 
+def test_copy_worker_settings_removes_dest_dir_before_copy(tmp_path):
+    """하드닝: dest(settings.json)가 과거 실패 바인드 잔재로 **디렉토리**로 남아
+    있으면 copyfile이 IsADirectoryError로 죽는다 → 디렉토리를 제거하고 파일로 복사.
+    """
+    secrets = tmp_path / "secrets"
+    src = secrets / "u1" / "claude-settings.json"
+    src.parent.mkdir(parents=True)
+    src.write_text('{"ok": true}', encoding="utf-8")
+    config_dir = tmp_path / "claude"
+    config_dir.mkdir()
+    # dest가 디렉토리로 잔존(실패 바인드 잔재 재현) — 안에 파일도 하나 둔다.
+    dest = config_dir / "settings.json"
+    dest.mkdir()
+    (dest / "leftover").write_text("stale", encoding="utf-8")
+
+    env = {"SECRETS_DIR": str(secrets), "DISPATCH_USER": "u1",
+           "CLAUDE_CONFIG_DIR": str(config_dir)}
+    result = main.copy_worker_settings(env=env)
+
+    assert result == str(dest)
+    # 이제 dest는 (디렉토리가 아니라) 파일이고 소스 내용과 동일하다.
+    assert dest.is_file()
+    assert dest.read_text(encoding="utf-8") == '{"ok": true}'
+    # 두 번째 호출도 멱등(이미 파일 → 그대로 덮어쓰기, 예외 없음).
+    main.copy_worker_settings(env=env)
+    assert dest.is_file()
+
+
 def test_copy_worker_settings_default_config_dir_and_injection(tmp_path):
     """CLAUDE_CONFIG_DIR 미설정 시 기본 상수 사용 + copyfile/makedirs 주입 검증."""
     secrets = tmp_path / "secrets"

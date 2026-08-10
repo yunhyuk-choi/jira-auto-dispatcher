@@ -199,9 +199,21 @@ class Spawner:
     def build_env(self, user) -> dict:
         """컨테이너 environment dict 조립.
 
+        ⚠️ **계약 링치핀**: 여기서 emit하는 키는 worker의
+        :meth:`app.agent_runner.UserCreds.from_env` 가 읽는 키와 반드시 일치해야
+        한다(per-user attribution의 실제 배선). from_env 계약:
+            DISPATCH_GIT_NAME / DISPATCH_GIT_EMAIL   git author 정체성
+            DISPATCH_JIRA_EMAIL                       Jira Basic actor 이메일
+            JIRA_TOKEN_REF / GITLAB_TOKEN_REF         secrets.base_dir 상대 참조
+            CLAUDE_OAUTH_TOKEN_REF                     (선택) 참조
+            CLAUDE_CODE_OAUTH_TOKEN                    (폴백) 값 직접
+        이 ``*_REF``(상대 참조)가 빠지면 worker의 ``ensure_repos`` 가 토큰을 못
+        찾아 레포 프로비저닝을 skip → orchestrator_repo 부재로 잡이 실패한다.
+
         시크릿 값(CLAUDE_CODE_OAUTH_TOKEN·WORKER_SHARED_SECRET)은 read_secret/config로만
-        읽고, Jira/GitLab 토큰은 값이 아니라 **파일경로**(마운트 경로) 포인터로 넘긴다.
-        이 dict는 절대 로깅하지 않는다.
+        읽고, Jira/GitLab 토큰은 값이 아니라 **참조**(상대 ref)와 **파일경로**(마운트
+        경로) 포인터로만 넘긴다. 이 dict는 절대 로깅하지 않는다(identity 이름·이메일은
+        시크릿 값이 아니라 로깅해도 무해하나, dict 통째 로깅은 여전히 금지).
         """
         cfg = self.config
         base_dir = getattr(getattr(cfg, "secrets", None), "base_dir", "") or ""
@@ -216,24 +228,40 @@ class Spawner:
         if getattr(cfg, "worker_shared_secret", ""):
             env["WORKER_SHARED_SECRET"] = cfg.worker_shared_secret
 
+        # git author 정체성(값이지만 시크릿 아님 — from_env DISPATCH_GIT_*).
+        identity = getattr(user, "identity", None)
+        git_name = getattr(identity, "git_name", "") if identity else ""
+        git_email = getattr(identity, "git_email", "") if identity else ""
+        if git_name:
+            env["DISPATCH_GIT_NAME"] = git_name
+        if git_email:
+            env["DISPATCH_GIT_EMAIL"] = git_email
+
         secrets_ref = getattr(user, "secrets_ref", None)
 
         # 사용자 Claude setup-token(값). read_secret로만.
         claude_ref = getattr(secrets_ref, "claude_oauth_token", "") if secrets_ref else ""
         if claude_ref:
+            # from_env 계약: 참조(ref)를 넘겨 worker가 base_dir 기준으로 읽게 한다.
+            env["CLAUDE_OAUTH_TOKEN_REF"] = claude_ref
             val = read_secret(base_dir, claude_ref)
             if val:
                 env["CLAUDE_CODE_OAUTH_TOKEN"] = val
 
-        # Jira/GitLab 토큰: 값이 아니라 파일경로 포인터(컨테이너 내부 마운트 경로).
+        # Jira/GitLab 토큰: 값이 아니라 **상대 참조(*_REF)** + 파일경로(*_FILE) 포인터.
+        # ⚠️ from_env가 읽는 것은 *_REF 다(*_FILE은 하위호환/보조). *_REF 누락 = 프로비저닝 skip.
         jira_ref = getattr(secrets_ref, "jira_token", "") if secrets_ref else ""
         if jira_ref:
+            env["JIRA_TOKEN_REF"] = jira_ref
             env["JIRA_TOKEN_FILE"] = self._in_container_secret(jira_ref)
         gitlab_ref = getattr(secrets_ref, "gitlab_token", "") if secrets_ref else ""
         if gitlab_ref:
+            env["GITLAB_TOKEN_REF"] = gitlab_ref
             env["GITLAB_TOKEN_FILE"] = self._in_container_secret(gitlab_ref)
 
+        # Jira actor 이메일: from_env는 DISPATCH_JIRA_EMAIL 우선, JIRA_EMAIL 폴백.
         if getattr(user, "jira_email", ""):
+            env["DISPATCH_JIRA_EMAIL"] = user.jira_email
             env["JIRA_EMAIL"] = user.jira_email
 
         return env

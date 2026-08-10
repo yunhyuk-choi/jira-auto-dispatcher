@@ -1,0 +1,107 @@
+"""계약 회귀 테스트 — spawner.build_env → agent_runner.UserCreds.from_env 왕복.
+
+실배포에서 잡힌 링치핀 버그: spawner가 넣는 env 키와 worker(from_env)가 읽는
+키가 어긋나면 per-user attribution이 전부 깨진다(git author 공백, 토큰 참조 공백
+→ ensure_repos가 orchestrator_repo를 프로비저닝하지 못해 잡 실패). 이 테스트는
+그 드리프트를 회귀로 잡는다: **build_env 결과 dict를 그대로 from_env에 먹이면
+git_name/git_email/jira_email/jira_token_ref/gitlab_token_ref/claude_oauth_token_ref
+가 모두 채워져야 한다**(하나라도 비면 실패).
+
+라이브 docker/claude는 호출하지 않는다.
+"""
+
+from __future__ import annotations
+
+import os
+from types import SimpleNamespace
+
+from app.agent_runner import UserCreds
+from app.registry import Identity, SecretsRef, UserRecord
+from app.spawner import Spawner
+
+
+def _cfg(base_dir: str):
+    return SimpleNamespace(
+        spawn=SimpleNamespace(
+            image="jira-auto-dispatcher:latest",
+            network="jad-net",
+            central_url="http://central:8787",
+            mem_limit="4g",
+            docker_host="unix:///var/run/docker.sock",
+            run_as="1000:1000",
+            host_deploy_dir="",
+        ),
+        secrets=SimpleNamespace(base_dir=base_dir),
+        worker_shared_secret="s3cr3t",
+    )
+
+
+def _user():
+    return UserRecord(
+        username="yh.choi",
+        jira_account_id="acc",
+        jira_email="yh@x.com",
+        permission_level="bypass",
+        identity=Identity(git_name="YH Choi", git_email="yh.choi@interxlab.com"),
+        secrets_ref=SecretsRef(
+            jira_token="yh.choi/jira-token",
+            gitlab_token="yh.choi/gitlab-token",
+            claude_oauth_token="yh.choi/claude-oauth-token",
+        ),
+    )
+
+
+def _write(base: str, rel: str, value: str) -> None:
+    path = os.path.join(base, rel)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(value)
+
+
+def test_build_env_to_from_env_roundtrip_populates_all(tmp_path):
+    """핵심 회귀: build_env → from_env 왕복으로 모든 정체성/참조 필드가 채워진다."""
+    base = str(tmp_path / "secrets")
+    _write(base, "yh.choi/claude-oauth-token", "CLAUDE-XYZ")
+
+    user = _user()
+    env = Spawner(_cfg(base)).build_env(user)
+
+    # 그 dict를 그대로 worker의 from_env에 먹인다(계약 왕복).
+    creds = UserCreds.from_env(user.username, env=env)
+
+    # 모든 필드가 비어 있지 않아야 한다(하나라도 빈 값이면 링치핀 버그 재발).
+    assert creds.user == "yh.choi"
+    assert creds.git_name == "YH Choi"
+    assert creds.git_email == "yh.choi@interxlab.com"
+    assert creds.jira_email == "yh@x.com"
+    assert creds.jira_token_ref == "yh.choi/jira-token"
+    assert creds.gitlab_token_ref == "yh.choi/gitlab-token"
+    assert creds.claude_oauth_token_ref == "yh.choi/claude-oauth-token"
+    # Claude 값도 폴백 경로로 전달된다(참조 + 값 둘 다).
+    assert creds.claude_oauth_token_value == "CLAUDE-XYZ"
+
+
+def test_build_env_emits_from_env_contract_keys(tmp_path):
+    """build_env가 from_env가 읽는 계약 키(*_REF·DISPATCH_*)를 실제로 emit한다."""
+    base = str(tmp_path / "secrets")
+    env = Spawner(_cfg(base)).build_env(_user())
+    for key in (
+        "DISPATCH_GIT_NAME", "DISPATCH_GIT_EMAIL", "DISPATCH_JIRA_EMAIL",
+        "JIRA_TOKEN_REF", "GITLAB_TOKEN_REF", "CLAUDE_OAUTH_TOKEN_REF",
+    ):
+        assert env.get(key), f"build_env가 계약 키를 누락: {key}"
+    # 참조는 상대 ref(base_dir 상대) — 절대경로/마운트경로가 아님.
+    assert env["JIRA_TOKEN_REF"] == "yh.choi/jira-token"
+    assert env["GITLAB_TOKEN_REF"] == "yh.choi/gitlab-token"
+    assert env["CLAUDE_OAUTH_TOKEN_REF"] == "yh.choi/claude-oauth-token"
+
+
+def test_build_env_does_not_leak_token_values(tmp_path):
+    """토큰 '값'은 참조/파일경로로만 넘기고 env에 실리지 않는다(Claude 값 제외)."""
+    base = str(tmp_path / "secrets")
+    _write(base, "yh.choi/jira-token", "JIRA-SECRET-VAL")
+    _write(base, "yh.choi/gitlab-token", "GL-SECRET-VAL")
+    env = Spawner(_cfg(base)).build_env(_user())
+    joined = "\n".join(str(v) for v in env.values())
+    assert "JIRA-SECRET-VAL" not in joined
+    assert "GL-SECRET-VAL" not in joined

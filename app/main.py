@@ -295,6 +295,12 @@ def copy_worker_settings(env=None, *, copyfile=None, makedirs=None) -> Optional[
         return None
 
     makedirs(config_dir, exist_ok=True)
+    # 하드닝: 과거 실패한 파일 바인드 잔재로 dest가 **디렉토리**로 남아 있으면
+    # copyfile이 IsADirectoryError로 죽는다. 디렉토리면 먼저 제거하고 파일로 복사
+    # 한다(멱등 유지).
+    if os.path.isdir(dest):
+        log.warning("worker settings dest가 디렉토리로 남아 있어 제거 후 복사: %s", dest)
+        shutil.rmtree(dest)
     copyfile(src, dest)  # 덮어쓰기(멱등) — 매 부팅마다 최신 사전 인가 반영.
     log.info("worker 사전 인가 settings 복사 완료 → %s", dest)
     return dest

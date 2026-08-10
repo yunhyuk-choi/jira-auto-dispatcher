@@ -31,12 +31,15 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import datetime
-from typing import Optional
+from datetime import datetime, timezone
+from typing import Callable, Optional
 
 from app.queue import Job
 
 log = logging.getLogger("jad.poller")
+
+# watermark 초기화 tz 폴백(config.resume.timezone 미설정/조회불가 시).
+_DEFAULT_TIMEZONE = "Asia/Seoul"
 
 
 def resolve_target_repos(issue: dict, repo_map: dict) -> list:
@@ -101,18 +104,56 @@ def build_job(config, key: str, issue: dict, user) -> Job:
 class Poller:
     """high-watermark JQL 폴러."""
 
-    def __init__(self, config, jira_client, gate, registry, dispatcher) -> None:
-        """의존성 주입(설정·Jira 클라이언트·게이트·레지스트리·디스패처)."""
+    def __init__(self, config, jira_client, gate, registry, dispatcher,
+                 *, clock: Optional[Callable[[], datetime]] = None) -> None:
+        """의존성 주입(설정·Jira 클라이언트·게이트·레지스트리·디스패처).
+
+        ``clock``: tz-aware ``datetime`` 을 반환하는 주입식 시계(테스트용).
+        미지정이면 ``datetime.now(resume.timezone)``.
+        """
         self.config = config
         self.jira = jira_client
         self.gate = gate
         self.registry = registry
         self.dispatcher = dispatcher
+        self._clock = clock
         self._stop = threading.Event()
         from app import state
 
         self._state = state
         self.watermark: Optional[str] = state.load_watermark()
+        # 하드닝: 최초 실행(watermark 부재)이면 "now"로 초기화해 영속한다. 이러지
+        # 않으면 build_jql에 created 하한 절이 빠져 **기존 To-Do 티켓 전부**가
+        # 한꺼번에 트리거된다(stampede). now 이후 생성분만 트리거되도록 시드한다.
+        if self.watermark is None:
+            self.watermark = self._initial_watermark()
+            self._state.save_watermark(self.watermark)
+            log.info("watermark 최초 초기화(now 시드) — 기존 To-Do stampede 방지")
+
+    # ------------------------------------------------------------------
+
+    def _resume_tzinfo(self):
+        """config.resume.timezone → tzinfo(조회 실패 시 UTC 폴백)."""
+        tzname = (
+            getattr(getattr(self.config, "resume", None), "timezone", "")
+            or _DEFAULT_TIMEZONE
+        )
+        try:
+            from zoneinfo import ZoneInfo
+
+            return ZoneInfo(tzname)
+        except Exception:  # noqa: BLE001 — tzdata 부재 등 → UTC 폴백(안전)
+            return timezone.utc
+
+    def _now(self) -> datetime:
+        """현재 시각(tz-aware). 주입 clock 우선, 없으면 resume.timezone 기준 now."""
+        if self._clock is not None:
+            return self._clock()
+        return datetime.now(self._resume_tzinfo())
+
+    def _initial_watermark(self) -> str:
+        """최초 실행 watermark 초기값 = now(resume.timezone)의 ISO8601 문자열."""
+        return self._now().isoformat()
 
     # ------------------------------------------------------------------
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone, timedelta
+
 from app import state
 from app.dispatch import Dispatcher
 from app.gate import DedupGate
@@ -10,6 +12,14 @@ from app.queue import JobQueue
 from app.registry import Registry, UserRecord
 from app.scheduler import Scheduler
 from tests.conftest import make_config
+
+# 결정적 테스트용 고정 시계(KST 자정) — watermark 초기 시드가 이 값이 되도록 주입.
+_KST = timezone(timedelta(hours=9))
+_FIXED_NOW = datetime(2026, 8, 10, 0, 0, 0, tzinfo=_KST)
+
+
+def _fixed_clock():
+    return _FIXED_NOW
 
 
 class FakeJira:
@@ -45,7 +55,9 @@ def _wire(issues, repo_map=None, per_user=5):
     disp = Dispatcher(reg, sch)
     gate = DedupGate()
     cfg = make_config(concurrency_per_worker=per_user, repo_map=repo_map or {})
-    poller = Poller(cfg, FakeJira(issues), gate, reg, disp)
+    # 고정 시계 주입 → watermark 최초 시드가 결정적(2026-08-10T00:00, KST)이라
+    # 이후 생성분(10:00 등)은 정상적으로 watermark를 전진시킨다.
+    poller = Poller(cfg, FakeJira(issues), gate, reg, disp, clock=_fixed_clock)
     return reg, sch, disp, gate, poller
 
 
@@ -109,3 +121,55 @@ def test_resolve_user_disabled_returns_none(isolated_state):
     reg, _, _, _, poller = _wire([])
     assert poller.resolve_user(_issue("HAN-1", "a1")).username == "u1"
     assert poller.resolve_user(_issue("HAN-2", "a2")) is None   # 비활성
+
+
+# --- watermark 최초 초기화(하드닝: 기존 To-Do stampede 방지) ---
+
+
+def test_watermark_initialized_to_now_when_absent(isolated_state):
+    """최초 실행(watermark 부재) 시 주입 clock의 now로 초기화하고 영속한다."""
+    assert state.load_watermark() is None  # 사전 상태: 없음
+    reg = Registry()
+    sch = Scheduler(make_config(), JobQueue())
+    poller = Poller(make_config(), FakeJira([]), DedupGate(), reg,
+                    Dispatcher(reg, sch), clock=_fixed_clock)
+    # now(주입 clock)의 ISO8601로 시드되고 state에도 저장된다.
+    assert poller.watermark == _FIXED_NOW.isoformat()
+    assert state.load_watermark() == _FIXED_NOW.isoformat()
+
+
+def test_watermark_now_seed_gates_out_older_todo(isolated_state):
+    """now 시드 이후, build_jql에 'created > now' 하한 절이 들어가 stampede를 막는다."""
+    reg = Registry()
+    reg.upsert(UserRecord(username="u1", jira_account_id="a1", enabled=True))
+    sch = Scheduler(make_config(), JobQueue())
+    poller = Poller(make_config(), FakeJira([]), DedupGate(), reg,
+                    Dispatcher(reg, sch), clock=_fixed_clock)
+    jql = poller.build_jql()
+    assert 'created > "2026-08-10 00:00"' in jql
+
+
+def test_watermark_existing_is_not_overwritten(isolated_state):
+    """이미 watermark가 있으면 now로 덮어쓰지 않는다(진행 커서 보존)."""
+    state.save_watermark("2026-01-01T00:00:00+09:00")
+    reg = Registry()
+    sch = Scheduler(make_config(), JobQueue())
+    poller = Poller(make_config(), FakeJira([]), DedupGate(), reg,
+                    Dispatcher(reg, sch), clock=_fixed_clock)
+    assert poller.watermark == "2026-01-01T00:00:00+09:00"
+    assert state.load_watermark() == "2026-01-01T00:00:00+09:00"
+
+
+def test_watermark_default_now_uses_resume_timezone(isolated_state):
+    """clock 미주입이면 resume.timezone 기준 now로 시드된다(파싱 가능한 ISO)."""
+    from types import SimpleNamespace
+
+    cfg = make_config()
+    cfg.resume = SimpleNamespace(timezone="Asia/Seoul")
+    reg = Registry()
+    sch = Scheduler(cfg, JobQueue())
+    poller = Poller(cfg, FakeJira([]), DedupGate(), reg, Dispatcher(reg, sch))
+    assert poller.watermark is not None
+    # ISO8601로 파싱 가능해야 한다(JQL 변환 _jql_time의 전제).
+    datetime.fromisoformat(poller.watermark)
+    assert state.load_watermark() == poller.watermark
