@@ -1,0 +1,37 @@
+# .github/workflows/ci.yml — GitHub(yunhyuk-choi/jira-auto-dispatcher) 개인 미러용 CI.
+#
+# 배포 없음. pytest 게이트만(126 통과). 실제 배포·이미지 빌드·무중단 교체는
+# 사내 GitLab 파이프라인(.gitlab-ci.yml)이 담당한다. 여기는 개인 리포에서의
+# 최소 회귀 방어용이다.
+#
+# POLICY-ENCODING: 이 파일 UTF-8(BOM 없음)·LF.
+
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run tests (expect 126 passed)
+        run: pytest -q

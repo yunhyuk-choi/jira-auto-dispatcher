@@ -1,0 +1,128 @@
+# .gitlab-ci.yml — jira-auto-dispatcher (GitLab: http://server.interxlab.io:30000)
+#
+# 파이프라인: test → build → deploy
+#   test   : 모든 브랜치/ MR — pytest 게이트(126 통과). python:3.12.
+#   build  : main 한정 — Dockerfile 빌드 성사 게이트(docker build).
+#   deploy : main 한정 — 개발서버(61.96.103.14)에 central 무중단 교체(ssh).
+#
+# ⚠️ 실측(hansa dev-quality-template): 이 러너들에서 ssh heredoc 이 무출력 exit1 로
+#    실패한다 → 이 파일은 heredoc 을 쓰지 않는다. 배포는 rsync 로 소스 동기화 후
+#    ssh 에 "명령을 인자로 전달"해 서버 스크립트(deploy/redeploy-central.sh)를 실행한다.
+#
+# 시크릿은 값 하드코딩 금지 — 전부 CI/CD 변수 참조(설정법은 CICD-SETUP.md).
+#   SSH_PRIVATE_KEY  (Protected)         배포 SSH 개인키(값)
+#   SSH_KNOWN_HOSTS  (Protected, File)   서버 호스트키(파일 경로로 주입됨)
+#   DEPLOY_HOST      (Protected)         yhchoi@61.96.103.14
+#
+# POLICY-ENCODING: 이 파일 UTF-8(BOM 없음)·LF.
+
+stages:
+  - test
+  - build
+  - deploy
+
+# ---------------------------------------------------------------------------
+# test — MR·모든 브랜치·main 공통. 126 테스트 통과 게이트.
+# ---------------------------------------------------------------------------
+test:
+  stage: test
+  image: python:3.12
+  rules:
+    # MR 파이프라인 + 브랜치 push 둘 다에서 도는 표준 조건.
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+  cache:
+    key: "pip-$CI_COMMIT_REF_SLUG"
+    paths:
+      - .cache/pip
+  variables:
+    PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  before_script:
+    - python --version
+    - pip install --upgrade pip
+    - pip install -r requirements.txt
+    - pip install pytest
+  script:
+    # pytest 는 실패가 하나라도 있으면 비정상 종료 → 게이트. (기대: 126 passed)
+    - pytest -q
+
+# ---------------------------------------------------------------------------
+# build — main 한정. Dockerfile 이 실제로 빌드되는지 게이트(빌드 정합 검증).
+#
+#   ⚠️ 사내 레지스트리는 이 파이프라인 범위 밖이다(DEPLOY.md). 따라서 이 잡의
+#      이미지는 서버로 전송되지 않는다 — "빌드 성사" 게이트 용도다. 실제 배포용
+#      이미지는 deploy 잡이 소스를 서버로 rsync 한 뒤 서버에서 빌드한다
+#      (redeploy-central.sh, DEPLOY.md 방식 A).
+#   ⚠️ Dockerfile 은 빌드 중 `curl https://claude.ai/install.sh | bash` 로 claude CLI 를
+#      설치하고 `claude --version` 으로 검증한다 → 러너에 아웃바운드 인터넷 egress 필요.
+#
+#   실행 방식(둘 중 러너 구성에 맞게 — CICD-SETUP.md 참조):
+#     (기본) docker executor + DinD 서비스(아래 image/services).
+#     (대안) docker 가 설치된 shell executor — image/services 줄 제거하고
+#            DOCKER_HOST 변수 제거. 그 경우 tags 로 해당 러너에 라우팅.
+# ---------------------------------------------------------------------------
+build:
+  stage: build
+  image: docker:27-cli
+  services:
+    - docker:27-dind
+  variables:
+    DOCKER_HOST: "tcp://docker:2375"
+    DOCKER_TLS_CERTDIR: ""
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  script:
+    - docker version
+    - docker build -t jira-auto-dispatcher:latest .
+
+# ---------------------------------------------------------------------------
+# deploy — main 한정. 개발서버에 central 무중단 교체.
+#
+#   1) 소스를 서버로 rsync(시크릿/상태/런타임 clone 제외 — DEPLOY.md 와 동일 목록).
+#   2) ssh 에 명령을 "인자로" 전달해 서버측 무중단 스크립트를 실행(heredoc 금지).
+#
+#   redeploy-central.sh 가 서버에서: 이미지 빌드 → central 만 recreate → /healthz
+#   폴링 → 실패 시 롤백. worker(jad-worker-<user>)는 건드리지 않는다(독립 컨테이너).
+# ---------------------------------------------------------------------------
+deploy:
+  stage: deploy
+  image: alpine:3.20
+  needs: ["test", "build"]
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  variables:
+    DEPLOY_DIR: "/opt/jira-auto-dispatcher"
+  before_script:
+    - apk add --no-cache openssh-client rsync
+    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    # SSH_PRIVATE_KEY 는 (값) 변수 — CRLF 방지 위해 tr 로 정규화. (File 타입이면
+    # 값 대신 경로가 오므로 CICD-SETUP.md 의 대안 주석 참고.)
+    - printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_deploy
+    - chmod 600 ~/.ssh/id_deploy
+    # SSH_KNOWN_HOSTS 는 File 타입 → 변수값이 파일 "경로"다.
+    - cp "$SSH_KNOWN_HOSTS" ~/.ssh/known_hosts
+    - chmod 644 ~/.ssh/known_hosts
+  script:
+    # (1) 소스 동기화 — 시크릿/상태/런타임 데이터는 절대 밀어넣지 않는다.
+    - >
+      rsync -az --delete
+      -e "ssh -i ~/.ssh/id_deploy -o UserKnownHostsFile=~/.ssh/known_hosts"
+      --exclude '.git'
+      --exclude 'state/'
+      --exclude 'secrets/'
+      --exclude 'workspace/'
+      --exclude 'orchestrator/'
+      --exclude 'dlc-meta/'
+      --exclude 'dataspace_docs/'
+      --exclude 'config/config.yaml'
+      --exclude '.env'
+      ./ "$DEPLOY_HOST:$DEPLOY_DIR/"
+    # (2) 무중단 교체 — ssh 에 명령을 인자로 전달(heredoc 금지). 스크립트는
+    #     APP_DIR 를 인자 1로 받는다.
+    - >
+      ssh -i ~/.ssh/id_deploy -o UserKnownHostsFile=~/.ssh/known_hosts
+      "$DEPLOY_HOST"
+      "bash $DEPLOY_DIR/deploy/redeploy-central.sh $DEPLOY_DIR"
+  environment:
+    name: dev
+    url: http://61.96.103.14:8787
