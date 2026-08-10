@@ -15,34 +15,44 @@
 
 from __future__ import annotations
 
+import threading
+
+from app import state
+
 
 class DedupGate:
-    """티켓 단위 원자적 claim 게이트(스텁)."""
+    """티켓 단위 원자적 claim 게이트."""
 
     def __init__(self) -> None:
-        """락 + 영속된 dedup 집합 로드로 초기화.
+        """락 + 영속된 dedup 집합 로드로 초기화."""
+        self._lock = threading.Lock()
+        loaded = state.load_dedup([])
+        self._claimed: set[str] = set(loaded or [])
 
-        TODO(Phase 3): threading.Lock + state.load(dedup) 복원.
-        """
-        pass
+    def _persist(self) -> None:
+        # 결정적 순서로 저장(디프 안정성).
+        state.save_dedup(sorted(self._claimed))
 
     def claim(self, ticket: str) -> bool:
         """티켓을 원자적으로 claim. 최초 1회만 True.
 
-        TODO(Phase 3): 락 안에서 집합 검사→추가→영속. 최초만 True 반환.
+        이미 claim 된 티켓이면 False(중복 트리거 흡수).
         """
-        raise NotImplementedError("TODO(Phase 3): claim")
+        with self._lock:
+            if ticket in self._claimed:
+                return False
+            self._claimed.add(ticket)
+            self._persist()
+            return True
 
     def release(self, ticket: str) -> None:
-        """claim 해제(가역성 — 사고 시 재처리 허용).
-
-        TODO(Phase 3): 락 안에서 집합 제거→영속.
-        """
-        raise NotImplementedError("TODO(Phase 3): release")
+        """claim 해제(가역성 — 사고/미매핑 시 재처리 허용)."""
+        with self._lock:
+            if ticket in self._claimed:
+                self._claimed.discard(ticket)
+                self._persist()
 
     def is_claimed(self, ticket: str) -> bool:
-        """이미 claim 됐는지 조회.
-
-        TODO(Phase 3): 락 안에서 멤버십 조회.
-        """
-        raise NotImplementedError("TODO(Phase 3): is_claimed")
+        """이미 claim 됐는지 조회."""
+        with self._lock:
+            return ticket in self._claimed

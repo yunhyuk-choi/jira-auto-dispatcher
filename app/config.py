@@ -15,14 +15,30 @@
       가 소유한다(온보딩으로 채워짐). config는 시스템 수준 설정만 담는다.
     - 누락/오타 키는 부팅 시점에 명확한 에러로 실패시킨다(fail-fast).
     - POLICY-ENCODING: 파일은 UTF-8(BOM 없음)로 읽는다.
+
+env 오버라이드(런타임 우선):
+    - ``ROLE``                → role
+    - ``SECRETS_DIR``         → secrets.base_dir 의 ``${SECRETS_DIR}`` 치환값
+    - ``CENTRAL_URL``         → spawn.central_url (worker→central 폴링 대상)
+    - ``WORKER_SHARED_SECRET``→ worker_shared_secret (dispatch HTTP 인증)
 """
 
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass, field
+from typing import Any
 
 
 DEFAULT_CONFIG_PATH = "config/config.yaml"
+
+# ${VAR} 형태의 env 치환 토큰
+_ENV_TOKEN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+class ConfigError(Exception):
+    """설정 로드/검증 실패(fail-fast)."""
 
 
 @dataclass
@@ -41,6 +57,7 @@ class JiraConfig:
     project: str = ""
     poll_interval_sec: int = 60
     watcher_token_file: str = ""  # 중앙 감시 토큰(내 것/봇). secrets.base_dir 상대
+    watcher_email: str = ""       # Basic auth actor(감시 계정 이메일). env JIRA_WATCHER_EMAIL 폴백
 
 
 @dataclass
@@ -107,6 +124,8 @@ class RunConfig:
     permission_mode: str = "skip"
     output_format: str = "stream-json"
     concurrency_per_worker: int = 1
+    # 전역 동시성 cap(worker당이 아니라 central 전체). config에 없으면 기본 3.
+    global_concurrency: int = 3
 
 
 @dataclass
@@ -123,21 +142,220 @@ class AppConfig:
     git: GitConfig = field(default_factory=GitConfig)
     secrets: SecretsConfig = field(default_factory=SecretsConfig)
     run: RunConfig = field(default_factory=RunConfig)
+    # dispatch HTTP(worker→central) 공유 시크릿. env WORKER_SHARED_SECRET 우선.
+    worker_shared_secret: str = ""
+    # 티켓 components/labels → 레포 매핑(REPO-MAP). {키: [repo,...]} 또는 {키: repo}.
+    repo_map: dict = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# 내부 헬퍼
+# ---------------------------------------------------------------------------
+
+
+def _substitute_env(value: Any) -> Any:
+    """문자열 내 ``${VAR}`` 토큰을 os.environ 값으로 치환(재귀).
+
+    미정의 env는 원문 그대로 남긴다(부재를 조용히 빈 문자열로 만들지 않음 →
+    검증 단계에서 드러나도록).
+    """
+    if isinstance(value, str):
+        def repl(m: "re.Match[str]") -> str:
+            name = m.group(1)
+            return os.environ.get(name, m.group(0))
+
+        return _ENV_TOKEN.sub(repl, value)
+    if isinstance(value, dict):
+        return {k: _substitute_env(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_substitute_env(v) for v in value]
+    return value
+
+
+def _section(raw: dict, key: str) -> dict:
+    """raw[key]가 dict가 아니면 빈 dict로(관대한 섹션 접근)."""
+    v = raw.get(key)
+    return v if isinstance(v, dict) else {}
+
+
+# ---------------------------------------------------------------------------
+# 공개 API
+# ---------------------------------------------------------------------------
 
 
 def load_config(path: str = DEFAULT_CONFIG_PATH) -> AppConfig:
     """config.yaml을 읽어 검증된 AppConfig로 반환한다.
 
-    TODO(Phase 1): yaml.safe_load → ${ENV} 치환(secrets.base_dir 등) →
-    스키마 검증 → 타입드 객체 매핑. 누락 필수키·타입 불일치는 명확한 예외로.
+    순서: yaml.safe_load → env 치환(${VAR}) → env 오버라이드 →
+    타입드 매핑 → 필수키 검증(fail-fast).
+
+    Raises:
+        ConfigError: 파일 부재, 파싱 실패, 필수키 누락 시.
     """
-    raise NotImplementedError("TODO(Phase 1): config 로드/검증 구현")
+    import yaml  # 지연 import(테스트가 config 없이도 dataclass만 쓸 수 있게)
+
+    if not os.path.exists(path):
+        raise ConfigError(
+            f"설정 파일이 없습니다: {path} "
+            f"(config/config.example.yaml을 복사해 채우세요)"
+        )
+
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            raw = yaml.safe_load(fh)
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"설정 파싱 실패({path}): {exc}") from exc
+
+    if not isinstance(raw, dict):
+        raise ConfigError(f"설정 최상위는 매핑이어야 합니다: {path}")
+
+    raw = _substitute_env(raw)
+    return _build_config(raw)
+
+
+def load_config_from_dict(raw: dict) -> AppConfig:
+    """이미 로드된 dict에서 AppConfig를 구성(테스트/임베드용).
+
+    env 치환·오버라이드·검증은 동일하게 적용한다.
+    """
+    raw = _substitute_env(dict(raw))
+    return _build_config(raw)
+
+
+def _build_config(raw: dict) -> AppConfig:
+    """치환 완료된 raw dict → 검증된 AppConfig."""
+    server = _section(raw, "server")
+    jira = _section(raw, "jira")
+    match = _section(raw, "match")
+    webhook = _section(raw, "webhook")
+    resume = _section(raw, "resume")
+    spawn = _section(raw, "spawn")
+    git = _section(raw, "git")
+    secrets = _section(raw, "secrets")
+    run = _section(raw, "run")
+
+    cfg = AppConfig(
+        role=str(raw.get("role", "central")).strip().lower(),
+        server=ServerConfig(
+            host=str(server.get("host", "0.0.0.0")),
+            port=int(server.get("port", 8787)),
+        ),
+        jira=JiraConfig(
+            base_url=str(jira.get("base_url", "")).rstrip("/"),
+            project=str(jira.get("project", "")),
+            poll_interval_sec=int(jira.get("poll_interval_sec", 60)),
+            watcher_token_file=str(jira.get("watcher_token_file", "")),
+            watcher_email=str(jira.get("watcher_email", "")),
+        ),
+        match=MatchConfig(statuses=list(match.get("statuses", []) or [])),
+        webhook=WebhookConfig(
+            enabled=bool(webhook.get("enabled", False)),
+            path=str(webhook.get("path", "/jira-webhook")),
+            shared_secret_file=str(webhook.get("shared_secret_file", "")),
+        ),
+        resume=ResumeConfig(
+            work_hours=str(resume.get("work_hours", "")),
+            timezone=str(resume.get("timezone", "Asia/Seoul")),
+            nightly_drain=str(resume.get("nightly_drain", "")),
+            reset_buffer_sec=int(resume.get("reset_buffer_sec", 120)),
+        ),
+        spawn=SpawnConfig(
+            image=str(spawn.get("image", "jira-auto-dispatcher:latest")),
+            network=str(spawn.get("network", "jad-net")),
+            central_url=str(spawn.get("central_url", "http://central:8787")),
+            mem_limit=str(spawn.get("mem_limit", "4g")),
+            docker_host=str(spawn.get("docker_host", "unix:///var/run/docker.sock")),
+        ),
+        git=GitConfig(
+            branch_prefix=str(git.get("branch_prefix", "auto/")),
+            github_owner=str(git.get("github_owner", "")),
+        ),
+        secrets=SecretsConfig(base_dir=str(secrets.get("base_dir", ""))),
+        run=RunConfig(
+            orchestrator_repo=str(run.get("orchestrator_repo", "")),
+            dlc_meta_repo=str(run.get("dlc_meta_repo", "")),
+            dataspace_docs_repo=str(run.get("dataspace_docs_repo", "")),
+            workspace_dir=str(run.get("workspace_dir", "")),
+            claude_bin=str(run.get("claude_bin", "claude")),
+            permission_mode=str(run.get("permission_mode", "skip")),
+            output_format=str(run.get("output_format", "stream-json")),
+            concurrency_per_worker=int(run.get("concurrency_per_worker", 1)),
+            global_concurrency=int(run.get("global_concurrency", 3)),
+        ),
+        worker_shared_secret=str(raw.get("worker_shared_secret", "")),
+        repo_map=dict(raw.get("repo_map", {}) or {}),
+    )
+
+    _apply_env_overrides(cfg)
+    _validate(cfg)
+    return cfg
+
+
+def _apply_env_overrides(cfg: AppConfig) -> None:
+    """env 오버라이드 적용(YAML보다 우선).
+
+    ``SECRETS_DIR``은 secrets.base_dir 안의 ``${SECRETS_DIR}`` 치환에서 이미
+    반영되지만, base_dir이 비어 있으면 SECRETS_DIR을 직접 채워 넣는다.
+    """
+    role = os.environ.get("ROLE")
+    if role:
+        cfg.role = role.strip().lower()
+
+    secrets_dir = os.environ.get("SECRETS_DIR")
+    if secrets_dir and (not cfg.secrets.base_dir or "${SECRETS_DIR}" in cfg.secrets.base_dir):
+        cfg.secrets.base_dir = cfg.secrets.base_dir.replace("${SECRETS_DIR}", secrets_dir) or secrets_dir
+
+    central_url = os.environ.get("CENTRAL_URL")
+    if central_url:
+        cfg.spawn.central_url = central_url
+
+    worker_secret = os.environ.get("WORKER_SHARED_SECRET")
+    if worker_secret:
+        cfg.worker_shared_secret = worker_secret
+
+
+def _validate(cfg: AppConfig) -> None:
+    """필수키 검증(fail-fast). central 역할에 필요한 최소 집합만 강제."""
+    missing: list[str] = []
+
+    if cfg.role not in ("central", "worker"):
+        raise ConfigError(f"role은 central|worker 여야 합니다: {cfg.role!r}")
+
+    if cfg.role == "central":
+        if not cfg.jira.base_url:
+            missing.append("jira.base_url")
+        if not cfg.jira.project:
+            missing.append("jira.project")
+        if not cfg.secrets.base_dir:
+            missing.append("secrets.base_dir (또는 env SECRETS_DIR)")
+        if not cfg.jira.watcher_token_file:
+            missing.append("jira.watcher_token_file")
+
+    # 미치환 ${VAR} 토큰이 남아 있으면 실패(조용한 오설정 방지).
+    if "${" in cfg.secrets.base_dir:
+        raise ConfigError(
+            f"secrets.base_dir 에 미치환 토큰이 남아 있습니다: {cfg.secrets.base_dir!r} "
+            f"(env SECRETS_DIR을 설정하세요)"
+        )
+
+    if missing:
+        raise ConfigError("필수 설정 누락: " + ", ".join(missing))
 
 
 def read_secret(base_dir: str, ref: str) -> "str | None":
     """secrets.base_dir 기준으로 시크릿 참조(ref=상대경로)를 읽어 반환.
 
-    TODO(Phase 1): os.path.join(base_dir, ref) UTF-8 읽기 + strip.
-    파일 부재 시 명확한 처리(None 또는 예외).
+    Args:
+        base_dir: 시크릿 루트(로컬=C:/temp, 컨테이너=/run/secrets 등).
+        ref: base_dir 상대 경로(예: ``service/jira-token``).
+
+    Returns:
+        파일 내용(양끝 공백/개행 strip). 파일이 없으면 None.
     """
-    raise NotImplementedError("TODO(Phase 1): 시크릿 파일 읽기 구현")
+    if not ref:
+        return None
+    path = os.path.join(base_dir, ref) if base_dir else ref
+    if not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as fh:
+        return fh.read().strip()

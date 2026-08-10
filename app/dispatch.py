@@ -1,10 +1,10 @@
-"""디스패치 — 사용자별 잡 큐 + central↔worker HTTP 프로토콜(중앙 전용).
+"""디스패치 — central↔worker HTTP 프로토콜(중앙 전용).
 
 역할:
-    폴러가 매핑한 잡을 "사용자별" 큐에 넣고(enqueue), 그 사용자의 worker가
+    폴러/웹훅이 매핑한 잡을 스케줄러에 등록(enqueue)하고, 그 사용자의 worker가
     HTTP로 다음 잡을 가져가고(GET .../next) 실행 상태·로그를 회신(POST .../status)
     하는 중앙 측 디스패치 허브. worker는 Jira를 직접 보지 않고 오직 이 HTTP로만
-    잡을 주고받는다.
+    잡을 주고받는다. **enqueue는 반드시 스케줄러 경유**(레포락/동시성 판단).
 
 역할 소속: **central**.
 
@@ -12,93 +12,139 @@
 
 HTTP 계약(dispatch_bp, main.py가 등록):
     GET  /dispatch/<user>/next
-        worker 폴링 진입점. 그 사용자의 다음 queued 잡 1건을 반환하고 running
-        으로 전이(원자적 클레임). 없으면 204/빈 응답.
+        worker 폴링 진입점. 스케줄러가 그 사용자에게 dispatch한(running) 잡을
+        반환. 없으면 204. (재폴링 시 같은 잡 멱등 반환 → --resume)
     POST /dispatch/<user>/<job>/status
-        worker가 상태/로그/결과를 회신. 본문: {status, log?, reset_at?, branch?,
-        session_id?, mr_url?, error?}. 상태머신(queue.py)에 반영.
+        worker가 상태/로그/결과를 회신(채널 F). 본문: {status, log_summary?,
+        reset_at?, branch?, session_id?, mr_url?, audit_refs?, error?}.
+        terminal(완료/실패)이면 scheduler.on_complete(레포락 해제→다음 dispatch),
+        interrupted면 scheduler.on_interrupt(reset_at 재적격), 그 외는 진행 갱신.
 
-잡 상태머신은 queue.py(Job/상태상수)를 재사용한다:
-    queued → running → (interrupted[reset_at]) → done/failed
-    interrupted는 스케줄러가 reset_at에 재-enqueue(worker가 --resume로 이어감).
-
-영속:
-    - 사용자별 큐는 state.py로 영속(JOBS_FILE, 사용자 키 포함) → 재시작 복원.
-    - concurrency_per_worker(기본 1) 초과 클레임 방지.
-
-참고:
-    - worker 인증: 최소한 사용자 스코프 토큰/공유 시크릿으로 next/status를 보호
-      (Phase 3에서 결정). 사내망 한정 전제이나 사용자 교차 클레임은 막는다.
+인증:
+    - worker 인증 = ``X-Worker-Secret`` 헤더(config WORKER_SHARED_SECRET). 설정 시
+      상수시간 비교로 검증하고 불일치는 401. 미설정(사내망 신뢰)이면 통과(경고).
+    - 교차 사용자 클레임 방지: job.user != <user> 이면 403.
 """
 
 from __future__ import annotations
 
+import hmac
 from typing import Optional
 
-from flask import Blueprint
+from flask import Blueprint, current_app, jsonify, request
 
 from app.queue import Job
 
-# 라우트는 main.py(central)에서 등록한다(Phase 3).
+# 라우트는 이 모듈에서 dispatch_bp에 직접 배선하고, main.py는 등록만 한다.
 dispatch_bp = Blueprint("dispatch", __name__)
+
+# Flask app.config 에서 Dispatcher를 꺼내는 키.
+DISPATCHER_KEY = "JAD_DISPATCHER"
 
 
 class Dispatcher:
-    """사용자별 잡 큐 + HTTP 핸들러(스텁)."""
+    """스케줄러 앞단 HTTP 어댑터 + 잡 조회(central)."""
 
-    def __init__(self, registry, job_queue) -> None:
-        """의존성 주입(레지스트리·잡 스토어).
-
-        TODO(Phase 3): 참조 보관 + 사용자별 큐 인덱스 준비(락 포함).
-        """
+    def __init__(self, registry, scheduler, worker_secret: str = "") -> None:
+        """의존성 주입(레지스트리·스케줄러) + worker 공유 시크릿."""
         self.registry = registry
-        self.queue = job_queue
+        self.scheduler = scheduler
+        self.worker_secret = worker_secret or ""
 
-    def enqueue(self, user: str, job: Job) -> None:
-        """사용자 user의 큐에 잡을 queued로 등록(폴러가 호출).
+    # -- 프로그램적 API --
 
-        TODO(Phase 3): 사용자 스코프로 job 태깅 → queue.enqueue → 영속.
+    def enqueue(self, user: str, job: Job) -> list:
+        """사용자 user 소유로 태깅해 스케줄러에 등록(레포락/동시성 판단은 스케줄러).
+
+        반환: 이 enqueue로 즉시 dispatch된 잡 id 목록.
         """
-        raise NotImplementedError("TODO(Phase 3): enqueue")
+        job.user = user
+        return self.scheduler.enqueue(job)
 
     def next_job(self, user: str) -> Optional[Job]:
-        """사용자 user의 다음 queued 잡을 반환하고 running 전이(원자적).
+        """그 사용자에게 dispatch된(running) 잡 1개(없으면 None)."""
+        return self.scheduler.next_for_user(user)
 
-        TODO(Phase 3): concurrency_per_worker 확인 → queued 1건 클레임 →
-        running 전이 → 반환. 없으면 None.
+    def report_status(self, user: str, job_id: str, payload: dict) -> dict:
+        """worker 회신을 상태머신/스케줄러에 반영.
+
+        Returns: {"ok": True, "dispatched": [...]} 또는 오류 dict.
+        Raises: PermissionError(교차 사용자), KeyError(미존재 잡).
         """
-        raise NotImplementedError("TODO(Phase 3): next_job")
+        job = self.scheduler.jobs.get(job_id)
+        if job is None:
+            raise KeyError(job_id)
+        if job.user != user:
+            raise PermissionError(f"교차 사용자 클레임 거부: {user} != {job.user}")
 
-    def report_status(self, user: str, job_id: str, payload: dict) -> None:
-        """worker 회신(status/log/reset_at 등)을 상태머신에 반영.
+        status = (payload or {}).get("status", "")
+        # 채널 F가 넘길 수 있는 부가 필드만 화이트리스트로 전달.
+        fields = {}
+        for k in ("log_summary", "reset_at", "branch", "session_id", "mr_url", "audit_refs"):
+            if k in (payload or {}):
+                fields[k] = payload[k]
+        # 별칭: worker가 'log'로 보낼 수도.
+        if "log" in (payload or {}) and "log_summary" not in fields:
+            fields["log_summary"] = payload["log"]
 
-        TODO(Phase 3): payload.status 검증 → queue.set_status → interrupted면
-        reset_at 기록(스케줄러가 재개 예약) → 영속.
-        """
-        raise NotImplementedError("TODO(Phase 3): report_status")
+        dispatched = self.scheduler.report(job_id, status, **fields)
+        return {"ok": True, "dispatched": dispatched}
 
     def list_jobs(self, user: Optional[str] = None) -> list:
-        """잡 현황 목록(전 사용자 또는 특정 사용자 — 관리 UI용).
+        """잡 현황(관리 UI용). user 지정 시 필터."""
+        jobs = self.scheduler.jobs.list_jobs()
+        if user is not None:
+            jobs = [j for j in jobs if j.user == user]
+        return jobs
 
-        TODO(Phase 3): user 필터 적용해 잡 스냅샷 반환.
-        """
-        raise NotImplementedError("TODO(Phase 3): list_jobs")
+    # -- 인증 --
+
+    def verify_secret(self, provided: Optional[str]) -> bool:
+        """X-Worker-Secret 검증(상수시간). 시크릿 미설정이면 통과."""
+        if not self.worker_secret:
+            return True
+        return bool(provided) and hmac.compare_digest(str(provided), self.worker_secret)
 
 
-# --- HTTP 핸들러(라우트 본체는 main.py에서 dispatch_bp에 배선) ---
+# --- HTTP 핸들러 ---
+
+
+def _get_dispatcher() -> Dispatcher:
+    disp = current_app.config.get(DISPATCHER_KEY)
+    if disp is None:
+        raise RuntimeError("Dispatcher가 app.config에 배선되지 않았습니다")
+    return disp
 
 
 def handle_next(dispatcher: Dispatcher, user: str):
-    """GET /dispatch/<user>/next — 다음 잡 1건 반환(running 전이).
+    """GET /dispatch/<user>/next — 다음 잡 1건 반환(없으면 204)."""
+    if not dispatcher.verify_secret(request.headers.get("X-Worker-Secret")):
+        return jsonify({"error": "unauthorized"}), 401
+    job = dispatcher.next_job(user)
+    if job is None:
+        return ("", 204)
+    return jsonify(job.to_dict())
 
-    TODO(Phase 3): dispatcher.next_job(user) → JSON. 없으면 204.
-    """
-    raise NotImplementedError("TODO(Phase 3): handle_next")
+
+def handle_status(dispatcher: Dispatcher, user: str, job: str, req):
+    """POST /dispatch/<user>/<job>/status — worker 상태/로그 회신 수신."""
+    if not dispatcher.verify_secret(req.headers.get("X-Worker-Secret")):
+        return jsonify({"error": "unauthorized"}), 401
+    payload = req.get_json(silent=True) or {}
+    try:
+        result = dispatcher.report_status(user, job, payload)
+    except KeyError:
+        return jsonify({"error": "unknown job", "job": job}), 404
+    except PermissionError as exc:
+        return jsonify({"error": str(exc)}), 403
+    return jsonify(result)
 
 
-def handle_status(dispatcher: Dispatcher, user: str, job: str, request):
-    """POST /dispatch/<user>/<job>/status — worker 상태/로그 회신 수신.
+@dispatch_bp.route("/dispatch/<user>/next", methods=["GET"])
+def route_next(user: str):
+    return handle_next(_get_dispatcher(), user)
 
-    TODO(Phase 3): request.json 파싱 → dispatcher.report_status → 2xx.
-    """
-    raise NotImplementedError("TODO(Phase 3): handle_status")
+
+@dispatch_bp.route("/dispatch/<user>/<job>/status", methods=["POST"])
+def route_status(user: str, job: str):
+    return handle_status(_get_dispatcher(), user, job, request)
