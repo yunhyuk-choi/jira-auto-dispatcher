@@ -21,14 +21,14 @@ def _cfg(tmp_path, *, with_urls=True):
         dlc_meta_repo=str(tmp_path / "meta"),
         dataspace_docs_repo=str(tmp_path / "docs"),
         orchestrator_repo_url=(
-            "http://server.interxlab.io:30000/yhchoi/ai-dlc-orchestrator.git"
+            "http://gitlab.example.com/your-namespace/ai-dlc-orchestrator.git"
             if with_urls else ""
         ),
         dlc_meta_repo_url=(
-            "http://server.interxlab.io:30000/hansa/docs/dlc-meta.git" if with_urls else ""
+            "http://gitlab.example.com/your-namespace/dlc-meta.git" if with_urls else ""
         ),
         dataspace_docs_repo_url=(
-            "http://server.interxlab.io:30000/hansa/dataspace_docs.git" if with_urls else ""
+            "http://gitlab.example.com/your-namespace/dataspace-docs.git" if with_urls else ""
         ),
     )
     return SimpleNamespace(run=run)
@@ -85,7 +85,7 @@ def test_clone_when_absent_uses_token_url_then_scrubs(tmp_path):
     # 클론 직후 remote는 토큰 없는 원본 URL로 정리된다.
     for c in set_urls:
         clean = c[-1]
-        assert clean.startswith("http://server.interxlab.io") and "oauth2" not in clean
+        assert clean.startswith("http://gitlab.example.com") and "oauth2" not in clean
         _assert_no_token(clean)
 
     # 결과 dict엔 토큰이 없다.

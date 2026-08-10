@@ -83,7 +83,7 @@ if command -v docker >/dev/null 2>&1; then
   done
 else
   echo "  (docker CLI 없음 — 서버에서 실행하거나 SSH로 확인:"
-  echo "     ssh yhchoi@61.96.103.14 'docker ps --filter name=jad-')"
+  echo "     ssh <deploy-user>@<DEV_SERVER_HOST> 'docker ps --filter name=jad-')"
 fi
 
 echo

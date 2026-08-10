@@ -43,14 +43,14 @@ def _cfg(base_dir: str, host_deploy_dir: str = ""):
 
 def _user():
     return UserRecord(
-        username="yh.choi",
+        username="testuser",
         jira_account_id="acc",
         jira_email="yh@x",
         permission_level="bypass",
         secrets_ref=SecretsRef(
-            jira_token="yh.choi/jira-token",
-            gitlab_token="yh.choi/gitlab-token",
-            claude_oauth_token="yh.choi/claude-oauth-token",
+            jira_token="testuser/jira-token",
+            gitlab_token="testuser/gitlab-token",
+            claude_oauth_token="testuser/claude-oauth-token",
         ),
     )
 
@@ -97,7 +97,7 @@ def test_render_settings_unsupported_is_todo():
 
 def test_ensure_worker_run_args(tmp_path, isolated_state):
     base = str(tmp_path / "secrets")
-    _write(base, "yh.choi/claude-oauth-token", "CLAUDE-XYZ")
+    _write(base, "testuser/claude-oauth-token", "CLAUDE-XYZ")
     reg = Registry()
     u = _user()
     reg.upsert(u)
@@ -109,7 +109,7 @@ def test_ensure_worker_run_args(tmp_path, isolated_state):
 
     kwargs = client.containers.run.call_args.kwargs
     assert kwargs["image"] == "jira-auto-dispatcher:latest"
-    assert kwargs["name"] == "jad-worker-yh.choi"
+    assert kwargs["name"] == "jad-worker-testuser"
     assert kwargs["network"] == "jad-net"
     assert kwargs["mem_limit"] == "4g"
     assert kwargs["restart_policy"] == {"Name": "unless-stopped"}
@@ -118,28 +118,28 @@ def test_ensure_worker_run_args(tmp_path, isolated_state):
 
     env = kwargs["environment"]
     assert env["ROLE"] == "worker"
-    assert env["DISPATCH_USER"] == "yh.choi"
+    assert env["DISPATCH_USER"] == "testuser"
     assert env["CENTRAL_URL"] == "http://central:8787"
     assert env["WORKER_SHARED_SECRET"] == "s3cr3t"
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "CLAUDE-XYZ"
     assert env["SECRETS_DIR"] == "/run/secrets"
-    assert env["JIRA_TOKEN_FILE"] == "/run/secrets/yh.choi/jira-token"
-    assert env["GITLAB_TOKEN_FILE"] == "/run/secrets/yh.choi/gitlab-token"
+    assert env["JIRA_TOKEN_FILE"] == "/run/secrets/testuser/jira-token"
+    assert env["GITLAB_TOKEN_FILE"] == "/run/secrets/testuser/gitlab-token"
     assert env["JIRA_EMAIL"] == "yh@x"
 
     vols = kwargs["volumes"]
-    assert vols["jad-yh.choi"] == {"bind": "/home/app/.claude", "mode": "rw"}
+    assert vols["jad-testuser"] == {"bind": "/home/app/.claude", "mode": "rw"}
     # 사전 인가 settings.json은 더 이상 파일 바인드하지 않는다(두 번째 spawn 버그 픽스 —
     # 명명 볼륨 하위 파일 경로에 바인드하면 runc가 거부). worker 부팅 시 복사로 대체.
     settings_binds = [v for v in vols.values() if v["bind"] == SETTINGS_PATH_IN_CONTAINER]
     assert settings_binds == []
     # per-user 시크릿 디렉토리는 read-only(claude-settings.json도 여기 포함).
-    secret_binds = [v for v in vols.values() if v["bind"] == "/run/secrets/yh.choi"]
+    secret_binds = [v for v in vols.values() if v["bind"] == "/run/secrets/testuser"]
     assert secret_binds and secret_binds[0]["mode"] == "ro"
 
     # 레지스트리 상태 갱신.
-    assert reg.get("yh.choi").container.status == "running"
-    assert reg.get("yh.choi").container.name == "jad-worker-yh.choi"
+    assert reg.get("testuser").container.status == "running"
+    assert reg.get("testuser").container.name == "jad-worker-testuser"
 
 
 def test_ensure_worker_default_run_as_when_unset(tmp_path, isolated_state):
@@ -159,7 +159,7 @@ def test_ensure_worker_writes_bypass_settings_file(tmp_path, isolated_state):
     u = _user()
     reg.upsert(u)
     Spawner(_cfg(base), reg, client=_client_absent()).ensure_worker(u)
-    path = os.path.join(base, "yh.choi", "claude-settings.json")
+    path = os.path.join(base, "testuser", "claude-settings.json")
     assert os.path.exists(path)
     data = json.load(open(path, encoding="utf-8"))
     assert data["permissions"]["defaultMode"] == "bypassPermissions"
@@ -167,17 +167,17 @@ def test_ensure_worker_writes_bypass_settings_file(tmp_path, isolated_state):
 
 def test_jira_gitlab_secrets_passed_as_path_not_value(tmp_path, isolated_state):
     base = str(tmp_path / "secrets")
-    _write(base, "yh.choi/jira-token", "JIRA-SECRET-VAL")
-    _write(base, "yh.choi/gitlab-token", "GL-SECRET-VAL")
-    _write(base, "yh.choi/claude-oauth-token", "CLAUDE-XYZ")
+    _write(base, "testuser/jira-token", "JIRA-SECRET-VAL")
+    _write(base, "testuser/gitlab-token", "GL-SECRET-VAL")
+    _write(base, "testuser/claude-oauth-token", "CLAUDE-XYZ")
     sp = Spawner(_cfg(base), Registry(), client=_client_absent())
     env = sp.build_env(_user())
     # Jira/GitLab 토큰 "값"은 어떤 env에도 실리지 않는다(파일경로만).
     joined = "\n".join(str(v) for v in env.values())
     assert "JIRA-SECRET-VAL" not in joined
     assert "GL-SECRET-VAL" not in joined
-    assert env["JIRA_TOKEN_FILE"].endswith("yh.choi/jira-token")
-    assert env["GITLAB_TOKEN_FILE"].endswith("yh.choi/gitlab-token")
+    assert env["JIRA_TOKEN_FILE"].endswith("testuser/jira-token")
+    assert env["GITLAB_TOKEN_FILE"].endswith("testuser/gitlab-token")
     # Claude setup-token은 값으로 주입(계약).
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "CLAUDE-XYZ"
 
@@ -223,9 +223,9 @@ def test_stop_worker(tmp_path, isolated_state):
     cont = MagicMock()
     client.containers.get.return_value = cont
     client.containers.get.side_effect = None
-    Spawner(_cfg(str(tmp_path / "s")), reg, client=client).stop_worker("yh.choi")
+    Spawner(_cfg(str(tmp_path / "s")), reg, client=client).stop_worker("testuser")
     cont.stop.assert_called_once()
-    assert reg.get("yh.choi").container.status == "stopped"
+    assert reg.get("testuser").container.status == "stopped"
 
 
 def test_remove_worker(tmp_path, isolated_state):
@@ -235,17 +235,17 @@ def test_remove_worker(tmp_path, isolated_state):
     cont = MagicMock()
     client.containers.get.return_value = cont
     client.containers.get.side_effect = None
-    Spawner(_cfg(str(tmp_path / "s")), reg, client=client).remove_worker("yh.choi")
+    Spawner(_cfg(str(tmp_path / "s")), reg, client=client).remove_worker("testuser")
     cont.remove.assert_called_once_with(force=True)
-    assert reg.get("yh.choi").container.status == "absent"
+    assert reg.get("testuser").container.status == "absent"
 
 
 def test_worker_status_absent(tmp_path, isolated_state):
     reg = Registry()
     reg.upsert(_user())
     sp = Spawner(_cfg(str(tmp_path / "s")), reg, client=_client_absent())
-    assert sp.worker_status("yh.choi") == "absent"
-    assert reg.get("yh.choi").container.status == "absent"
+    assert sp.worker_status("testuser") == "absent"
+    assert reg.get("testuser").container.status == "absent"
 
 
 def test_worker_status_running_and_stopped(tmp_path, isolated_state):
@@ -255,9 +255,9 @@ def test_worker_status_running_and_stopped(tmp_path, isolated_state):
     client.containers.get.side_effect = None
     client.containers.get.return_value = SimpleNamespace(status="running")
     sp = Spawner(_cfg(str(tmp_path / "s")), reg, client=client)
-    assert sp.worker_status("yh.choi") == "running"
+    assert sp.worker_status("testuser") == "running"
     client.containers.get.return_value = SimpleNamespace(status="exited")
-    assert sp.worker_status("yh.choi") == "stopped"
+    assert sp.worker_status("testuser") == "stopped"
 
 
 def test_status_update_noop_for_unregistered(tmp_path, isolated_state):
@@ -284,23 +284,23 @@ def test_module_level_ensure_worker(tmp_path, isolated_state):
 
 def test_build_volumes_uses_host_paths_when_host_deploy_dir_set(tmp_path, isolated_state):
     base = str(tmp_path / "secrets")
-    host = "/home/yhchoi/deploy/jira-auto-dispatcher"
+    host = "/home/<deploy-user>/deploy/jira-auto-dispatcher"
     sp = Spawner(_cfg(base, host_deploy_dir=host), Registry(), client=_client_absent())
-    settings_path = sp.write_settings("yh.choi", "bypass")
+    settings_path = sp.write_settings("testuser", "bypass")
     vols = sp.build_volumes(_user(), settings_path)
 
     # config: 호스트 경로 → /app/config (ro) — 크래시 픽스.
     assert vols[host + "/config"] == {"bind": CONFIG_DIR_IN_CONTAINER, "mode": "ro"}
     # per-user 시크릿: 호스트 경로 → /run/secrets/<user> (ro).
-    assert vols[host + "/secrets/yh.choi"] == {"bind": "/run/secrets/yh.choi", "mode": "ro"}
+    assert vols[host + "/secrets/testuser"] == {"bind": "/run/secrets/testuser", "mode": "ro"}
     # settings.json은 더 이상 파일 바인드하지 않는다(두 번째 spawn 버그 픽스).
-    assert host + "/secrets/yh.choi/claude-settings.json" not in vols
+    assert host + "/secrets/testuser/claude-settings.json" not in vols
     assert all(v["bind"] != SETTINGS_PATH_IN_CONTAINER for v in vols.values())
     # 명명 볼륨은 호스트 경로 무관 — 그대로.
-    assert vols["jad-yh.choi"] == {"bind": "/home/app/.claude", "mode": "rw"}
+    assert vols["jad-testuser"] == {"bind": "/home/app/.claude", "mode": "rw"}
     # central 내부 경로(settings_path·base_dir/<user>)는 worker 바인드 source로 쓰이지 않는다.
     assert settings_path not in vols
-    assert os.path.join(base, "yh.choi") not in vols
+    assert os.path.join(base, "testuser") not in vols
 
 
 def test_build_volumes_fallback_warns_and_uses_direct_paths(tmp_path, isolated_state, caplog):
@@ -308,7 +308,7 @@ def test_build_volumes_fallback_warns_and_uses_direct_paths(tmp_path, isolated_s
 
     base = str(tmp_path / "secrets")
     sp = Spawner(_cfg(base), Registry(), client=_client_absent())  # host_deploy_dir 미설정
-    settings_path = sp.write_settings("yh.choi", "bypass")
+    settings_path = sp.write_settings("testuser", "bypass")
     with caplog.at_level(logging.WARNING, logger="jad.spawner"):
         vols = sp.build_volumes(_user(), settings_path)
     # 경고 로그.
@@ -316,7 +316,7 @@ def test_build_volumes_fallback_warns_and_uses_direct_paths(tmp_path, isolated_s
     # 직접 경로 폴백: base_dir/<user> 를 source로. settings.json은 바인드 안 함.
     assert settings_path not in vols
     assert all(v["bind"] != SETTINGS_PATH_IN_CONTAINER for v in vols.values())
-    assert os.path.join(base, "yh.choi") in vols
+    assert os.path.join(base, "testuser") in vols
     # config 마운트는 폴백에서도 포함.
     config_binds = [v for v in vols.values() if v["bind"] == CONFIG_DIR_IN_CONTAINER]
     assert config_binds and config_binds[0]["mode"] == "ro"
@@ -327,7 +327,7 @@ def test_build_volumes_config_mount_always_present(tmp_path, isolated_state):
     # host_deploy_dir 설정·미설정 양쪽 모두 config 마운트가 항상 포함된다.
     for cfg in (_cfg(base), _cfg(base, host_deploy_dir="/host/deploy")):
         sp = Spawner(cfg, Registry(), client=_client_absent())
-        settings_path = sp.write_settings("yh.choi", "bypass")
+        settings_path = sp.write_settings("testuser", "bypass")
         vols = sp.build_volumes(_user(), settings_path)
         binds = [v["bind"] for v in vols.values()]
         assert CONFIG_DIR_IN_CONTAINER in binds
@@ -341,7 +341,7 @@ def test_build_volumes_no_settings_file_bind(tmp_path, isolated_state):
     base = str(tmp_path / "secrets")
     for cfg in (_cfg(base), _cfg(base, host_deploy_dir="/host/deploy")):
         sp = Spawner(cfg, Registry(), client=_client_absent())
-        settings_path = sp.write_settings("yh.choi", "bypass")
+        settings_path = sp.write_settings("testuser", "bypass")
         vols = sp.build_volumes(_user(), settings_path)
         # settings.json 파일 바인드가 어느 source·bind로도 존재하지 않는다.
         assert all(v["bind"] != SETTINGS_PATH_IN_CONTAINER for v in vols.values())
@@ -351,7 +351,7 @@ def test_build_volumes_no_settings_file_bind(tmp_path, isolated_state):
         # 정확히 config·claude 명명 볼륨·per-user 시크릿 dir 3개만.
         binds = sorted(v["bind"] for v in vols.values())
         assert binds == sorted(
-            [CONFIG_DIR_IN_CONTAINER, "/home/app/.claude", "/run/secrets/yh.choi"]
+            [CONFIG_DIR_IN_CONTAINER, "/home/app/.claude", "/run/secrets/testuser"]
         )
 
 

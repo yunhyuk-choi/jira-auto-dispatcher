@@ -1,4 +1,4 @@
-# .github/workflows/ci.yml — GitHub(yunhyuk-choi/jira-auto-dispatcher) 개인 미러용 CI.
+# .github/workflows/ci.yml — GitHub(<your-github-owner>/jira-auto-dispatcher) 개인 미러용 CI.
 #
 # 배포 없음. pytest 게이트만(126 통과). 실제 배포·이미지 빌드·무중단 교체는
 # 사내 GitLab 파이프라인(.gitlab-ci.yml)이 담당한다. 여기는 개인 리포에서의

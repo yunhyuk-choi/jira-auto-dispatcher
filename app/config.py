@@ -100,7 +100,7 @@ class SpawnConfig:
     # central이 Docker SDK(socket-proxy 경유)로 worker를 띄울 때 바인드 마운트의
     # source 경로는 **호스트 docker 데몬**이 해석한다(sibling container). 따라서
     # worker 바인드 source를 호스트 경로로 주려면 central이 자신의 호스트 배포
-    # 경로를 알아야 한다. 예: /home/yhchoi/deploy/jira-auto-dispatcher.
+    # 경로를 알아야 한다. 예: /home/<deploy-user>/deploy/jira-auto-dispatcher.
     # env HOST_DEPLOY_DIR 폴백 우선. 비어 있으면(로컬 개발 등) 직접 경로 폴백.
     host_deploy_dir: str = ""
 

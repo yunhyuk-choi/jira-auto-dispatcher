@@ -13,7 +13,7 @@
 #
 # 사용법:
 #   bash scripts/observe-job.sh <TICKET> [USER] [BASE_URL] [--once] [--interval N]
-#     TICKET    필수. 예: HAN-142
+#     TICKET    필수. 예: <PROJECT_KEY>-142
 #     USER      선택. 같은 티켓이 여러 사용자에 없다면 생략 가능(생략 시 티켓만으로 매칭).
 #     BASE_URL  선택. 기본 http://localhost:8787
 #     --once        1회 출력 후 종료(폴링 안 함).

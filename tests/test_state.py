@@ -31,11 +31,11 @@ def test_corrupt_returns_default(isolated_state):
 
 
 def test_targeted_helpers(isolated_state):
-    state.save_jobs([{"ticket": "HAN-1"}])
-    state.save_dedup(["HAN-1"])
+    state.save_jobs([{"ticket": "PROJ-1"}])
+    state.save_dedup(["PROJ-1"])
     state.save_watermark("2026-08-10T00:00:00")
     state.save_registry({"users": [{"username": "u"}]})
-    assert state.load_jobs() == [{"ticket": "HAN-1"}]
-    assert state.load_dedup() == ["HAN-1"]
+    assert state.load_jobs() == [{"ticket": "PROJ-1"}]
+    assert state.load_dedup() == ["PROJ-1"]
     assert state.load_watermark() == "2026-08-10T00:00:00"
     assert state.load_registry() == {"users": [{"username": "u"}]}

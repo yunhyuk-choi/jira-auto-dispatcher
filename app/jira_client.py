@@ -19,7 +19,7 @@
     - POST /rest/api/3/search/jql                  JQL 검색(신 API, nextPageToken)
     ⚠️ /rest/api/2/search·/rest/api/3/search 는 Atlassian이 삭제 — 사용 금지.
 
-커스텀 필드(HAN 프로젝트):
+커스텀 필드(PROJ 프로젝트):
     - customfield_10015  시작날짜(착수 시 필수)
     - duedate            마감일(착수 시 필수)
     - customfield_10187  실제 시작일(완료 전이 시 필수)
@@ -38,7 +38,7 @@ from typing import Any, Optional
 
 import requests
 
-# HAN 프로젝트 커스텀 필드 상수(전이 헬퍼에서 사용).
+# PROJ 프로젝트 커스텀 필드 상수(전이 헬퍼에서 사용).
 FIELD_START_DATE = "customfield_10015"   # 시작날짜(착수)
 FIELD_DUE_DATE = "duedate"               # 마감일(착수)
 FIELD_ACTUAL_START = "customfield_10187"  # 실제 시작일(완료)

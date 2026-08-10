@@ -1,7 +1,7 @@
 # E2E.md — jira-auto-dispatcher 개발서버 E2E 검증 시나리오
 
-> **목적.** central이 개발서버(61.96.103.14)에 배포된 뒤, 운영자/사용자가 **직접 온보딩**하고
-> **실 Jira(HAN) 티켓**으로 전(全) 플로우를 검증한다. 배포 자체는 [DEPLOY.md](DEPLOY.md), 보안
+> **목적.** central이 개발서버(<DEV_SERVER_HOST>)에 배포된 뒤, 운영자/사용자가 **직접 온보딩**하고
+> **실 Jira(<PROJECT_KEY>) 티켓**으로 전(全) 플로우를 검증한다. 배포 자체는 [DEPLOY.md](DEPLOY.md), 보안
 > 인가 근거는 [SECURITY.md](SECURITY.md), 전체 동작 계약은
 > `dlc-meta/RECURSIVE-DISPATCH.md`(이하 §는 그 문서 절 번호)가 정본이다.
 >
@@ -17,11 +17,11 @@
 
 - DEPLOY.md 1~5단계 완료(이미지 빌드 → config.yaml → 시크릿(service/jira-token, .env의
   `WORKER_SHARED_SECRET`) → `docker compose up -d`).
-- 개발서버 SSH 접근(`yhchoi@61.96.103.14`).
+- 개발서버 SSH 접근(`<deploy-user>@<DEV_SERVER_HOST>`).
 - 관리 UI는 **사내망 한정**이므로 SSH 터널로 연다:
 
   ```bash
-  ssh -L 8787:localhost:8787 yhchoi@61.96.103.14   # 로컬 http://localhost:8787 → 서버 central
+  ssh -L 8787:localhost:8787 <deploy-user>@<DEV_SERVER_HOST>   # 로컬 http://localhost:8787 → 서버 central
   ```
 
 - **본인 노트북**에서 `claude setup-token`(Max, long-lived) 발급값을 미리 준비(온보딩 입력용).
@@ -49,10 +49,10 @@ bash scripts/smoke-deployed.sh http://localhost:8787
 ### 0.4 실패 시 확인 로그
 
 ```bash
-ssh yhchoi@61.96.103.14 'cd /opt/jira-auto-dispatcher && docker compose ps'
-ssh yhchoi@61.96.103.14 'cd /opt/jira-auto-dispatcher && docker compose logs --tail=100 central'
+ssh <deploy-user>@<DEV_SERVER_HOST> 'cd /opt/jira-auto-dispatcher && docker compose ps'
+ssh <deploy-user>@<DEV_SERVER_HOST> 'cd /opt/jira-auto-dispatcher && docker compose logs --tail=100 central'
 # 폴러/워처/스케줄러 스레드 기동 여부(부팅 로그):
-ssh yhchoi@61.96.103.14 'cd /opt/jira-auto-dispatcher && docker compose logs central | grep -iE "poll|watcher|scheduler|bind|8787"'
+ssh <deploy-user>@<DEV_SERVER_HOST> 'cd /opt/jira-auto-dispatcher && docker compose logs central | grep -iE "poll|watcher|scheduler|bind|8787"'
 ```
 
 - `/healthz`가 안 뜨면 → central 컨테이너 미기동/포트 매핑(8787) 확인, 터널 재확인.
@@ -79,11 +79,11 @@ CLI로 확인만 할 때(값 노출 주의 — 실제 토큰은 UI로 입력 권
 ```bash
 curl -sS -X POST http://localhost:8787/onboard \
   -H 'Content-Type: application/json' \
-  -d '{"username":"yh.choi","jira_account_id":"712020:...","jira_email":"yh.choi@interxlab.com",
+  -d '{"username":"<username>","jira_account_id":"<JIRA_ACCOUNT_ID>","jira_email":"you@example.com",
        "jira_token":"<JIRA_API_TOKEN>","claude_setup_token":"<SETUP_TOKEN>",
-       "gitlab_token":"<GITLAB_PAT>","git_name":"yunhyuk-choi","git_email":"yh.choi@interxlab.com",
-       "autonomy_mode":"B","scope":"HAN"}'
-# 기대: HTTP 201 {"status":"ok","username":"yh.choi","enabled":false}
+       "gitlab_token":"<GITLAB_PAT>","git_name":"<git-name>","git_email":"you@example.com",
+       "autonomy_mode":"B","scope":"<PROJECT_KEY>"}'
+# 기대: HTTP 201 {"status":"ok","username":"<username>","enabled":false}
 ```
 
 ### 1.2 조작 — 활성화(enable) → worker spawn
@@ -93,7 +93,7 @@ central이 per-user 볼륨 `jad-<username>` 보장 + 사전 인가 `settings.jso
 `jad-worker-<username>` 컨테이너를 같은 image·`jad-net`·비-root(1000:1000)로 spawn 한다(DEPLOY §6).
 
 ```bash
-curl -sS -X POST http://localhost:8787/users/yh.choi/enable
+curl -sS -X POST http://localhost:8787/users/<username>/enable
 # 기대: {"status":"enabled","container":"running"}
 ```
 
@@ -103,34 +103,34 @@ curl -sS -X POST http://localhost:8787/users/yh.choi/enable
   `secrets/<username>/`에 0600으로 기록(jira-token·gitlab-token·claude-oauth-token).
 - `GET /api/users`에 사용자 1건, 최초 `enabled=false` → enable 후 `enabled=true`.
 - enable → `{"status":"enabled","container":"running"}`.
-- 서버 `docker ps`에 **`jad-worker-yh.choi` Up**:
+- 서버 `docker ps`에 **`jad-worker-<username>` Up**:
 
   ```bash
-  ssh yhchoi@61.96.103.14 'docker ps --filter name=jad-worker-'
+  ssh <deploy-user>@<DEV_SERVER_HOST> 'docker ps --filter name=jad-worker-'
   ```
 - worker 로그에 폴링 루프 기동(및 claude 준비):
 
   ```bash
-  ssh yhchoi@61.96.103.14 'docker logs jad-worker-yh.choi --tail=50'
+  ssh <deploy-user>@<DEV_SERVER_HOST> 'docker logs jad-worker-<username> --tail=50'
   ```
 - worker 내부 헬스:
 
   ```bash
-  ssh yhchoi@61.96.103.14 'docker exec jad-worker-yh.choi curl -fsS http://localhost:8787/healthz'
-  # {"status":"ok","role":"worker","user":"yh.choi"}
+  ssh <deploy-user>@<DEV_SERVER_HOST> 'docker exec jad-worker-<username> curl -fsS http://localhost:8787/healthz'
+  # {"status":"ok","role":"worker","user":"<username>"}
   ```
 
 ### 1.4 실패 시 확인 로그
 
 - enable이 **502 `spawn_error`** → central이 docker(프록시)로 컨테이너를 못 띄운 것:
   ```bash
-  ssh yhchoi@61.96.103.14 'cd /opt/jira-auto-dispatcher && docker compose logs --tail=100 central | grep -i spawn'
+  ssh <deploy-user>@<DEV_SERVER_HOST> 'cd /opt/jira-auto-dispatcher && docker compose logs --tail=100 central | grep -i spawn'
   # socket-proxy 정합 확인(config spawn.docker_host=tcp://socket-proxy:2375, DEPLOY §2·§5):
-  ssh yhchoi@61.96.103.14 'docker logs jad-socket-proxy --tail=50'
+  ssh <deploy-user>@<DEV_SERVER_HOST> 'docker logs jad-socket-proxy --tail=50'
   ```
 - worker가 떴다 바로 죽으면(Restarting/Exited) → claude 인증 실패 가능(setup-token 만료/오타):
   ```bash
-  ssh yhchoi@61.96.103.14 'docker logs jad-worker-yh.choi --tail=100'
+  ssh <deploy-user>@<DEV_SERVER_HOST> 'docker logs jad-worker-<username> --tail=100'
   ```
   토큰 재발급 후 같은 username으로 재온보딩 → `container/stop`→`start`로 재기동(DEPLOY §6).
 - 온보딩이 **400 필수필드 누락** → 응답 `missing` 배열 확인. **409** → 이미 등록된 username
@@ -146,7 +146,7 @@ curl -sS -X POST http://localhost:8787/users/yh.choi/enable
 
 ### 2.1 조작 — 테스트 티켓 생성(사용자 직접)
 
-Jira(HAN)에서 **자기 자신이 담당자(assignee)** 인 테스트 티켓을 만든다.
+Jira(<PROJECT_KEY>)에서 **자기 자신이 담당자(assignee)** 인 테스트 티켓을 만든다.
 
 - 상태 = `해야 할 일`(match.statuses). assignee accountId = 온보딩한 `jira_account_id`와 일치.
 - 요약/설명은 **작고 안전한 스코프**로(예: 특정 레포 README 한 줄 추가). 실제 코드에 영향이
@@ -188,13 +188,13 @@ bash scripts/observe-job.sh <TICKET> <user> http://localhost:8787   # /api/jobs 
 
 - 티켓을 만들었는데 **잡이 안 생김**(`/api/jobs` 비어 있음):
   ```bash
-  ssh yhchoi@61.96.103.14 'cd /opt/jira-auto-dispatcher && docker compose logs --tail=100 central | grep -iE "poll|claim|map|assignee"'
+  ssh <deploy-user>@<DEV_SERVER_HOST> 'cd /opt/jira-auto-dispatcher && docker compose logs --tail=100 central | grep -iE "poll|claim|map|assignee"'
   ```
   - assignee accountId 불일치 / 사용자 `enabled=false` / 상태가 `해야 할 일`이 아님 /
-    프로젝트가 HAN이 아님(config.jira.project) 중 하나. 폴링 주기(60s) 대기했는지 확인.
+    프로젝트가 <PROJECT_KEY>이 아님(config.jira.project) 중 하나. 폴링 주기(60s) 대기했는지 확인.
 - 잡이 `running`인데 worker가 안 받음:
   ```bash
-  ssh yhchoi@61.96.103.14 'docker logs jad-worker-<user> --tail=100'
+  ssh <deploy-user>@<DEV_SERVER_HOST> 'docker logs jad-worker-<user> --tail=100'
   ```
   - `X-Worker-Secret` 불일치(401) → central `.env`와 worker env의 `WORKER_SHARED_SECRET` 정합 확인.
   - claude 인증 실패 → setup-token 재발급/재온보딩(1.4).
@@ -203,7 +203,7 @@ bash scripts/observe-job.sh <TICKET> <user> http://localhost:8787   # /api/jobs 
     실행 요약(`log_summary`)·`GET /api/jobs`의 해당 잡 로그 확인.
 - 잡이 `failed`로 회신:
   ```bash
-  ssh yhchoi@61.96.103.14 'docker logs jad-worker-<user> --tail=200'
+  ssh <deploy-user>@<DEV_SERVER_HOST> 'docker logs jad-worker-<user> --tail=200'
   ```
   `/api/jobs`의 `log_summary`(시크릿 마스킹됨)에서 원인 파악.
 
@@ -231,8 +231,8 @@ bash scripts/observe-job.sh <TICKET> <user> http://localhost:8787   # /api/jobs 
 ### 3.3 실패 시 확인 로그
 
 ```bash
-ssh yhchoi@61.96.103.14 'docker logs jad-worker-<user> --tail=100 | grep -iE "limit|resume|reset"'
-ssh yhchoi@61.96.103.14 'cd /opt/jira-auto-dispatcher && docker compose logs --tail=50 central | grep -i tick'
+ssh <deploy-user>@<DEV_SERVER_HOST> 'docker logs jad-worker-<user> --tail=100 | grep -iE "limit|resume|reset"'
+ssh <deploy-user>@<DEV_SERVER_HOST> 'cd /opt/jira-auto-dispatcher && docker compose logs --tail=50 central | grep -i tick'
 bash scripts/observe-job.sh <TICKET> <user>    # reset_at·status 추적
 ```
 
@@ -288,7 +288,7 @@ bash scripts/observe-job.sh <TICKET> <user>    # cancelling → cancelled 추적
 관측:
 
 ```bash
-ssh yhchoi@61.96.103.14 'cd /opt/jira-auto-dispatcher && docker compose logs --tail=100 central | grep -iE "reopen|재오픈|enqueue"'
+ssh <deploy-user>@<DEV_SERVER_HOST> 'cd /opt/jira-auto-dispatcher && docker compose logs --tail=100 central | grep -iE "reopen|재오픈|enqueue"'
 bash scripts/observe-job.sh <TICKET> <user>    # cancelled → queued → running
 ```
 
@@ -296,7 +296,7 @@ bash scripts/observe-job.sh <TICKET> <user>    # cancelled → queued → runnin
 
 - 취소가 안 잡힘: status_watcher가 도는지 + JQL 대상인지 확인.
   ```bash
-  ssh yhchoi@61.96.103.14 'cd /opt/jira-auto-dispatcher && docker compose logs central | grep -i status_watcher'
+  ssh <deploy-user>@<DEV_SERVER_HOST> 'cd /opt/jira-auto-dispatcher && docker compose logs central | grep -i status_watcher'
   ```
   - 잡이 이미 종결(done/failed)이거나 추적 대상이 아니면 취소는 멱등 스킵된다(정상).
 - 롤백 안 됨(브랜치/MR 잔존): worker 로그의 롤백 요약 확인. 브랜치/MR이 아직 없으면 스킵이
@@ -327,14 +327,14 @@ bash scripts/observe-job.sh <TICKET> <user>    # cancelled → queued → runnin
 # 특정 사용자 worker 중지(테스트 계정 정리 시): UI disable 또는
 curl -sS -X POST http://localhost:8787/users/<user>/disable    # {"status":"disabled","container":"stopped"}
 # 개별 컨테이너 확인
-ssh yhchoi@61.96.103.14 'docker ps --filter name=jad-worker-'
+ssh <deploy-user>@<DEV_SERVER_HOST> 'docker ps --filter name=jad-worker-'
 ```
 
 - 상태 저장(jobs/watermark/dedup/registry)은 명명 볼륨 `jad-state`에 영속한다. 완전 초기화가
   필요하면(테스트 잔재 제거) 운영자가 의도적으로 볼륨을 비운다(주의 — 실사용 데이터 포함).
   ```bash
   # ⚠️ 파괴적 — 테스트 전용 환경에서만.
-  ssh yhchoi@61.96.103.14 'cd /opt/jira-auto-dispatcher && docker compose down && docker volume rm jad-state'
+  ssh <deploy-user>@<DEV_SERVER_HOST> 'cd /opt/jira-auto-dispatcher && docker compose down && docker volume rm jad-state'
   ```
 
 ---
@@ -364,7 +364,7 @@ ssh yhchoi@61.96.103.14 'docker ps --filter name=jad-worker-'
 
 - **잡 상태**(내부): `queued` → `running` → `done`|`failed`; 한도 시 `interrupted`(→재개);
   취소 시 `cancelling` → `cancelled`(재오픈 시 다시 `queued`).
-- **Jira 상태**(HAN): `해야 할 일` → `진행 중` → `완료` (+ **`취소됨`**; 범주는 완료지만 이름으로
+- **Jira 상태**(<PROJECT_KEY>): `해야 할 일` → `진행 중` → `완료` (+ **`취소됨`**; 범주는 완료지만 이름으로
   중단 구분). match.statuses = `["해야 할 일"]`가 트리거 대상.
 
 ## 부록 C — 주기(참고)

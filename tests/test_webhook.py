@@ -58,35 +58,35 @@ def test_verify_signature():
 
 def test_handle_webhook_reverifies_and_enqueues(isolated_state):
     _, sch, disp, gate, jira, cfg = _wire(_issue("a1"))
-    req = FakeReq(json={"issue": {"key": "HAN-1"}}, headers={"X-Webhook-Secret": "s"})
+    req = FakeReq(json={"issue": {"key": "PROJ-1"}}, headers={"X-Webhook-Secret": "s"})
     body, code = handle_webhook(req, cfg, jira, gate, disp.registry, disp, shared_secret="s")
     assert code == 200 and body["status"] == "accepted"
-    assert jira.get_calls == ["HAN-1"]              # 페이로드 대신 Jira 재검증
-    assert sch.jobs.get("HAN-1").user == "u1"
-    assert gate.is_claimed("HAN-1") is True
+    assert jira.get_calls == ["PROJ-1"]              # 페이로드 대신 Jira 재검증
+    assert sch.jobs.get("PROJ-1").user == "u1"
+    assert gate.is_claimed("PROJ-1") is True
 
 
 def test_handle_webhook_bad_secret_401(isolated_state):
     _, _, disp, gate, jira, cfg = _wire(_issue("a1"))
-    req = FakeReq(json={"issue": {"key": "HAN-1"}}, headers={"X-Webhook-Secret": "wrong"})
+    req = FakeReq(json={"issue": {"key": "PROJ-1"}}, headers={"X-Webhook-Secret": "wrong"})
     _, code = handle_webhook(req, cfg, jira, gate, disp.registry, disp, shared_secret="s")
     assert code == 401
 
 
 def test_handle_webhook_status_mismatch_ignored(isolated_state):
     _, sch, disp, gate, jira, cfg = _wire(_issue("a1", status="완료"))  # 트리거 상태 아님
-    req = FakeReq(json={"issue": {"key": "HAN-1"}})
+    req = FakeReq(json={"issue": {"key": "PROJ-1"}})
     body, code = handle_webhook(req, cfg, jira, gate, disp.registry, disp)
     assert code == 200 and body["status"] == "ignored"
-    assert sch.jobs.get("HAN-1") is None
+    assert sch.jobs.get("PROJ-1") is None
 
 
 def test_handle_webhook_unmapped_ignored(isolated_state):
     _, sch, disp, gate, jira, cfg = _wire(_issue("unknown"))
-    req = FakeReq(json={"issue": {"key": "HAN-1"}})
+    req = FakeReq(json={"issue": {"key": "PROJ-1"}})
     body, code = handle_webhook(req, cfg, jira, gate, disp.registry, disp)
     assert body["status"] == "ignored"
-    assert sch.jobs.get("HAN-1") is None
+    assert sch.jobs.get("PROJ-1") is None
 
 
 def test_register_webhook_disabled_by_default(isolated_state):

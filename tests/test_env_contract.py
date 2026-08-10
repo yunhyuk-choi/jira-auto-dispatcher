@@ -38,15 +38,15 @@ def _cfg(base_dir: str):
 
 def _user():
     return UserRecord(
-        username="yh.choi",
+        username="testuser",
         jira_account_id="acc",
         jira_email="yh@x.com",
         permission_level="bypass",
-        identity=Identity(git_name="YH Choi", git_email="yh.choi@interxlab.com"),
+        identity=Identity(git_name="Test User", git_email="you@example.com"),
         secrets_ref=SecretsRef(
-            jira_token="yh.choi/jira-token",
-            gitlab_token="yh.choi/gitlab-token",
-            claude_oauth_token="yh.choi/claude-oauth-token",
+            jira_token="testuser/jira-token",
+            gitlab_token="testuser/gitlab-token",
+            claude_oauth_token="testuser/claude-oauth-token",
         ),
     )
 
@@ -61,7 +61,7 @@ def _write(base: str, rel: str, value: str) -> None:
 def test_build_env_to_from_env_roundtrip_populates_all(tmp_path):
     """핵심 회귀: build_env → from_env 왕복으로 모든 정체성/참조 필드가 채워진다."""
     base = str(tmp_path / "secrets")
-    _write(base, "yh.choi/claude-oauth-token", "CLAUDE-XYZ")
+    _write(base, "testuser/claude-oauth-token", "CLAUDE-XYZ")
 
     user = _user()
     env = Spawner(_cfg(base)).build_env(user)
@@ -70,13 +70,13 @@ def test_build_env_to_from_env_roundtrip_populates_all(tmp_path):
     creds = UserCreds.from_env(user.username, env=env)
 
     # 모든 필드가 비어 있지 않아야 한다(하나라도 빈 값이면 링치핀 버그 재발).
-    assert creds.user == "yh.choi"
-    assert creds.git_name == "YH Choi"
-    assert creds.git_email == "yh.choi@interxlab.com"
+    assert creds.user == "testuser"
+    assert creds.git_name == "Test User"
+    assert creds.git_email == "you@example.com"
     assert creds.jira_email == "yh@x.com"
-    assert creds.jira_token_ref == "yh.choi/jira-token"
-    assert creds.gitlab_token_ref == "yh.choi/gitlab-token"
-    assert creds.claude_oauth_token_ref == "yh.choi/claude-oauth-token"
+    assert creds.jira_token_ref == "testuser/jira-token"
+    assert creds.gitlab_token_ref == "testuser/gitlab-token"
+    assert creds.claude_oauth_token_ref == "testuser/claude-oauth-token"
     # Claude 값도 폴백 경로로 전달된다(참조 + 값 둘 다).
     assert creds.claude_oauth_token_value == "CLAUDE-XYZ"
 
@@ -91,16 +91,16 @@ def test_build_env_emits_from_env_contract_keys(tmp_path):
     ):
         assert env.get(key), f"build_env가 계약 키를 누락: {key}"
     # 참조는 상대 ref(base_dir 상대) — 절대경로/마운트경로가 아님.
-    assert env["JIRA_TOKEN_REF"] == "yh.choi/jira-token"
-    assert env["GITLAB_TOKEN_REF"] == "yh.choi/gitlab-token"
-    assert env["CLAUDE_OAUTH_TOKEN_REF"] == "yh.choi/claude-oauth-token"
+    assert env["JIRA_TOKEN_REF"] == "testuser/jira-token"
+    assert env["GITLAB_TOKEN_REF"] == "testuser/gitlab-token"
+    assert env["CLAUDE_OAUTH_TOKEN_REF"] == "testuser/claude-oauth-token"
 
 
 def test_build_env_does_not_leak_token_values(tmp_path):
     """토큰 '값'은 참조/파일경로로만 넘기고 env에 실리지 않는다(Claude 값 제외)."""
     base = str(tmp_path / "secrets")
-    _write(base, "yh.choi/jira-token", "JIRA-SECRET-VAL")
-    _write(base, "yh.choi/gitlab-token", "GL-SECRET-VAL")
+    _write(base, "testuser/jira-token", "JIRA-SECRET-VAL")
+    _write(base, "testuser/gitlab-token", "GL-SECRET-VAL")
     env = Spawner(_cfg(base)).build_env(_user())
     joined = "\n".join(str(v) for v in env.values())
     assert "JIRA-SECRET-VAL" not in joined

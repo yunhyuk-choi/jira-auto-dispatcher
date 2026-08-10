@@ -11,8 +11,8 @@
 
 | 항목 | 값 |
 |---|---|
-| 개발서버 | **61.96.103.14** |
-| SSH 계정 | `yhchoi` |
+| 개발서버 | **<DEV_SERVER_HOST>** |
+| SSH 계정 | `<deploy-user>` |
 | 필요 런타임 | Docker Engine + Docker Compose v2 (`docker compose`) |
 | 이미지 | `jira-auto-dispatcher:latest` (central·worker 공용 단일 이미지) |
 | 네트워크 | `jad-net` (compose가 생성; 동적 worker가 이름으로 합류) |
@@ -39,10 +39,10 @@ rsync -az --delete \
   --exclude '.git' --exclude 'state/' --exclude 'secrets/' --exclude 'workspace/' \
   --exclude 'orchestrator/' --exclude 'dlc-meta/' --exclude 'dataspace_docs/' \
   --exclude 'config/config.yaml' \
-  ./ yhchoi@61.96.103.14:/opt/jira-auto-dispatcher/
+  ./ <deploy-user>@<DEV_SERVER_HOST>:/opt/jira-auto-dispatcher/
 
 # 서버에서 빌드
-ssh yhchoi@61.96.103.14
+ssh <deploy-user>@<DEV_SERVER_HOST>
 cd /opt/jira-auto-dispatcher
 docker build -t jira-auto-dispatcher:latest .
 docker run --rm --entrypoint claude jira-auto-dispatcher:latest --version   # 레이어 검증
@@ -53,8 +53,8 @@ docker run --rm --entrypoint claude jira-auto-dispatcher:latest --version   # �
 ```bash
 docker build -t jira-auto-dispatcher:latest .
 docker save jira-auto-dispatcher:latest | gzip > jad.tar.gz
-scp jad.tar.gz yhchoi@61.96.103.14:/opt/jira-auto-dispatcher/
-ssh yhchoi@61.96.103.14 'gunzip -c /opt/jira-auto-dispatcher/jad.tar.gz | docker load'
+scp jad.tar.gz <deploy-user>@<DEV_SERVER_HOST>:/opt/jira-auto-dispatcher/
+ssh <deploy-user>@<DEV_SERVER_HOST> 'gunzip -c /opt/jira-auto-dispatcher/jad.tar.gz | docker load'
 ```
 
 > ⚠️ `docker push`/레지스트리 사용은 이 런북 범위 밖(사내 정책 따름). 여기서는
@@ -132,7 +132,7 @@ find secrets -type f -exec chmod 600 {} \;
 관리 UI 접근은 포트를 여는 대신 SSH 터널을 권장:
 
 ```bash
-ssh -L 8787:localhost:8787 yhchoi@61.96.103.14   # 로컬 http://localhost:8787
+ssh -L 8787:localhost:8787 <deploy-user>@<DEV_SERVER_HOST>   # 로컬 http://localhost:8787
 ```
 
 ---
@@ -210,7 +210,7 @@ docker exec jad-worker-<user> curl -fsS http://localhost:8787/healthz
 
 **엔드투엔드 (테스트 티켓)**:
 
-1. Jira(HAN)에서 테스트 티켓을 만들어 온보딩된 사용자에게 할당하고 매칭 상태
+1. Jira(<PROJECT_KEY>)에서 테스트 티켓을 만들어 온보딩된 사용자에게 할당하고 매칭 상태
    (`config.match.statuses`, 예: `해야 할 일`)로 둔다.
 2. central 로그에서 감지→claim→dispatch, 해당 worker 로그에서 잡 수신→`claude -p` 실행 확인.
 3. 산출물 검증: 사용자 정체성의 브랜치(`auto/<TICKET>`) + MR 생성(사용자 GitLab 토큰).

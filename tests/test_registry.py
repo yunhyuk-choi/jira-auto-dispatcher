@@ -5,7 +5,7 @@ from __future__ import annotations
 from app.registry import Registry, UserRecord
 
 
-def _rec(username="yh.choi", account_id="acc-1", enabled=True):
+def _rec(username="testuser", account_id="acc-1", enabled=True):
     return UserRecord(
         username=username, jira_account_id=account_id, enabled=enabled,
         autonomy_mode="B", per_repo={"portal-frontend": "A"},
@@ -17,7 +17,7 @@ def _rec(username="yh.choi", account_id="acc-1", enabled=True):
 def test_upsert_and_get(isolated_state):
     r = Registry()
     r.upsert(_rec())
-    got = r.get("yh.choi")
+    got = r.get("testuser")
     assert got is not None and got.jira_account_id == "acc-1"
     assert got.secrets_ref.jira_token == "users/yh/jira-token"
 

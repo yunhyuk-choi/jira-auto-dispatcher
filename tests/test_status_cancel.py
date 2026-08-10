@@ -75,7 +75,7 @@ def test_rollback_skips_when_branch_absent():
         calls.append(list(args))
         return SimpleNamespace(returncode=1, stdout="", stderr="")  # rev-parse → 없음
 
-    job = {"ticket": "HAN-1", "branch": "auto/HAN-1", "target_repos": ["repoA"]}
+    job = {"ticket": "PROJ-1", "branch": "auto/PROJ-1", "target_repos": ["repoA"]}
     rb = w.rollback_job(job, ar.UserCreds(user="u1"), _rb_cfg(),
                         git_run=git_run, mr_closer=lambda *a, **k: False)
     assert rb["rolledback"] is False
@@ -97,7 +97,7 @@ def test_rollback_deletes_branch_and_closes_mr():
         closed["url"] = mr_url
         return True
 
-    job = {"ticket": "HAN-1", "branch": "auto/HAN-1", "target_repos": ["repoA"],
+    job = {"ticket": "PROJ-1", "branch": "auto/PROJ-1", "target_repos": ["repoA"],
            "mr_url": "https://gitlab.example.com/g/p/-/merge_requests/3"}
     rb = w.rollback_job(job, ar.UserCreds(user="u1"), _rb_cfg(),
                         git_run=git_run, mr_closer=mr_closer)
@@ -105,8 +105,8 @@ def test_rollback_deletes_branch_and_closes_mr():
     assert rb["branch_deleted"] is True
     assert rb["mr_closed"] is True
     assert closed["url"].endswith("merge_requests/3")
-    assert ["branch", "-D", "auto/HAN-1"] in seen           # 로컬 삭제
-    assert ["push", "origin", "--delete", "auto/HAN-1"] in seen  # 원격 삭제
+    assert ["branch", "-D", "auto/PROJ-1"] in seen           # 로컬 삭제
+    assert ["push", "origin", "--delete", "auto/PROJ-1"] in seen  # 원격 삭제
 
 
 # --- worker 루프: 실행 중 취소 → 롤백 + cancelled 회신 -----------------------
@@ -167,7 +167,7 @@ def _statuses(http):
 
 
 def test_worker_cancel_triggers_rollback_and_reports_cancelled():
-    job = {"ticket": "HAN-1", "branch": "auto/HAN-1", "target_repos": ["repoA"]}
+    job = {"ticket": "PROJ-1", "branch": "auto/PROJ-1", "target_repos": ["repoA"]}
     http = CtrlHTTP(job, control_cancel=True)
     rb_calls = {}
 
@@ -188,14 +188,14 @@ def test_worker_cancel_triggers_rollback_and_reports_cancelled():
 
     assert _statuses(http) == ["진행중", "cancelled"]
     assert http.control_polls >= 1              # control 폴링으로 취소 감지
-    assert rb_calls["job"]["ticket"] == "HAN-1"  # 롤백 수행
+    assert rb_calls["job"]["ticket"] == "PROJ-1"  # 롤백 수행
     cancel_payload = http.posts[-1][1]
     assert cancel_payload["rolledback"] is True
-    assert cancel_payload["branch"] == "auto/HAN-1"
+    assert cancel_payload["branch"] == "auto/PROJ-1"
 
 
 def test_worker_no_cancel_runs_to_done():
-    job = {"ticket": "HAN-2", "branch": "auto/HAN-2", "target_repos": ["repoA"]}
+    job = {"ticket": "PROJ-2", "branch": "auto/PROJ-2", "target_repos": ["repoA"]}
     http = CtrlHTTP(job, control_cancel=False)
     rb_calls = {"n": 0}
 

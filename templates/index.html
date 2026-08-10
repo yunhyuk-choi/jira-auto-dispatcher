@@ -129,10 +129,10 @@
       </div>
       <form id="onboard-form" onsubmit="return false;">
         <div class="grid-form">
-          <div><label>username *</label><input type="text" name="username" placeholder="yh.choi" /></div>
-          <div><label>display_name</label><input type="text" name="display_name" placeholder="yh.choi" /></div>
-          <div><label>jira_account_id *</label><input type="text" name="jira_account_id" placeholder="712020:..." /></div>
-          <div><label>jira_email *</label><input type="text" name="jira_email" placeholder="yh.choi@interxlab.com" /></div>
+          <div><label>username *</label><input type="text" name="username" placeholder="<username>" /></div>
+          <div><label>display_name</label><input type="text" name="display_name" placeholder="<username>" /></div>
+          <div><label>jira_account_id *</label><input type="text" name="jira_account_id" placeholder="<JIRA_ACCOUNT_ID>" /></div>
+          <div><label>jira_email *</label><input type="text" name="jira_email" placeholder="you@example.com" /></div>
           <div><label>jira_token *</label><input type="password" name="jira_token" placeholder="Jira API 토큰" /></div>
           <div><label>gitlab_token</label><input type="password" name="gitlab_token" placeholder="GitLab PAT" /></div>
           <div><label>claude_setup_token *</label><input type="password" name="claude_setup_token" placeholder="claude setup-token 결과" /></div>
@@ -149,9 +149,9 @@
               <option value="bypass" selected>bypass (기본 — 헤드리스 자율)</option>
             </select>
           </div>
-          <div><label>git_name</label><input type="text" name="git_name" placeholder="yunhyuk-choi" /></div>
-          <div><label>git_email</label><input type="text" name="git_email" placeholder="yh.choi@interxlab.com" /></div>
-          <div><label>scope (projects, 쉼표구분)</label><input type="text" name="scope" placeholder="HAN" /></div>
+          <div><label>git_name</label><input type="text" name="git_name" placeholder="<git-name>" /></div>
+          <div><label>git_email</label><input type="text" name="git_email" placeholder="you@example.com" /></div>
+          <div><label>scope (projects, 쉼표구분)</label><input type="text" name="scope" placeholder="<PROJECT_KEY>" /></div>
         </div>
         <div class="flex-form">
           <button id="onboard-btn" type="submit">사용자 등록 (enabled=false)</button>

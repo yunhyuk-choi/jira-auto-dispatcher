@@ -4,8 +4,8 @@
 > CI 코드 자체(`.gitlab-ci.yml`, `deploy/redeploy-central.sh`)는 리포에 이미 있다.
 > 시크릿 **값**은 이 문서/코드에 절대 넣지 않는다 — 변수 이름·참조만 다룬다.
 >
-> - 팀 GitLab: `http://server.interxlab.io:30000`
-> - 개발서버: **61.96.103.14** (SSH `yhchoi`, sudo + docker)
+> - 팀 GitLab: `https://gitlab.example.com`
+> - 개발서버: **<DEV_SERVER_HOST>** (SSH `<deploy-user>`, sudo + docker)
 > - 배포 경로: `/opt/jira-auto-dispatcher`
 > - 파이프라인: `test → build → deploy` (deploy 는 main 한정, central 무중단 교체)
 
@@ -24,7 +24,7 @@ jira-auto-dispatcher 전용 러너를 등록한다. 잡별 요구 능력:
 등록 절차(예):
 
 1. 프로젝트 → Settings → CI/CD → Runners → "New project runner".
-2. 서버/VM 에서 `gitlab-runner register` → URL `http://server.interxlab.io:30000`, 발급된 토큰 입력.
+2. 서버/VM 에서 `gitlab-runner register` → URL `https://gitlab.example.com`, 발급된 토큰 입력.
 3. executor 선택:
    - **docker executor** 를 쓰면 `test` 는 그대로 돈다. `build` 는 DinD 를 위해
      러너 config 에서 `privileged = true` 필요(`/etc/gitlab-runner/config.toml`).
@@ -47,9 +47,9 @@ jira-auto-dispatcher 전용 러너를 등록한다. 잡별 요구 능력:
 
 | 변수 | 타입 | 값(설명) | 비고 |
 |---|---|---|---|
-| `SSH_PRIVATE_KEY` | Variable(값) | 배포용 SSH 개인키 **내용** (개행 포함 PEM) | `yhchoi@61.96.103.14` 로 무암호 접속 가능한 키. Masked 는 개행 포함 키에서 깨질 수 있음 → Masked 대신 Protected 만 켜거나, 아래 File 타입 대안 사용. |
-| `SSH_KNOWN_HOSTS` | **File** | 개발서버 호스트키 라인 | `ssh-keyscan -H 61.96.103.14` 결과를 그대로 넣는다(중간자 방지). |
-| `DEPLOY_HOST` | Variable(값) | `yhchoi@61.96.103.14` | ssh/rsync 대상. |
+| `SSH_PRIVATE_KEY` | Variable(값) | 배포용 SSH 개인키 **내용** (개행 포함 PEM) | `<deploy-user>@<DEV_SERVER_HOST>` 로 무암호 접속 가능한 키. Masked 는 개행 포함 키에서 깨질 수 있음 → Masked 대신 Protected 만 켜거나, 아래 File 타입 대안 사용. |
+| `SSH_KNOWN_HOSTS` | **File** | 개발서버 호스트키 라인 | `ssh-keyscan -H <DEV_SERVER_HOST>` 결과를 그대로 넣는다(중간자 방지). |
+| `DEPLOY_HOST` | Variable(값) | `<deploy-user>@<DEV_SERVER_HOST>` | ssh/rsync 대상. |
 
 SSH 키 준비(로컬/운영 PC):
 
@@ -57,13 +57,13 @@ SSH 키 준비(로컬/운영 PC):
 # 1) 배포 전용 키페어 생성(암호 없이 — CI 무인 실행)
 ssh-keygen -t ed25519 -f jad_deploy -N "" -C "gitlab-ci jira-auto-dispatcher deploy"
 
-# 2) 공개키를 개발서버 yhchoi 계정에 등록
-ssh-copy-id -i jad_deploy.pub yhchoi@61.96.103.14
-#   또는 서버의 ~yhchoi/.ssh/authorized_keys 에 jad_deploy.pub 내용 추가
+# 2) 공개키를 개발서버 <deploy-user> 계정에 등록
+ssh-copy-id -i jad_deploy.pub <deploy-user>@<DEV_SERVER_HOST>
+#   또는 서버의 ~<deploy-user>/.ssh/authorized_keys 에 jad_deploy.pub 내용 추가
 
 # 3) 개인키 내용을 SSH_PRIVATE_KEY 변수에 붙여넣기(cat jad_deploy 전체)
 # 4) 호스트키를 SSH_KNOWN_HOSTS(File) 변수에 넣기
-ssh-keyscan -H 61.96.103.14
+ssh-keyscan -H <DEV_SERVER_HOST>
 ```
 
 > **SSH_PRIVATE_KEY 를 File 타입으로 쓰고 싶다면**: 변수 타입을 File 로 바꾸면 변수값이
@@ -143,7 +143,7 @@ validate:
 
 ---
 
-## 5. GitHub (yunhyuk-choi/jira-auto-dispatcher) — 개인용, 선택
+## 5. GitHub (<your-github-owner>/jira-auto-dispatcher) — 개인용, 선택
 
 개인 미러에는 배포 없이 pytest 게이트만 두는 워크플로우를 이미 넣어 두었다:
 `.github/workflows/ci.yml` (push/PR 시 python 3.12 + `pytest -q`). 배포/이미지 빌드는
@@ -157,7 +157,7 @@ main 에 머지되면 GitLab 파이프라인이:
 
 1. `test` — `pytest -q` (126 통과 게이트).
 2. `build` — `docker build` 성사 게이트(러너에서, 레지스트리 전송 없음).
-3. `deploy` — 소스를 `61.96.103.14:/opt/jira-auto-dispatcher` 로 rsync(시크릿/상태 제외)
+3. `deploy` — 소스를 `<DEV_SERVER_HOST>:/opt/jira-auto-dispatcher` 로 rsync(시크릿/상태 제외)
    → ssh 로 `deploy/redeploy-central.sh` 를 인자 전달 실행(heredoc 아님)
    → 서버에서 이미지 빌드 → **central 만** `--no-deps --force-recreate` → `/healthz` 폴링
    → 실패 시 이전 이미지로 롤백.

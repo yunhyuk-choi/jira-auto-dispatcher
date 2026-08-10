@@ -9,8 +9,8 @@ role: central
 server: { host: 0.0.0.0, port: 8787 }
 
 jira:
-  base_url: https://interx-jira.atlassian.net
-  project: HAN
+  base_url: https://your-org.atlassian.net
+  project: <PROJECT_KEY>
   poll_interval_sec: 60
   watcher_token_file: service/jira-token   # 중앙이 Jira를 감시하는 토큰(내 것/봇). secrets.base_dir 상대
 
@@ -30,11 +30,11 @@ spawn:
   # ⚠️ 호스트 배포 디렉토리의 절대경로(central 컨테이너 내부 경로 아님).
   # central이 socket-proxy 경유로 worker를 띄우면 바인드 source는 호스트 docker
   # 데몬이 해석한다(sibling container) → worker 바인드 source가 호스트 경로여야 한다.
-  # 예: /home/yhchoi/deploy/jira-auto-dispatcher. env HOST_DEPLOY_DIR 폴백 우선.
+  # 예: /home/<deploy-user>/deploy/jira-auto-dispatcher. env HOST_DEPLOY_DIR 폴백 우선.
   # 비우면(로컬 개발) 직접 경로 폴백. worker의 config/시크릿 마운트에 필수.
   host_deploy_dir: "${HOST_DEPLOY_DIR}"
 
-git: { branch_prefix: auto/, github_owner: yunhyuk-choi }   # github은 central만
+git: { branch_prefix: auto/, github_owner: <your-github-owner> }   # github은 central만(배포별로 채움)
 
 secrets: { base_dir: "${SECRETS_DIR}" }   # 로컬=C:/temp, 컨테이너=/run/secrets 또는 볼륨
 
@@ -45,9 +45,9 @@ run:
   dataspace_docs_repo: /app/dataspace_docs     # 설계 문서
   # 위 3개 레포의 clone 원본 URL(토큰 없는 형태). worker가 사용자 GitLab 토큰으로
   # clone(없으면)/pull(있으면)한다(app/repos.py). 비우면 그 레포 프로비저닝 skip+경고.
-  orchestrator_repo_url: http://server.interxlab.io:30000/yhchoi/ai-dlc-orchestrator.git
-  dlc_meta_repo_url: http://server.interxlab.io:30000/hansa/docs/dlc-meta.git
-  dataspace_docs_repo_url: http://server.interxlab.io:30000/hansa/dataspace_docs.git
+  orchestrator_repo_url: https://github.com/yunhyuk-choi/ai-dlc-orchestrator.git   # 필수 공개 프레임워크(리터럴 유지)
+  dlc_meta_repo_url: https://gitlab.example.com/<your-group>/dlc-meta.git
+  dataspace_docs_repo_url: https://gitlab.example.com/<your-group>/dataspace-docs.git
   workspace_dir: /app/workspace
   claude_bin: claude
   permission_mode: skip

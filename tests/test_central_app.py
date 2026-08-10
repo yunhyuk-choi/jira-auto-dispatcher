@@ -29,7 +29,7 @@ def _write_config(tmp_path):
             server: {{ host: 0.0.0.0, port: 8787 }}
             jira:
               base_url: https://example.atlassian.net
-              project: HAN
+              project: PROJ
               poll_interval_sec: 60
               watcher_token_file: service/jira-token
             match: {{ statuses: ["해야 할 일"] }}

@@ -24,7 +24,7 @@ def isolated_state(tmp_path):
 
 
 def make_config(global_concurrency=3, concurrency_per_worker=1, statuses=None,
-                project="HAN", repo_map=None, branch_prefix="auto/"):
+                project="PROJ", repo_map=None, branch_prefix="auto/"):
     """스케줄러/폴러가 참조하는 최소 config 유사 객체."""
     return SimpleNamespace(
         role="central",

@@ -67,24 +67,24 @@ def _wire():
 
 def test_cancel_aborts_tracked_running_job(isolated_state):
     _, gate, sch, disp, jira, watcher = _wire()
-    gate.claim("HAN-1")
-    disp.enqueue("u1", Job(ticket="HAN-1", user="u1", target_repos=["repoA"]))
-    assert sch.jobs.get("HAN-1").status == q.RUNNING
+    gate.claim("PROJ-1")
+    disp.enqueue("u1", Job(ticket="PROJ-1", user="u1", target_repos=["repoA"]))
+    assert sch.jobs.get("PROJ-1").status == q.RUNNING
 
-    jira.add("취소됨", _issue("HAN-1"))
+    jira.add("취소됨", _issue("PROJ-1"))
     res = watcher.poll_once()
     assert res["cancelled"] == 1
-    assert sch.jobs.get("HAN-1").status == q.CANCELLING     # 실행중 → worker 위임
+    assert sch.jobs.get("PROJ-1").status == q.CANCELLING     # 실행중 → worker 위임
     # updated 워터마크 전진(재처리 축소).
     assert watcher.cancel_watermark == "2026-08-10T10:00:00.000+0900"
 
 
 def test_cancel_ignores_untracked_ticket(isolated_state):
     _, _, sch, disp, jira, watcher = _wire()
-    jira.add("취소됨", _issue("HAN-999"))       # 중앙이 추적하지 않는 티켓
+    jira.add("취소됨", _issue("PROJ-999"))       # 중앙이 추적하지 않는 티켓
     res = watcher.poll_once()
     assert res["cancelled"] == 0
-    assert sch.jobs.get("HAN-999") is None
+    assert sch.jobs.get("PROJ-999") is None
 
 
 # --- 이름 구분: 완료(정상)는 취소 아님 → 롤백 없이 종료 ----------------------
@@ -92,14 +92,14 @@ def test_cancel_ignores_untracked_ticket(isolated_state):
 
 def test_done_status_is_not_cancel_and_no_rollback(isolated_state):
     _, gate, sch, disp, jira, watcher = _wire()
-    gate.claim("HAN-1")
-    disp.enqueue("u1", Job(ticket="HAN-1", user="u1", target_repos=["repoA"]))
+    gate.claim("PROJ-1")
+    disp.enqueue("u1", Job(ticket="PROJ-1", user="u1", target_repos=["repoA"]))
 
-    jira.add("완료", _issue("HAN-1", status="완료"))
+    jira.add("완료", _issue("PROJ-1", status="완료"))
     res = watcher.poll_once()
     assert res["cancelled"] == 0                 # 완료는 취소로 취급하지 않음
     assert res["done"] == 1
-    assert sch.jobs.get("HAN-1").status == q.DONE  # 정상 종료(롤백 X)
+    assert sch.jobs.get("PROJ-1").status == q.DONE  # 정상 종료(롤백 X)
 
 
 # --- 재오픈: 취소됨 → 해야 할 일 → 재-enqueue -------------------------------
@@ -107,34 +107,34 @@ def test_done_status_is_not_cancel_and_no_rollback(isolated_state):
 
 def test_reopen_reenqueues_cancelled_ticket(isolated_state):
     _, gate, sch, disp, jira, watcher = _wire()
-    gate.claim("HAN-1")
-    disp.enqueue("u1", Job(ticket="HAN-1", user="u1", target_repos=["repoA"]))
-    sch.cancel_job("HAN-1")               # cancelling
-    sch.report("HAN-1", "취소됨")         # cancelled + dedup 해제
-    assert sch.jobs.get("HAN-1").status == q.CANCELLED
-    assert gate.is_claimed("HAN-1") is False
+    gate.claim("PROJ-1")
+    disp.enqueue("u1", Job(ticket="PROJ-1", user="u1", target_repos=["repoA"]))
+    sch.cancel_job("PROJ-1")               # cancelling
+    sch.report("PROJ-1", "취소됨")         # cancelled + dedup 해제
+    assert sch.jobs.get("PROJ-1").status == q.CANCELLED
+    assert gate.is_claimed("PROJ-1") is False
 
-    jira.add("해야 할 일", _issue("HAN-1", status="해야 할 일",
+    jira.add("해야 할 일", _issue("PROJ-1", status="해야 할 일",
                                    updated="2026-08-11T09:00:00.000+0900"))
     res = watcher.poll_once()
     assert res["reopened"] == 1
-    assert sch.jobs.get("HAN-1").status == q.RUNNING    # 같은 티켓 재-dispatch
-    assert gate.is_claimed("HAN-1") is True             # 재-claim
+    assert sch.jobs.get("PROJ-1").status == q.RUNNING    # 같은 티켓 재-dispatch
+    assert gate.is_claimed("PROJ-1") is True             # 재-claim
     assert watcher.reopen_watermark == "2026-08-11T09:00:00.000+0900"
 
 
 def test_reopen_skips_unmapped_assignee(isolated_state):
     _, gate, sch, disp, jira, watcher = _wire()
-    gate.claim("HAN-1")
-    disp.enqueue("u1", Job(ticket="HAN-1", user="u1", target_repos=["repoA"]))
-    sch.cancel_job("HAN-1")
-    sch.report("HAN-1", "취소됨")
+    gate.claim("PROJ-1")
+    disp.enqueue("u1", Job(ticket="PROJ-1", user="u1", target_repos=["repoA"]))
+    sch.cancel_job("PROJ-1")
+    sch.report("PROJ-1", "취소됨")
 
     # 미등록 담당자로 재오픈된 티켓 → skip.
-    jira.add("해야 할 일", _issue("HAN-1", account_id="unknown", status="해야 할 일"))
+    jira.add("해야 할 일", _issue("PROJ-1", account_id="unknown", status="해야 할 일"))
     res = watcher.poll_once()
     assert res["reopened"] == 0
-    assert sch.jobs.get("HAN-1").status == q.CANCELLED
+    assert sch.jobs.get("PROJ-1").status == q.CANCELLED
 
 
 def test_poll_once_isolated_sections_all_run(isolated_state):

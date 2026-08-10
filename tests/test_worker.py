@@ -76,7 +76,7 @@ def test_loop_204_sleeps_and_no_post():
 
 
 def test_loop_runs_job_and_reports_running_then_done():
-    job = {"ticket": "HAN-1", "autonomy_mode": "A", "branch": "auto/HAN-1"}
+    job = {"ticket": "PROJ-1", "autonomy_mode": "A", "branch": "auto/PROJ-1"}
     http = FakeHTTP([FakeResp(200, job), FakeResp(204)])
     result = ar.AgentResult(status=ar.STATUS_DONE, session_id="s1",
                             mr_url="http://mr/1", log_summary="ok")
@@ -90,11 +90,11 @@ def test_loop_runs_job_and_reports_running_then_done():
     assert done_payload["mr_url"] == "http://mr/1"
     assert done_payload["session_id"] == "s1"
     # status URL은 ticket 기반
-    assert http.posts[0][0] == "http://central:8787/dispatch/u1/HAN-1/status"
+    assert http.posts[0][0] == "http://central:8787/dispatch/u1/PROJ-1/status"
 
 
 def test_loop_interrupted_then_resume_to_done():
-    job = {"ticket": "HAN-2", "autonomy_mode": "B"}
+    job = {"ticket": "PROJ-2", "autonomy_mode": "B"}
     http = FakeHTTP([FakeResp(200, job)])
     calls = {"run": 0, "resume": 0}
 
@@ -118,7 +118,7 @@ def test_loop_interrupted_then_resume_to_done():
 
 
 def test_loop_exception_isolation_does_not_crash():
-    job = {"ticket": "HAN-3"}
+    job = {"ticket": "PROJ-3"}
     http = FakeHTTP([FakeResp(200, job), FakeResp(204)])
 
     def boom(*a, **k):

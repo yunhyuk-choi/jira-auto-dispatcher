@@ -1,6 +1,6 @@
 # jira-auto-dispatcher
 
-Jira(HAN) 티켓이 **등록 사용자**에게 새로 할당되면 이를 감지해, **그 사용자
+Jira(<PROJECT_KEY>) 티켓이 **등록 사용자**에게 새로 할당되면 이를 감지해, **그 사용자
 정체성으로** 오케스트레이터(`claude` CLI = ai-dlc-orchestrator)를 자율 실행해
 브랜치·MR을 만드는 시스템이다.
 
@@ -36,7 +36,7 @@ Jira(HAN) 티켓이 **등록 사용자**에게 새로 할당되면 이를 감지
 
 ```text
                         ┌─────────────────────── central (상시) ───────────────────────┐
-Jira(HAN)               │                                                              │
+Jira(<PROJECT_KEY>)         │                                                              │
   │ (1) 신규 할당 감지   │   poller ── high-watermark JQL 폴링                           │
   ├── poller ───────────┼──▶ gate  ── 단일 원자적 dedup claim                           │
   └── webhook(옵션) ─────┤    │                                                         │
@@ -82,7 +82,7 @@ cp config/config.example.yaml config/config.yaml
 ROLE=central python -m app.main       # http://127.0.0.1:8787
 
 # worker (보통 central이 동적 spawn; 수동 기동 시)
-ROLE=worker DISPATCH_USER=yh.choi CENTRAL_URL=http://central:8787 \
+ROLE=worker DISPATCH_USER=<username> CENTRAL_URL=http://central:8787 \
   CLAUDE_CODE_OAUTH_TOKEN=... python -m app.main
 ```
 

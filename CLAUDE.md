@@ -8,7 +8,7 @@
 
 단일 도커 이미지를 env `ROLE`로 두 역할로 분기한다(`app/main.py`):
 
-- **central** (상시 컨테이너): Jira(HAN) 신규 할당을 **감지** → dedup → 담당자를
+- **central** (상시 컨테이너): Jira(<PROJECT_KEY>) 신규 할당을 **감지** → dedup → 담당자를
   **등록 사용자에 매핑** → 그 사용자 worker에 잡 **배포**. + 사용자 레지스트리/
   온보딩/관리 UI + 사용자 worker 컨테이너 **동적 spawn**(Docker SDK).
 - **worker** (사용자별 동적 컨테이너, `ROLE=worker DISPATCH_USER=<user>`): Jira를

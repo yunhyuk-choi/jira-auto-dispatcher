@@ -23,16 +23,16 @@ def test_load_and_env_substitution(tmp_path, monkeypatch):
     cfg = C.load_config(_write(tmp_path, """
 role: central
 jira:
-  base_url: https://interx-jira.atlassian.net/
-  project: HAN
+  base_url: https://your-org.atlassian.net/
+  project: PROJ
   watcher_token_file: service/jira-token
 match: { statuses: ["해야 할 일"] }
 secrets: { base_dir: "${SECRETS_DIR}" }
 run: { concurrency_per_worker: 1 }
 """))
     assert cfg.role == "central"
-    assert cfg.jira.base_url == "https://interx-jira.atlassian.net"  # trailing / 제거
-    assert cfg.jira.project == "HAN"
+    assert cfg.jira.base_url == "https://your-org.atlassian.net"  # trailing / 제거
+    assert cfg.jira.project == "PROJ"
     assert cfg.secrets.base_dir == "C:/temp"
     assert cfg.run.global_concurrency == 3  # 기본값 주입
 
@@ -44,7 +44,7 @@ def test_env_overrides(tmp_path, monkeypatch):
     monkeypatch.setenv("ROLE", "central")
     cfg = C.load_config(_write(tmp_path, """
 role: worker
-jira: { base_url: https://x, project: HAN, watcher_token_file: t }
+jira: { base_url: https://x, project: PROJ, watcher_token_file: t }
 secrets: { base_dir: "${SECRETS_DIR}" }
 """))
     assert cfg.role == "central"          # env ROLE 우선
@@ -57,7 +57,7 @@ def test_missing_required_key_fails(tmp_path):
     with pytest.raises(C.ConfigError) as exc:
         C.load_config(_write(tmp_path, """
 role: central
-jira: { project: HAN, watcher_token_file: t }
+jira: { project: PROJ, watcher_token_file: t }
 secrets: { base_dir: /tmp }
 """))
     assert "jira.base_url" in str(exc.value)
@@ -68,7 +68,7 @@ def test_unresolved_token_fails(tmp_path, monkeypatch):
     with pytest.raises(C.ConfigError) as exc:
         C.load_config(_write(tmp_path, """
 role: central
-jira: { base_url: https://x, project: HAN, watcher_token_file: t }
+jira: { base_url: https://x, project: PROJ, watcher_token_file: t }
 secrets: { base_dir: "${SECRETS_DIR}" }
 """))
     assert "SECRETS_DIR" in str(exc.value) or "미치환" in str(exc.value)
@@ -76,15 +76,15 @@ secrets: { base_dir: "${SECRETS_DIR}" }
 
 def test_host_deploy_dir_env_override_priority(tmp_path, monkeypatch):
     monkeypatch.setenv("SECRETS_DIR", "/run/secrets")
-    monkeypatch.setenv("HOST_DEPLOY_DIR", "/home/yhchoi/deploy/jad")
+    monkeypatch.setenv("HOST_DEPLOY_DIR", "/home/<deploy-user>/deploy/jad")
     cfg = C.load_config(_write(tmp_path, """
 role: central
-jira: { base_url: https://x, project: HAN, watcher_token_file: t }
+jira: { base_url: https://x, project: PROJ, watcher_token_file: t }
 secrets: { base_dir: "${SECRETS_DIR}" }
 spawn: { host_deploy_dir: "/from/yaml" }
 """))
     # env HOST_DEPLOY_DIR 폴백 우선 — yaml 값을 덮는다.
-    assert cfg.spawn.host_deploy_dir == "/home/yhchoi/deploy/jad"
+    assert cfg.spawn.host_deploy_dir == "/home/<deploy-user>/deploy/jad"
 
 
 def test_host_deploy_dir_unresolved_token_becomes_empty(tmp_path, monkeypatch):
@@ -92,7 +92,7 @@ def test_host_deploy_dir_unresolved_token_becomes_empty(tmp_path, monkeypatch):
     monkeypatch.delenv("HOST_DEPLOY_DIR", raising=False)
     cfg = C.load_config(_write(tmp_path, """
 role: central
-jira: { base_url: https://x, project: HAN, watcher_token_file: t }
+jira: { base_url: https://x, project: PROJ, watcher_token_file: t }
 secrets: { base_dir: "${SECRETS_DIR}" }
 spawn: { host_deploy_dir: "${HOST_DEPLOY_DIR}" }
 """))

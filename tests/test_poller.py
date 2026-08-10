@@ -63,7 +63,7 @@ def _wire(issues, repo_map=None, per_user=5):
 
 def test_resolve_target_repos_maps_components_and_labels():
     repo_map = {"portal-frontend": "portal-frontend", "be": ["portal-backend"]}
-    issue = _issue("HAN-1", "a1", components=["portal-frontend"], labels=["be", "unknown"])
+    issue = _issue("PROJ-1", "a1", components=["portal-frontend"], labels=["be", "unknown"])
     assert resolve_target_repos(issue, repo_map) == ["portal-backend", "portal-frontend"]
     assert resolve_target_repos(issue, {}) == []   # 미해석
 
@@ -87,31 +87,31 @@ def test_build_jql_none_when_no_enabled(isolated_state):
 def test_poll_once_dispatches_enabled_and_skips_disabled(isolated_state):
     repo_map = {"portal-frontend": "portal-frontend"}
     reg, sch, disp, gate, poller = _wire(
-        [_issue("HAN-1", "a1", components=["portal-frontend"]),
-         _issue("HAN-2", "a2"),                     # 비활성 유저 → skip
-         _issue("HAN-3", "unknown-acc")],           # 미등록 → skip
+        [_issue("PROJ-1", "a1", components=["portal-frontend"]),
+         _issue("PROJ-2", "a2"),                     # 비활성 유저 → skip
+         _issue("PROJ-3", "unknown-acc")],           # 미등록 → skip
         repo_map=repo_map)
     n = poller.poll_once()
     assert n == 1
-    j = sch.jobs.get("HAN-1")
+    j = sch.jobs.get("PROJ-1")
     assert j is not None and j.user == "u1"
     assert j.target_repos == ["portal-frontend"]
     assert j.autonomy_mode == "A"                    # per_repo 오버라이드 반영
-    assert j.branch == "auto/HAN-1"
-    assert sch.jobs.get("HAN-2") is None
+    assert j.branch == "auto/PROJ-1"
+    assert sch.jobs.get("PROJ-2") is None
     # 미매핑 티켓은 claim 되돌림(재트리거 가능)
-    assert gate.is_claimed("HAN-2") is False
-    assert gate.is_claimed("HAN-3") is False
+    assert gate.is_claimed("PROJ-2") is False
+    assert gate.is_claimed("PROJ-3") is False
 
 
 def test_poll_once_dedup_on_second_run(isolated_state):
-    _, sch, _, _, poller = _wire([_issue("HAN-1", "a1")])
+    _, sch, _, _, poller = _wire([_issue("PROJ-1", "a1")])
     assert poller.poll_once() == 1
     assert poller.poll_once() == 0                    # 이미 claim → 중복 흡수
 
 
 def test_poll_once_advances_watermark(isolated_state):
-    _, _, _, _, poller = _wire([_issue("HAN-1", "a1", created="2026-08-10T10:00:00.000+0900")])
+    _, _, _, _, poller = _wire([_issue("PROJ-1", "a1", created="2026-08-10T10:00:00.000+0900")])
     poller.poll_once()
     assert poller.watermark == "2026-08-10T10:00:00.000+0900"
     assert state.load_watermark() == poller.watermark
@@ -119,8 +119,8 @@ def test_poll_once_advances_watermark(isolated_state):
 
 def test_resolve_user_disabled_returns_none(isolated_state):
     reg, _, _, _, poller = _wire([])
-    assert poller.resolve_user(_issue("HAN-1", "a1")).username == "u1"
-    assert poller.resolve_user(_issue("HAN-2", "a2")) is None   # 비활성
+    assert poller.resolve_user(_issue("PROJ-1", "a1")).username == "u1"
+    assert poller.resolve_user(_issue("PROJ-2", "a2")) is None   # 비활성
 
 
 # --- watermark 최초 초기화(하드닝: 기존 To-Do stampede 방지) ---

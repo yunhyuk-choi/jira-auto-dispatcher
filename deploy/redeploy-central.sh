@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # redeploy-central.sh — 개발서버에서 central 컨테이너만 무중단 교체한다.
 #
-# 실행 위치: 개발서버(61.96.103.14). CI 의 deploy 잡이 소스를 rsync 한 뒤
+# 실행 위치: 개발서버(<DEV_SERVER_HOST>). CI 의 deploy 잡이 소스를 rsync 한 뒤
 #            ssh 로 "인자 전달" 방식으로 이 스크립트를 호출한다(heredoc 금지).
 # 사용법:    bash deploy/redeploy-central.sh [APP_DIR]
 #            APP_DIR 기본값 = /opt/jira-auto-dispatcher

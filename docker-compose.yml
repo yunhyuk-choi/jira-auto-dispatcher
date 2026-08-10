@@ -46,7 +46,7 @@ services:
       WORKER_SHARED_SECRET: ${WORKER_SHARED_SECRET:-}   # dispatch HTTP 인증(.env/호스트 env)
       # 호스트 배포 디렉토리 절대경로(spawn.host_deploy_dir). worker 바인드 source가
       # 호스트 docker 데몬 기준으로 해석되므로 필수(sibling container). .env나 셸 env로 주입.
-      # 예: HOST_DEPLOY_DIR=/home/yhchoi/deploy/jira-auto-dispatcher
+      # 예: HOST_DEPLOY_DIR=/home/<deploy-user>/deploy/jira-auto-dispatcher
       HOST_DEPLOY_DIR: ${HOST_DEPLOY_DIR:-}
     ports:
       - "8787:8787"                          # 관리 UI — ⚠️ 사내망 한정(외부 노출 금지)

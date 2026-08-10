@@ -40,16 +40,16 @@ class FakeSession:
 
 
 def make_client(responder):
-    c = JiraClient("https://interx-jira.atlassian.net", "yh.choi@interxlab.com", "tok")
+    c = JiraClient("https://your-org.atlassian.net", "you@example.com", "tok")
     c.session = FakeSession(responder)
     return c
 
 
 def test_search_jql_pagination_follows_next_page_token():
     pages = [
-        {"issues": [{"key": "HAN-1"}], "nextPageToken": "t2"},
-        {"issues": [{"key": "HAN-2"}], "nextPageToken": "t3"},
-        {"issues": [{"key": "HAN-3"}], "isLast": True},  # 마지막
+        {"issues": [{"key": "PROJ-1"}], "nextPageToken": "t2"},
+        {"issues": [{"key": "PROJ-2"}], "nextPageToken": "t3"},
+        {"issues": [{"key": "PROJ-3"}], "isLast": True},  # 마지막
     ]
     seq = {"i": 0}
     bodies = []
@@ -63,8 +63,8 @@ def test_search_jql_pagination_follows_next_page_token():
         return FakeResponse(200, p)
 
     c = make_client(responder)
-    result = c.search_jql("project = HAN", fields=["status"], max_results=1)
-    assert [i["key"] for i in result["issues"]] == ["HAN-1", "HAN-2", "HAN-3"]
+    result = c.search_jql("project = PROJ", fields=["status"], max_results=1)
+    assert [i["key"] for i in result["issues"]] == ["PROJ-1", "PROJ-2", "PROJ-3"]
     assert result["total"] == 3
     # 2·3페이지 요청에 nextPageToken 실림
     assert "nextPageToken" not in bodies[0]
@@ -82,9 +82,9 @@ def test_transition_posts_correct_path_and_body():
         return FakeResponse(204)
 
     c = make_client(responder)
-    c.transition("HAN-5", "41", fields={"customfield_x": "v"})
+    c.transition("PROJ-5", "41", fields={"customfield_x": "v"})
     assert captured["method"] == "POST"
-    assert captured["url"].endswith("/rest/api/2/issue/HAN-5/transitions")
+    assert captured["url"].endswith("/rest/api/2/issue/PROJ-5/transitions")
     assert captured["json"]["transition"]["id"] == "41"
     assert captured["json"]["fields"] == {"customfield_x": "v"}
 
@@ -97,7 +97,7 @@ def test_transition_done_prefills_actual_dates():
         return FakeResponse(204)
 
     c = make_client(responder)
-    c.transition_done("HAN-9", "2026-08-01", "2026-08-10")
+    c.transition_done("PROJ-9", "2026-08-01", "2026-08-10")
     fields = captured["json"]["fields"]
     assert fields[FIELD_ACTUAL_START] == "2026-08-01"
     assert fields[FIELD_ACTUAL_END] == "2026-08-10"
@@ -109,12 +109,12 @@ def test_get_issue_and_comment_paths():
 
     def responder(method, url, kwargs):
         seen.append((method, url, kwargs.get("json"), kwargs.get("params")))
-        return FakeResponse(200, {"key": "HAN-1"})
+        return FakeResponse(200, {"key": "PROJ-1"})
 
     c = make_client(responder)
-    c.get_issue("HAN-1", fields=["status", "assignee"])
-    c.add_comment("HAN-1", "한글 코멘트")
-    assert seen[0][0] == "GET" and seen[0][1].endswith("/rest/api/2/issue/HAN-1")
+    c.get_issue("PROJ-1", fields=["status", "assignee"])
+    c.add_comment("PROJ-1", "한글 코멘트")
+    assert seen[0][0] == "GET" and seen[0][1].endswith("/rest/api/2/issue/PROJ-1")
     assert seen[0][3] == {"fields": "status,assignee"}
     assert seen[1][0] == "POST" and seen[1][1].endswith("/comment")
     assert seen[1][2] == {"body": "한글 코멘트"}  # json= 로 전송
@@ -126,5 +126,5 @@ def test_4xx_raises_jira_error():
 
     c = make_client(responder)
     with pytest.raises(JiraError) as exc:
-        c.get_issue("HAN-1")
+        c.get_issue("PROJ-1")
     assert exc.value.status_code == 403

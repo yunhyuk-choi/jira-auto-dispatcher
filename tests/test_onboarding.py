@@ -28,17 +28,17 @@ def _wire(tmp_path, spawner=None):
 
 
 _FULL = {
-    "username": "yh.choi",
+    "username": "testuser",
     "display_name": "Choi",
-    "jira_account_id": "712020:abc",
+    "jira_account_id": "test-account-id",
     "jira_email": "yh@x",
     "jira_token": "JIRA-TOK-VAL",
     "gitlab_token": "GL-TOK-VAL",
     "claude_setup_token": "CLAUDE-TOK-VAL",
-    "git_name": "yunhyuk-choi",
+    "git_name": "Test User",
     "git_email": "yh@x",
     "autonomy_mode": "A",
-    "scope": "HAN, PORTAL",
+    "scope": "PROJ, PORTAL",
 }
 
 
@@ -47,7 +47,7 @@ def test_onboard_success_stores_refs_not_values(tmp_path, isolated_state):
     res = client.post("/onboard", json=_FULL)
     assert res.status_code == 201
     body = res.get_json()
-    assert body["username"] == "yh.choi"
+    assert body["username"] == "testuser"
     assert body["enabled"] is False  # 안전 기본
 
     # 토큰 값이 응답에 절대 실리지 않는다.
@@ -56,22 +56,22 @@ def test_onboard_success_stores_refs_not_values(tmp_path, isolated_state):
     assert "GL-TOK-VAL" not in raw
     assert "CLAUDE-TOK-VAL" not in raw
 
-    rec = reg.get("yh.choi")
+    rec = reg.get("testuser")
     assert rec is not None
     assert rec.enabled is False
     assert rec.autonomy_mode == "A"
     assert rec.permission_level == "bypass"
-    assert rec.scope.projects == ["HAN", "PORTAL"]
+    assert rec.scope.projects == ["PROJ", "PORTAL"]
     # secrets_ref는 값이 아니라 참조 경로.
-    assert rec.secrets_ref.jira_token == "yh.choi/jira-token"
-    assert rec.secrets_ref.gitlab_token == "yh.choi/gitlab-token"
-    assert rec.secrets_ref.claude_oauth_token == "yh.choi/claude-oauth-token"
+    assert rec.secrets_ref.jira_token == "testuser/jira-token"
+    assert rec.secrets_ref.gitlab_token == "testuser/gitlab-token"
+    assert rec.secrets_ref.claude_oauth_token == "testuser/claude-oauth-token"
     assert "JIRA-TOK-VAL" not in json.dumps(rec.to_dict())
 
     # 시크릿 값은 파일로만 저장.
-    jira_path = os.path.join(base, "yh.choi", "jira-token")
+    jira_path = os.path.join(base, "testuser", "jira-token")
     assert open(jira_path, encoding="utf-8").read() == "JIRA-TOK-VAL"
-    assert open(os.path.join(base, "yh.choi", "claude-oauth-token"), encoding="utf-8").read() == "CLAUDE-TOK-VAL"
+    assert open(os.path.join(base, "testuser", "claude-oauth-token"), encoding="utf-8").read() == "CLAUDE-TOK-VAL"
     if os.name == "posix":
         assert oct(os.stat(jira_path).st_mode & 0o777) == oct(0o600)
 
@@ -96,33 +96,33 @@ def test_onboard_optional_gitlab_omitted(tmp_path, isolated_state):
     data = dict(_FULL)
     del data["gitlab_token"]
     assert client.post("/onboard", json=data).status_code == 201
-    rec = reg.get("yh.choi")
+    rec = reg.get("testuser")
     assert rec.secrets_ref.gitlab_token == ""
-    assert not os.path.exists(os.path.join(base, "yh.choi", "gitlab-token"))
+    assert not os.path.exists(os.path.join(base, "testuser", "gitlab-token"))
 
 
 def test_enable_triggers_spawn(tmp_path, isolated_state):
     spawner = MagicMock()
     client, reg, _ = _wire(tmp_path, spawner=spawner)
     client.post("/onboard", json=_FULL)
-    res = client.post("/users/yh.choi/enable")
+    res = client.post("/users/testuser/enable")
     assert res.status_code == 200
-    assert reg.get("yh.choi").enabled is True
+    assert reg.get("testuser").enabled is True
     spawner.ensure_worker.assert_called_once()
     # ensure_worker에 넘어간 인자는 해당 사용자 레코드.
     passed = spawner.ensure_worker.call_args.args[0]
-    assert passed.username == "yh.choi"
+    assert passed.username == "testuser"
 
 
 def test_disable_stops_worker(tmp_path, isolated_state):
     spawner = MagicMock()
     client, reg, _ = _wire(tmp_path, spawner=spawner)
     client.post("/onboard", json=_FULL)
-    client.post("/users/yh.choi/enable")
-    res = client.post("/users/yh.choi/disable")
+    client.post("/users/testuser/enable")
+    res = client.post("/users/testuser/disable")
     assert res.status_code == 200
-    assert reg.get("yh.choi").enabled is False
-    spawner.stop_worker.assert_called_once_with("yh.choi")
+    assert reg.get("testuser").enabled is False
+    spawner.stop_worker.assert_called_once_with("testuser")
 
 
 def test_enable_unknown_user_404(tmp_path, isolated_state):
@@ -135,29 +135,29 @@ def test_enable_unknown_user_404(tmp_path, isolated_state):
 def test_autonomy_switch(tmp_path, isolated_state):
     client, reg, _ = _wire(tmp_path)
     client.post("/onboard", json=_FULL)
-    res = client.post("/users/yh.choi/autonomy", json={"autonomy_mode": "B"})
+    res = client.post("/users/testuser/autonomy", json={"autonomy_mode": "B"})
     assert res.status_code == 200
-    assert reg.get("yh.choi").autonomy_mode == "B"
+    assert reg.get("testuser").autonomy_mode == "B"
     # 잘못된 값은 400.
-    assert client.post("/users/yh.choi/autonomy", json={"autonomy_mode": "C"}).status_code == 400
+    assert client.post("/users/testuser/autonomy", json={"autonomy_mode": "C"}).status_code == 400
 
 
 def test_container_start_stop(tmp_path, isolated_state):
     spawner = MagicMock()
     client, reg, _ = _wire(tmp_path, spawner=spawner)
     client.post("/onboard", json=_FULL)
-    assert client.post("/users/yh.choi/container/start").status_code == 200
+    assert client.post("/users/testuser/container/start").status_code == 200
     spawner.ensure_worker.assert_called_once()
-    assert client.post("/users/yh.choi/container/stop").status_code == 200
-    spawner.stop_worker.assert_called_once_with("yh.choi")
+    assert client.post("/users/testuser/container/stop").status_code == 200
+    spawner.stop_worker.assert_called_once_with("testuser")
     # 알 수 없는 action은 400.
-    assert client.post("/users/yh.choi/container/frob").status_code == 400
+    assert client.post("/users/testuser/container/frob").status_code == 400
 
 
 def test_container_without_spawner_501(tmp_path, isolated_state):
     client, reg, _ = _wire(tmp_path, spawner=None)
     client.post("/onboard", json=_FULL)
-    assert client.post("/users/yh.choi/container/start").status_code == 501
+    assert client.post("/users/testuser/container/start").status_code == 501
 
 
 def test_onboard_error_returns_json_not_html(tmp_path, isolated_state):

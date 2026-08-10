@@ -1,18 +1,18 @@
-# .gitlab-ci.yml — jira-auto-dispatcher (GitLab: http://server.interxlab.io:30000)
+# .gitlab-ci.yml — jira-auto-dispatcher (GitLab: https://gitlab.example.com)
 #
 # 파이프라인: test → build → deploy
 #   test   : 모든 브랜치/ MR — pytest 게이트(126 통과). python:3.12.
 #   build  : main 한정 — Dockerfile 빌드 성사 게이트(docker build).
-#   deploy : main 한정 — 개발서버(61.96.103.14)에 central 무중단 교체(ssh).
+#   deploy : main 한정 — 개발서버(<DEV_SERVER_HOST>)에 central 무중단 교체(ssh).
 #
-# ⚠️ 실측(hansa dev-quality-template): 이 러너들에서 ssh heredoc 이 무출력 exit1 로
+# ⚠️ 실측(일부 GitLab 러너 환경): 이 러너들에서 ssh heredoc 이 무출력 exit1 로
 #    실패한다 → 이 파일은 heredoc 을 쓰지 않는다. 배포는 rsync 로 소스 동기화 후
 #    ssh 에 "명령을 인자로 전달"해 서버 스크립트(deploy/redeploy-central.sh)를 실행한다.
 #
 # 시크릿은 값 하드코딩 금지 — 전부 CI/CD 변수 참조(설정법은 CICD-SETUP.md).
 #   SSH_PRIVATE_KEY  (Protected)         배포 SSH 개인키(값)
 #   SSH_KNOWN_HOSTS  (Protected, File)   서버 호스트키(파일 경로로 주입됨)
-#   DEPLOY_HOST      (Protected)         yhchoi@61.96.103.14
+#   DEPLOY_HOST      (Protected)         <deploy-user>@<DEV_SERVER_HOST>
 #
 # POLICY-ENCODING: 이 파일 UTF-8(BOM 없음)·LF.
 
@@ -125,4 +125,4 @@ deploy:
       "bash $DEPLOY_DIR/deploy/redeploy-central.sh $DEPLOY_DIR"
   environment:
     name: dev
-    url: http://61.96.103.14:8787
+    url: http://<DEV_SERVER_HOST>:8787

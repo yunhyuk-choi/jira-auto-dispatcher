@@ -108,20 +108,20 @@ def test_detect_limit_structured_reset_field_epoch():
 
 
 def test_build_prompt_binds_trigger_ticket_as_work_ticket():
-    job = {"ticket": "HAN-142", "autonomy_mode": "A", "target_repos": ["portal-frontend"],
+    job = {"ticket": "PROJ-142", "autonomy_mode": "A", "target_repos": ["portal-frontend"],
            "context_refs": {"dlc_meta": "/app/dlc-meta", "dataspace_docs": "/app/ds"}}
     prompt = ar.build_prompt(job, None)
-    assert "HAN-142" in prompt
+    assert "PROJ-142" in prompt
     assert "새 사이클 티켓을 만들지 말고" in prompt   # 트리거=작업 티켓
     assert "autonomy_mode=A" in prompt
-    assert "auto/HAN-142" in prompt
-    assert "runs/HAN-142/" in prompt
+    assert "auto/PROJ-142" in prompt
+    assert "runs/PROJ-142/" in prompt
     assert "portal-frontend" in prompt
     assert "/app/dlc-meta" in prompt
 
 
 def test_build_prompt_mode_b_wording():
-    prompt = ar.build_prompt({"ticket": "HAN-9", "autonomy_mode": "B"}, None)
+    prompt = ar.build_prompt({"ticket": "PROJ-9", "autonomy_mode": "B"}, None)
     assert "autonomy_mode=B" in prompt
     assert "경량 1차" in prompt
 
@@ -130,7 +130,7 @@ def test_build_prompt_mode_b_wording():
 
 
 def test_build_command_new_flags_and_deterministic_session_id():
-    job = {"ticket": "HAN-142", "autonomy_mode": "A"}
+    job = {"ticket": "PROJ-142", "autonomy_mode": "A"}
     cfg = SimpleNamespace(run=SimpleNamespace(claude_bin="claude", output_format="stream-json"))
     cmd = ar.build_command(job, cfg)
     assert cmd[0] == "claude" and cmd[1] == "-p"
@@ -140,16 +140,16 @@ def test_build_command_new_flags_and_deterministic_session_id():
     assert "--dangerously-skip-permissions" in cmd
     assert "--session-id" in cmd
     sid = cmd[cmd.index("--session-id") + 1]
-    assert sid == ar.deterministic_session_id("HAN-142")
+    assert sid == ar.deterministic_session_id("PROJ-142")
     # 결정성: 재구성해도 동일
     cmd2 = ar.build_command(job, cfg)
     assert cmd2[cmd2.index("--session-id") + 1] == sid
     # 프롬프트가 인자에 포함
-    assert any("HAN-142" in a for a in cmd)
+    assert any("PROJ-142" in a for a in cmd)
 
 
 def test_build_command_resume_uses_resume_and_from_pr():
-    job = {"ticket": "HAN-142"}
+    job = {"ticket": "PROJ-142"}
     cfg = SimpleNamespace(run=SimpleNamespace(claude_bin="claude", output_format="stream-json"))
     cmd = ar.build_command(job, cfg, resume=True, session_id="sess-1", from_pr=5)
     assert "--resume" in cmd and cmd[cmd.index("--resume") + 1] == "sess-1"
@@ -160,7 +160,7 @@ def test_build_command_resume_uses_resume_and_from_pr():
 
 
 def test_build_command_omits_verbose_when_not_stream_json():
-    job = {"ticket": "HAN-142"}
+    job = {"ticket": "PROJ-142"}
     cfg = SimpleNamespace(run=SimpleNamespace(claude_bin="claude", output_format="json"))
     cmd = ar.build_command(job, cfg)
     assert "--output-format" in cmd and "json" in cmd
@@ -196,7 +196,7 @@ def test_build_env_injects_identity_and_tokens_no_github(tmp_path):
         claude_oauth_token_ref="users/u1/claude-token",
     )
     base_env = {"PATH": "/bin", "GITHUB_TOKEN": "gh-should-be-removed", "GH_TOKEN": "gh2"}
-    env, secrets = ar.build_env({"ticket": "HAN-1"}, creds, cfg, base_env=base_env)
+    env, secrets = ar.build_env({"ticket": "PROJ-1"}, creds, cfg, base_env=base_env)
 
     assert env["GIT_AUTHOR_NAME"] == "Yun" and env["GIT_COMMITTER_NAME"] == "Yun"
     assert env["GIT_AUTHOR_EMAIL"] == "yh@x.com" and env["GIT_COMMITTER_EMAIL"] == "yh@x.com"
@@ -215,7 +215,7 @@ def test_build_env_injects_identity_and_tokens_no_github(tmp_path):
 def test_build_env_claude_token_env_fallback(tmp_path):
     cfg = _cfg(tmp_path)
     creds = ar.UserCreds(user="u1", claude_oauth_token_value="ENV-CLAUDE-TOKEN")
-    env, secrets = ar.build_env({"ticket": "HAN-1"}, creds, cfg, base_env={})
+    env, secrets = ar.build_env({"ticket": "PROJ-1"}, creds, cfg, base_env={})
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "ENV-CLAUDE-TOKEN"
     assert "ENV-CLAUDE-TOKEN" in secrets
 
@@ -233,7 +233,7 @@ def test_run_job_success_extracts_session_and_mr(tmp_path):
         '"result":"created MR https://gitlab.example.com/g/p/-/merge_requests/7"}\n',
     ]
     cap = {}
-    res = ar.run_job({"ticket": "HAN-1", "autonomy_mode": "A"}, creds, cfg,
+    res = ar.run_job({"ticket": "PROJ-1", "autonomy_mode": "A"}, creds, cfg,
                      popen_factory=_factory(lines, returncode=0, capture=cap))
     assert res.status == ar.STATUS_DONE
     assert res.session_id == "sess-abc"
@@ -251,7 +251,7 @@ def test_run_job_limit_returns_interrupted_with_reset(tmp_path):
         '{"type":"result","is_error":true,"subtype":"error_max_turns",'
         '"error":"usage limit reached","reset_at":"2099-01-01T00:00:00Z"}\n',
     ]
-    res = ar.run_job({"ticket": "HAN-2"}, creds, cfg,
+    res = ar.run_job({"ticket": "PROJ-2"}, creds, cfg,
                      popen_factory=_factory(lines, returncode=1))
     assert res.status == ar.STATUS_INTERRUPTED
     assert res.session_id == "sess-xyz"
@@ -260,7 +260,7 @@ def test_run_job_limit_returns_interrupted_with_reset(tmp_path):
 
 def test_run_job_failure_when_rc_nonzero_no_limit(tmp_path):
     cfg = _cfg(tmp_path)
-    res = ar.run_job({"ticket": "HAN-3"}, ar.UserCreds(user="u1"), cfg,
+    res = ar.run_job({"ticket": "PROJ-3"}, ar.UserCreds(user="u1"), cfg,
                      popen_factory=_factory(['{"type":"result","is_error":true,'
                                              '"result":"boom"}\n'], returncode=2))
     assert res.status == ar.STATUS_FAILED and res.returncode == 2
@@ -276,7 +276,7 @@ def test_run_job_redacts_secret_from_log_summary(tmp_path):
         '{"type":"result","subtype":"success","is_error":false,'
         '"result":"leaked SUPER-SECRET-TOKEN-123 oops"}\n',
     ]
-    res = ar.run_job({"ticket": "HAN-4"}, creds, cfg,
+    res = ar.run_job({"ticket": "PROJ-4"}, creds, cfg,
                      popen_factory=_factory(lines, returncode=0))
     assert "SUPER-SECRET-TOKEN-123" not in res.log_summary
     assert "***" in res.log_summary
@@ -286,7 +286,7 @@ def test_resume_job_uses_resume_flag_and_keeps_session(tmp_path):
     cfg = _cfg(tmp_path)
     cap = {}
     lines = ['{"type":"result","subtype":"success","is_error":false,"result":"ok"}\n']
-    res = ar.resume_job({"ticket": "HAN-5"}, "sess-keep", ar.UserCreds(user="u1"), cfg,
+    res = ar.resume_job({"ticket": "PROJ-5"}, "sess-keep", ar.UserCreds(user="u1"), cfg,
                         popen_factory=_factory(lines, returncode=0, capture=cap))
     assert res.status == ar.STATUS_DONE
     assert res.session_id == "sess-keep"      # 결과에 session_id 없으면 재개 id 유지
@@ -299,7 +299,7 @@ def test_run_job_spawn_error_is_failed_not_raised(tmp_path):
     def boom(cmd, cwd=None, env=None):
         raise FileNotFoundError("claude not found")
 
-    res = ar.run_job({"ticket": "HAN-6"}, ar.UserCreds(user="u1"), cfg, popen_factory=boom)
+    res = ar.run_job({"ticket": "PROJ-6"}, ar.UserCreds(user="u1"), cfg, popen_factory=boom)
     assert res.status == ar.STATUS_FAILED
 
 
@@ -320,7 +320,7 @@ def test_run_job_calls_ensure_repos_with_user_gitlab_token(tmp_path):
         return {"orchestrator": "cloned", "dlc_meta": "pulled", "dataspace_docs": "cloned"}
 
     lines = ['{"type":"result","subtype":"success","is_error":false,"result":"ok"}\n']
-    res = ar.run_job({"ticket": "HAN-7"}, creds, cfg,
+    res = ar.run_job({"ticket": "PROJ-7"}, creds, cfg,
                      popen_factory=_factory(lines, returncode=0),
                      ensure_repos_fn=fake_ensure)
     # ensure_repos가 사용자 GitLab 토큰 값으로 호출됐다(build_env와 동일 소스).
@@ -341,7 +341,7 @@ def test_run_job_aborts_when_orchestrator_repo_provisioning_fails(tmp_path):
         raise AssertionError("popen 호출되면 안 됨")
 
     res = ar.run_job(
-        {"ticket": "HAN-8"}, creds, cfg,
+        {"ticket": "PROJ-8"}, creds, cfg,
         popen_factory=never,
         ensure_repos_fn=lambda config, token: {"orchestrator": "err: auth failed"},
     )
@@ -355,7 +355,7 @@ def test_run_job_proceeds_when_nonorch_repo_fails(tmp_path):
     creds = ar.UserCreds(user="u1")
     lines = ['{"type":"result","subtype":"success","is_error":false,"result":"ok"}\n']
     res = ar.run_job(
-        {"ticket": "HAN-9"}, creds, cfg,
+        {"ticket": "PROJ-9"}, creds, cfg,
         popen_factory=_factory(lines, returncode=0),
         ensure_repos_fn=lambda config, token: {
             "orchestrator": "cloned", "dlc_meta": "err: pull conflict",
@@ -373,7 +373,7 @@ def test_resume_job_provisions_and_keeps_session_on_fatal(tmp_path):
         raise AssertionError("popen 호출되면 안 됨")
 
     res = ar.resume_job(
-        {"ticket": "HAN-10"}, "sess-keep", creds, cfg,
+        {"ticket": "PROJ-10"}, "sess-keep", creds, cfg,
         popen_factory=never,
         ensure_repos_fn=lambda config, token: {"orchestrator": "err: boom"},
     )
@@ -386,6 +386,6 @@ def test_run_job_default_ensure_repos_no_token_is_noop(tmp_path):
     cfg = _cfg(tmp_path)
     creds = ar.UserCreds(user="u1")
     lines = ['{"type":"result","subtype":"success","is_error":false,"result":"ok"}\n']
-    res = ar.run_job({"ticket": "HAN-11"}, creds, cfg,
+    res = ar.run_job({"ticket": "PROJ-11"}, creds, cfg,
                      popen_factory=_factory(lines, returncode=0))
     assert res.status == ar.STATUS_DONE

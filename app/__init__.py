@@ -1,6 +1,6 @@
 """jira-auto-dispatcher 애플리케이션 패키지 (2-역할: central | worker).
 
-Jira(HAN) 티켓이 등록 사용자에게 새로 할당되면 이를 감지해, 그 사용자 정체성
+Jira(PROJ) 티켓이 등록 사용자에게 새로 할당되면 이를 감지해, 그 사용자 정체성
 으로 오케스트레이터(`claude` CLI = ai-dlc-orchestrator)를 자율 실행하는 시스템.
 단일 도커 이미지가 env `ROLE`로 두 역할로 분기한다:
 
