@@ -38,4 +38,18 @@ git: { branch_prefix: auto/, github_owner: yunhyuk-choi }   # github은 central�
 
 secrets: { base_dir: "${SECRETS_DIR}" }   # 로컬=C:/temp, 컨테이너=/run/secrets 또는 볼륨
 
-run: { orchestrator_repo: /app/orchestrator, dlc_meta_repo: /app/dlc-meta, dataspace_docs_repo: /app/dataspace_docs, workspace_dir: /app/workspace, claude_bin: claude, permission_mode: skip, output_format: stream-json, concurrency_per_worker: 1 }
+run:
+  # worker가 오케스트레이터로 동작할 3개 레포의 로컬 경로(central↔worker 공유).
+  orchestrator_repo: /app/orchestrator        # 프레임워크(pristine, read-only)
+  dlc_meta_repo: /app/dlc-meta                 # 인스턴스(per-user 학습 — 매 잡 pull)
+  dataspace_docs_repo: /app/dataspace_docs     # 설계 문서
+  # 위 3개 레포의 clone 원본 URL(토큰 없는 형태). worker가 사용자 GitLab 토큰으로
+  # clone(없으면)/pull(있으면)한다(app/repos.py). 비우면 그 레포 프로비저닝 skip+경고.
+  orchestrator_repo_url: http://server.interxlab.io:30000/yhchoi/ai-dlc-orchestrator.git
+  dlc_meta_repo_url: http://server.interxlab.io:30000/hansa/docs/dlc-meta.git
+  dataspace_docs_repo_url: http://server.interxlab.io:30000/hansa/dataspace_docs.git
+  workspace_dir: /app/workspace
+  claude_bin: claude
+  permission_mode: skip
+  output_format: stream-json
+  concurrency_per_worker: 1

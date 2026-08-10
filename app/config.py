@@ -127,6 +127,11 @@ class RunConfig:
     orchestrator_repo: str = ""
     dlc_meta_repo: str = ""
     dataspace_docs_repo: str = ""
+    # 위 3개 레포의 clone 원본 URL(토큰 없는 형태). 비면 그 레포 프로비저닝 skip.
+    # worker가 사용자 GitLab 토큰으로 clone(없으면)/pull(있으면)한다 — app/repos.py.
+    orchestrator_repo_url: str = ""
+    dlc_meta_repo_url: str = ""
+    dataspace_docs_repo_url: str = ""
     workspace_dir: str = ""
     claude_bin: str = "claude"
     permission_mode: str = "skip"
@@ -285,6 +290,9 @@ def _build_config(raw: dict) -> AppConfig:
             orchestrator_repo=str(run.get("orchestrator_repo", "")),
             dlc_meta_repo=str(run.get("dlc_meta_repo", "")),
             dataspace_docs_repo=str(run.get("dataspace_docs_repo", "")),
+            orchestrator_repo_url=str(run.get("orchestrator_repo_url", "")),
+            dlc_meta_repo_url=str(run.get("dlc_meta_repo_url", "")),
+            dataspace_docs_repo_url=str(run.get("dataspace_docs_repo_url", "")),
             workspace_dir=str(run.get("workspace_dir", "")),
             claude_bin=str(run.get("claude_bin", "claude")),
             permission_mode=str(run.get("permission_mode", "skip")),

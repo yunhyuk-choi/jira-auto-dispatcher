@@ -286,3 +286,91 @@ def test_run_job_spawn_error_is_failed_not_raised(tmp_path):
 
     res = ar.run_job({"ticket": "HAN-6"}, ar.UserCreds(user="u1"), cfg, popen_factory=boom)
     assert res.status == ar.STATUS_FAILED
+
+
+# --- ensure_repos 프로비저닝 훅 ----------------------------------------------
+
+
+def test_run_job_calls_ensure_repos_with_user_gitlab_token(tmp_path):
+    base = str(tmp_path / "secrets")
+    _write_secret(base, "u1/gitlab", "GL-USER-TOKEN")
+    cfg = _cfg(tmp_path, base_dir=base)
+    creds = ar.UserCreds(user="u1", gitlab_token_ref="u1/gitlab")
+
+    seen = {}
+
+    def fake_ensure(config, token):
+        seen["config"] = config
+        seen["token"] = token
+        return {"orchestrator": "cloned", "dlc_meta": "pulled", "dataspace_docs": "cloned"}
+
+    lines = ['{"type":"result","subtype":"success","is_error":false,"result":"ok"}\n']
+    res = ar.run_job({"ticket": "HAN-7"}, creds, cfg,
+                     popen_factory=_factory(lines, returncode=0),
+                     ensure_repos_fn=fake_ensure)
+    # ensure_repos가 사용자 GitLab 토큰 값으로 호출됐다(build_env와 동일 소스).
+    assert seen["token"] == "GL-USER-TOKEN"
+    assert seen["config"] is cfg
+    # 프로비저닝 성공 → 잡은 정상 진행.
+    assert res.status == ar.STATUS_DONE
+
+
+def test_run_job_aborts_when_orchestrator_repo_provisioning_fails(tmp_path):
+    cfg = _cfg(tmp_path)
+    creds = ar.UserCreds(user="u1")
+
+    calls = {"popen": 0}
+
+    def never(cmd, cwd=None, env=None):  # claude는 절대 실행되면 안 된다
+        calls["popen"] += 1
+        raise AssertionError("popen 호출되면 안 됨")
+
+    res = ar.run_job(
+        {"ticket": "HAN-8"}, creds, cfg,
+        popen_factory=never,
+        ensure_repos_fn=lambda config, token: {"orchestrator": "err: auth failed"},
+    )
+    assert res.status == ar.STATUS_FAILED
+    assert "repos-error" in res.log_summary
+    assert calls["popen"] == 0
+
+
+def test_run_job_proceeds_when_nonorch_repo_fails(tmp_path):
+    cfg = _cfg(tmp_path)
+    creds = ar.UserCreds(user="u1")
+    lines = ['{"type":"result","subtype":"success","is_error":false,"result":"ok"}\n']
+    res = ar.run_job(
+        {"ticket": "HAN-9"}, creds, cfg,
+        popen_factory=_factory(lines, returncode=0),
+        ensure_repos_fn=lambda config, token: {
+            "orchestrator": "cloned", "dlc_meta": "err: pull conflict",
+        },
+    )
+    # orchestrator는 준비됨 → dlc_meta 실패는 비치명적, 잡 진행.
+    assert res.status == ar.STATUS_DONE
+
+
+def test_resume_job_provisions_and_keeps_session_on_fatal(tmp_path):
+    cfg = _cfg(tmp_path)
+    creds = ar.UserCreds(user="u1")
+
+    def never(cmd, cwd=None, env=None):
+        raise AssertionError("popen 호출되면 안 됨")
+
+    res = ar.resume_job(
+        {"ticket": "HAN-10"}, "sess-keep", creds, cfg,
+        popen_factory=never,
+        ensure_repos_fn=lambda config, token: {"orchestrator": "err: boom"},
+    )
+    assert res.status == ar.STATUS_FAILED
+    assert res.session_id == "sess-keep"  # 치명 실패에도 재개 키 유지
+
+
+def test_run_job_default_ensure_repos_no_token_is_noop(tmp_path):
+    # gitlab 토큰 참조 없음 → 기본 ensure_repos가 전체 skip(라이브 git 미호출) → 진행.
+    cfg = _cfg(tmp_path)
+    creds = ar.UserCreds(user="u1")
+    lines = ['{"type":"result","subtype":"success","is_error":false,"result":"ok"}\n']
+    res = ar.run_job({"ticket": "HAN-11"}, creds, cfg,
+                     popen_factory=_factory(lines, returncode=0))
+    assert res.status == ar.STATUS_DONE

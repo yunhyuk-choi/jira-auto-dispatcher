@@ -44,6 +44,7 @@ Popen 관용(claude-hacker/worker 계승):
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -53,6 +54,9 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 from app.config import read_secret
+from app.repos import ensure_repos
+
+log = logging.getLogger("jad.agent_runner")
 
 # --- 상수 -----------------------------------------------------------------
 
@@ -680,6 +684,44 @@ def _consume(proc, secret_values: list, *, cancel_check: Optional[Callable[[], b
     )
 
 
+def _gitlab_token(creds: UserCreds, config: Any) -> Optional[str]:
+    """creds의 GitLab 토큰 참조를 secrets.base_dir 기준으로 읽어 값 반환(build_env와 동일 소스)."""
+    ref = getattr(creds, "gitlab_token_ref", "") or ""
+    if not ref:
+        return None
+    base_dir = getattr(getattr(config, "secrets", None), "base_dir", "") or ""
+    return read_secret(base_dir, ref)
+
+
+def _provision_repos(
+    creds: UserCreds,
+    config: Any,
+    ensure_repos_fn: Optional[Callable],
+) -> Optional[AgentResult]:
+    """claude 실행 **전** 오케스트레이터 3개 레포를 프로비저닝(clone/pull).
+
+    사용자 GitLab 토큰으로 :func:`app.repos.ensure_repos` 를 호출한다. 개별 레포
+    실패는 로그만 남기고 잡은 진행하되(오케스트레이터가 자체 처리할 수도),
+    **orchestrator_repo 자체가 프로비저닝 실패**하면 오케스트레이터 cwd가 없어
+    실행 불가이므로 명확한 실패 AgentResult를 반환한다(그 외엔 None → 진행).
+    """
+    fn = ensure_repos_fn or ensure_repos
+    token = _gitlab_token(creds, config)
+    try:
+        results = fn(config, token) or {}
+    except Exception as exc:  # noqa: BLE001 — 프로비저닝 예외는 잡을 막지 않는다
+        log.warning("레포 프로비저닝 중 예외(무시하고 진행): %s", type(exc).__name__)
+        return None
+    orch = str(results.get("orchestrator", ""))
+    if orch.startswith("err"):
+        log.error("orchestrator_repo 프로비저닝 실패 — 잡 중단: %s", orch)
+        return AgentResult(
+            status=STATUS_FAILED,
+            log_summary="[repos-error] orchestrator_repo 프로비저닝 실패: " + orch,
+        )
+    return None
+
+
 def run_job(
     job: Any,
     creds: UserCreds,
@@ -688,11 +730,16 @@ def run_job(
     popen_factory: Optional[Callable] = None,
     base_env: Optional[dict] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    ensure_repos_fn: Optional[Callable] = None,
 ) -> AgentResult:
     """잡 1건을 사용자 정체성으로 신규 실행하고 AgentResult를 반환.
 
+    실행 전 오케스트레이터 3개 레포를 프로비저닝한다(:func:`_provision_repos`).
     ``cancel_check``가 주어지면 실행 중 취소 신호를 폴링해 abort할 수 있다(§10.4).
     """
+    fatal = _provision_repos(creds, config, ensure_repos_fn)
+    if fatal is not None:
+        return fatal
     cmd = build_command(job, config, resume=False)
     env, secret_values = build_env(job, creds, config, base_env=base_env)
     cwd = getattr(getattr(config, "run", None), "orchestrator_repo", "") or ""
@@ -718,8 +765,17 @@ def resume_job(
     popen_factory: Optional[Callable] = None,
     base_env: Optional[dict] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    ensure_repos_fn: Optional[Callable] = None,
 ) -> AgentResult:
-    """중단된 잡을 ``--resume``(+옵션 ``--from-pr``)로 재개 실행."""
+    """중단된 잡을 ``--resume``(+옵션 ``--from-pr``)로 재개 실행.
+
+    재개도 신규와 동일하게 실행 전 오케스트레이터 레포를 프로비저닝한다
+    (dlc-meta는 per-user 학습이 갱신되므로 매 실행 pull이 중요).
+    """
+    fatal = _provision_repos(creds, config, ensure_repos_fn)
+    if fatal is not None:
+        fatal.session_id = session_id
+        return fatal
     cmd = build_command(job, config, resume=True, session_id=session_id, from_pr=from_pr)
     env, secret_values = build_env(job, creds, config, base_env=base_env)
     cwd = getattr(getattr(config, "run", None), "orchestrator_repo", "") or ""
