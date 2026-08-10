@@ -1,0 +1,34 @@
+# jira-auto-dispatcher — 빌드 컨텍스트 제외 (이미지에 굽지 말 것)
+# COPY . . 로 들어가면 안 되는 것: VCS 메타·런타임 영속·시크릿·로컬 설정·런타임 clone 레포·테스트.
+
+# --- VCS ---
+.git
+.gitignore
+.gitattributes
+
+# --- 런타임 영속/작업 산출물(볼륨으로 마운트; 이미지에 넣지 않음) ---
+state/
+workspace/
+
+# --- 시크릿(값) — 절대 이미지에 굽지 말 것(ro 볼륨으로 주입) ---
+secrets/
+
+# --- 런타임에 clone 되는 연동 레포(앱이 소유하지 않음) ---
+orchestrator/
+dlc-meta/
+dataspace_docs/
+
+# --- 로컬 Claude 세션/인증(볼륨으로 영속) ---
+.claude/
+
+# --- 테스트(런타임 이미지에 불필요) ---
+tests/
+
+# --- 파이썬 캐시 ---
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# --- 로컬 설정(실토큰/계정ID 포함) — 이미지에 굽지 말 것 ---
+config/config.yaml
+config/registry.json

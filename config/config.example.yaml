@@ -25,7 +25,7 @@ spawn:
   network: jad-net
   central_url: http://central:8787
   mem_limit: 4g
-  docker_host: unix:///var/run/docker.sock   # 프록시 사용 시 tcp://socket-proxy:2375
+  docker_host: tcp://socket-proxy:2375       # compose 기본(socket-proxy 경유). 직결 대안: unix:///var/run/docker.sock
   run_as: "1000:1000"                         # worker 컨테이너 비-root 실행(특권 축소)
 
 git: { branch_prefix: auto/, github_owner: yunhyuk-choi }   # github은 central만
