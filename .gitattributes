@@ -1,0 +1,5 @@
+# 크로스플랫폼 일관성: 텍스트는 LF로 정규화(리눅스 컨테이너 배포 전제)
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.ico binary
