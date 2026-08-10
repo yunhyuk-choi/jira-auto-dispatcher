@@ -1,0 +1,29 @@
+# jira-auto-dispatcher — 컴포즈 정의
+# 자리표시자 골격만. 실제 완성은 Phase 6(배포)에서.
+#
+# 완성 시 담을 것(Phase 6):
+#   - 단일 서비스(dispatcher): 개발서버 도커에 상시 구동
+#   - 볼륨:
+#       ~/.claude       세션/auth 영속(재시작에도 로그인 유지)
+#       ./state         잡/워터마크/dedup 영속
+#       ./workspace     오케스트레이터 작업 공간
+#       ./config        config.yaml 마운트(시크릿은 파일 참조)
+#   - 시크릿: C:/temp/.jira-token 등은 파일 마운트/시크릿으로 주입(이미지에 굽지 말 것)
+#   - 포트: 관리 UI(기본 5000) — ⚠️ 사내망 한정, 외부 노출 금지(RCE 표면)
+#   - webhook.enabled=true일 때만 인바운드 포트 개방
+#   - restart: unless-stopped (상시 디스패처)
+#
+# TODO(Phase 6): 아래를 실제 서비스 정의로 채운다.
+# services:
+#   dispatcher:
+#     build: .
+#     restart: unless-stopped
+#     ports:
+#       - "5000:5000"
+#     volumes:
+#       - claude-home:/root/.claude
+#       - ./state:/app/state
+#       - ./workspace:/app/workspace
+#       - ./config:/app/config:ro
+# volumes:
+#   claude-home:

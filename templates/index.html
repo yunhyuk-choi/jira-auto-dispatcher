@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>jira-auto-dispatcher — 관리 콘솔</title>
+    <style>
+      body {
+        font-family: "Segoe UI", sans-serif;
+        max-width: 900px;
+        margin: 0 auto;
+        padding: 20px;
+        background-color: #1e1e1e;
+        color: #d4d4d4;
+      }
+      h2 {
+        color: #569cd6;
+        border-bottom: 1px solid #3c3c3c;
+        padding-bottom: 10px;
+      }
+      h3 {
+        color: #9cdcfe;
+      }
+      section {
+        background-color: #252526;
+        padding: 20px;
+        border-radius: 8px;
+        margin-bottom: 20px;
+        border: 1px solid #3c3c3c;
+      }
+      #auth-link {
+        color: #4ec9b0;
+        font-weight: bold;
+        word-break: break-all;
+      }
+      .info-box {
+        background-color: #332b00;
+        padding: 10px;
+        border-left: 4px solid #cca700;
+        margin: 15px 0;
+        font-size: 0.9em;
+      }
+      .todo-box {
+        background-color: #2a2d2e;
+        padding: 10px;
+        border-left: 4px solid #569cd6;
+        margin: 10px 0;
+        font-size: 0.9em;
+        color: #999;
+      }
+      .flex-form {
+        display: flex;
+        gap: 10px;
+        margin-top: 10px;
+      }
+      input[type="text"] {
+        flex: 1;
+        padding: 10px;
+        border-radius: 4px;
+        border: 1px solid #3c3c3c;
+        background-color: #3c3c3c;
+        color: white;
+      }
+      button {
+        padding: 10px 20px;
+        background-color: #0e639c;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      button:hover {
+        background-color: #1177bb;
+      }
+      button:disabled {
+        background-color: #555;
+        cursor: not-allowed;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 10px;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 8px;
+        border-bottom: 1px solid #3c3c3c;
+        font-size: 0.9em;
+      }
+      th {
+        color: #569cd6;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>⚙️ jira-auto-dispatcher 관리 콘솔</h2>
+
+    <!-- 1. 세션 로그인 (Phase 0 — 동작) -->
+    <section id="login-section">
+      <h3>세션 로그인</h3>
+      <button id="start-login-btn">로그인 URL 발급받기</button>
+
+      <div id="login-step2" style="display: none">
+        <p>1. 아래 링크를 클릭하여 브라우저에서 로그인을 완료하세요.</p>
+        <p>
+          <a href="#" id="auth-link" target="_blank"
+            >여기에 링크가 표시됩니다</a
+          >
+        </p>
+
+        <div class="info-box">
+          💡 <b>안내:</b> 로그인을 마치면 화면에 표시되는
+          <b>인증 코드(<code>코드#상태</code> 형태)를 통째로 복사</b>해서 아래에
+          붙여넣어 주세요. (예: <code>6v0pLOR...#6_tmngG...</code>)
+        </div>
+
+        <div class="flex-form">
+          <input
+            type="text"
+            id="auth-code-input"
+            placeholder="인증 코드 붙여넣기 (code#state)"
+          />
+          <button id="complete-login-btn">인증 완료</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 2. 현황 (Phase 3~5 — 자리표시자) -->
+    <section id="status-section">
+      <h3>현황</h3>
+      <div class="todo-box">
+        TODO(Phase 3~5): <code>GET /api/status</code> 폴링으로 워터마크·잡 목록을
+        채운다. 아래 표는 자리표시자.
+      </div>
+      <table id="jobs-table">
+        <thead>
+          <tr>
+            <th>티켓</th>
+            <th>상태</th>
+            <th>세션</th>
+            <th>브랜치</th>
+            <th>reset_at</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td colspan="5">(자리표시자 — 구현 예정)</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- 3. 자율 모드 스위치 (Phase 5 — 자리표시자) -->
+    <section id="mode-section">
+      <h3>자율 모드</h3>
+      <div class="todo-box">
+        TODO(Phase 5): <code>POST /api/mode</code>로 A(완전자율 MR초안)/
+        B(경량1차+로컬완성) 스위치. 레포별 오버라이드 표시.
+      </div>
+      <button id="mode-a-btn" disabled>모드 A</button>
+      <button id="mode-b-btn" disabled>모드 B</button>
+    </section>
+
+    <!-- 4. 재개 (Phase 5 — 자리표시자) -->
+    <section id="resume-section">
+      <h3>재개</h3>
+      <div class="todo-box">
+        TODO(Phase 5): <code>POST /api/resume</code>로 interrupted 잡을 수동
+        재개(리셋시각 스케줄러/야간드레인과 동일 경로).
+      </div>
+      <button id="resume-btn" disabled>지금 재개</button>
+    </section>
+
+    <script>
+      // --- [로그인 로직] (Phase 0 — 동작, claude-hacker 계승) ---
+      const startLoginBtn = document.getElementById("start-login-btn");
+      const completeLoginBtn = document.getElementById("complete-login-btn");
+
+      startLoginBtn.addEventListener("click", async () => {
+        startLoginBtn.innerText = "URL 발급 중...";
+        startLoginBtn.disabled = true;
+
+        const res = await fetch("/start-login", { method: "POST" });
+        const data = await res.json();
+
+        if (data.status === "success") {
+          document.getElementById("auth-link").href = data.url;
+          document.getElementById("auth-link").innerText = data.url;
+          document.getElementById("login-step2").style.display = "block";
+          startLoginBtn.innerText = "발급 완료";
+        } else {
+          alert("에러: " + data.message);
+          startLoginBtn.innerText = "로그인 URL 발급받기";
+          startLoginBtn.disabled = false;
+        }
+      });
+
+      completeLoginBtn.addEventListener("click", async () => {
+        const authCode = document
+          .getElementById("auth-code-input")
+          .value.trim();
+        if (!authCode) {
+          alert("인증 코드를 붙여넣어 주세요.");
+          return;
+        }
+
+        completeLoginBtn.innerText = "처리 중...";
+        completeLoginBtn.disabled = true;
+
+        const res = await fetch("/complete-login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code: authCode }),
+        });
+        const data = await res.json();
+
+        if (data.status === "success") {
+          alert("로그인이 완료되었습니다!");
+          completeLoginBtn.innerText = "완료됨";
+        } else {
+          alert("에러: " + data.message);
+          completeLoginBtn.innerText = "인증 완료";
+          completeLoginBtn.disabled = false;
+        }
+      });
+
+      // TODO(Phase 3~5): 현황 폴링 / 모드 스위치 / 재개 버튼 배선.
+    </script>
+  </body>
+</html>

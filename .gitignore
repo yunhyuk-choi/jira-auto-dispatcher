@@ -1,0 +1,23 @@
+# --- 로컬 설정 (실토큰/계정ID 포함) ---
+config/config.yaml
+
+# --- 런타임 영속/작업 산출물 ---
+state/
+workspace/
+.env
+
+# --- 파이썬 ---
+__pycache__/
+*.pyc
+
+# --- 런타임에 clone 되는 연동 레포 (앱이 소유하지 않음) ---
+orchestrator/
+dlc-meta/
+dataspace_docs/
+
+# --- 로컬 Claude 세션/인증 (볼륨으로 영속) ---
+.claude/
+
+# --- 추적 유지: 디렉토리 골격 표식 ---
+!config/.gitkeep
+!static/.gitkeep

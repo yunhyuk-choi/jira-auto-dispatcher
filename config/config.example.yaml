@@ -1,0 +1,47 @@
+# jira-auto-dispatcher 설정 예시. config.yaml(gitignore됨)로 복사해 채운다.
+jira:
+  base_url: https://interx-jira.atlassian.net
+  project: HAN
+  email: yh.choi@interxlab.com
+  token_file: C:/temp/.jira-token      # Basic auth(email:token). 값은 여기 넣지 말 것
+  poll_interval_sec: 60                 # high-watermark는 state/에 영속
+
+# 자동 실행 대상 사용자들. 지금은 1명이지만 배열로 확장 가능
+triggers:
+  - account_id: "712020:39573d48-xxxx"  # 담당자 계정ID (yhchoi). 실값은 config.yaml에서
+    display_name: yh.choi
+    enabled: true
+    autonomy_mode: B                     # A=완전자율 MR초안 / B=경량1차+로컬완성
+    agent: default                       # dlc-meta/agents/<user>/ 오버레이 키
+    per_repo:                            # (옵션) 레포별 모드 오버라이드
+      # portal-frontend: A               # 프론트는 컨벤션 성숙 → A
+      # portal-backend: B                # 백엔드 컨벤션 WIP → B
+
+match:
+  statuses: ["해야 할 일"]               # 신규 To-Do 상태에서 트리거
+  # 루프 방지: 트리거 티켓 = 작업 티켓. 오케스트레이터는 새 티켓을 만들지 않고
+  # 기존 티켓 있으면 그걸로 핸들링(ISSUE-TRACKER-ADAPTER 규칙 개정 참조).
+
+run:
+  orchestrator_repo: /app/orchestrator
+  dlc_meta_repo: /app/dlc-meta
+  dataspace_docs_repo: /app/dataspace_docs
+  workspace_dir: /app/workspace
+  claude_bin: claude
+  permission_mode: skip                  # --dangerously-skip-permissions (승인할 사람 없음)
+  output_format: stream-json
+  concurrency: 1                         # 자율 에이전트 폭주 방지
+
+webhook:
+  enabled: false                         # 개발서버 인바운드 포트 열리면 on
+  path: /jira-webhook
+  shared_secret_file: C:/temp/.jira-webhook-secret
+
+resume:
+  work_hours: "08:00-18:00"              # 업무시간=실시간 우선
+  timezone: Asia/Seoul
+  nightly_drain: "01:00-05:00"           # 야간=백로그 드레인
+  reset_buffer_sec: 120                  # 파싱된 리셋시각 뒤 여유
+
+git:
+  branch_prefix: auto/                   # auto/<TICKET> 결정적 브랜치 → 멱등 재개
