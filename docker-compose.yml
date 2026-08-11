@@ -56,7 +56,7 @@ services:
       - jad-state:/app/state                 # jobs/watermark/dedup/registry 영속(명명 볼륨)
       - jad-workspace:/app/workspace         # 오케스트레이터 작업 공간(명명 볼륨)
       - ./config:/app/config:ro              # config.yaml(시크릿 값 아님, 파일 참조만)
-      - ./secrets:/run/secrets:ro            # 시크릿 파일(값). 이미지에 굽지 말 것(ro)
+      - ./secrets:/run/secrets               # 시크릿 파일(값). central은 온보딩으로 per-user 시크릿을 여기 쓴다(rw 필수). 이미지엔 굽지 말 것. worker는 spawner가 자기 것만 ro로 마운트.
       # --- worker 동적 spawn을 위한 docker 접근 ---
       # (기본) 위 socket-proxy 경유 — central은 docker.sock을 직접 보지 않는다.
       #        ⚠️ 정합 필수: config.yaml 의 spawn.docker_host: tcp://socket-proxy:2375

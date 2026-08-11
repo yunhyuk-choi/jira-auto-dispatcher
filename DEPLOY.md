@@ -89,8 +89,12 @@ spawn:
 
 ## 3. 시크릿 배치 (`secrets.base_dir`)
 
-컨테이너는 `SECRETS_DIR=/run/secrets` 로 주입되고, 호스트 `./secrets/` 를 read-only로
-마운트한다. 여기에 **service 시크릿**(central 공용)과 **per-user 시크릿**을 파일로 둔다.
+컨테이너는 `SECRETS_DIR=/run/secrets` 로 주입되고, 호스트 `./secrets/` 를 마운트한다.
+여기에 **service 시크릿**(central 공용)과 **per-user 시크릿**을 파일로 둔다.
+⚠️ **central은 rw로 마운트한다** — 온보딩 UI가 새 사용자 시크릿을 `secrets.base_dir/<user>/`
+에 직접 쓰기 때문(`:ro`면 온보딩이 `Read-only file system` 500으로 실패). worker는
+spawner가 **자기 per-user 시크릿만 ro**로 마운트하므로 워커측 격리는 유지된다.
+호스트 `./secrets/` 소유는 컨테이너 uid(1000:1000)에 맞춘다.
 
 ```bash
 cd /opt/jira-auto-dispatcher
