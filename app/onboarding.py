@@ -141,6 +141,8 @@ def register_onboarding_api(app, comps: dict) -> None:
                 "display_name": str(data.get("display_name", "")).strip() or username,
                 "jira_account_id": str(data.get("jira_account_id", "")).strip(),
                 "jira_email": str(data.get("jira_email", "")).strip(),
+                # (선택) 완료 알림 @멘션용 Google 계정 숫자 ID. 없으면 이름만 표시.
+                "google_chat_user_id": str(data.get("google_chat_user_id", "")).strip(),
                 "enabled": False,  # 안전 기본 — 운영자가 검토 후 활성화
                 "autonomy_mode": str(data.get("autonomy_mode", "B")).strip().upper() or "B",
                 "permission_level": str(data.get("permission_level", "bypass")).strip().lower()

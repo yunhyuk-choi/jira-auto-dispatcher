@@ -6,6 +6,7 @@
       "display_name": "<username>",
       "jira_account_id": "<JIRA_ACCOUNT_ID>",
       "jira_email": "you@example.com",
+      "google_chat_user_id": "<google-user-id (선택, 완료 알림 @멘션)>",
       "enabled": true,
       "autonomy_mode": "B",
       "permission_level": "bypass",

@@ -86,6 +86,8 @@ class UserRecord:
     display_name: str = ""
     jira_account_id: str = ""
     jira_email: str = ""
+    # (선택) Google Chat 사용자 숫자 ID — 완료 알림 @멘션용. 없으면 display_name 폴백.
+    google_chat_user_id: str = ""
     enabled: bool = True
     autonomy_mode: str = "B"
     permission_level: str = "bypass"
@@ -113,6 +115,7 @@ class UserRecord:
             display_name=str(d.get("display_name", "")),
             jira_account_id=str(d.get("jira_account_id", "")),
             jira_email=str(d.get("jira_email", "")),
+            google_chat_user_id=str(d.get("google_chat_user_id", "")),
             enabled=bool(d.get("enabled", True)),
             autonomy_mode=str(d.get("autonomy_mode", "B")),
             permission_level=str(d.get("permission_level", "bypass") or "bypass"),

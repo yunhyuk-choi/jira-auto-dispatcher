@@ -36,11 +36,12 @@ def _cfg(base_dir: str):
     )
 
 
-def _user():
+def _user(google_chat_user_id=""):
     return UserRecord(
         username="testuser",
         jira_account_id="acc",
         jira_email="yh@x.com",
+        google_chat_user_id=google_chat_user_id,
         permission_level="bypass",
         identity=Identity(git_name="Test User", git_email="you@example.com"),
         secrets_ref=SecretsRef(
@@ -94,6 +95,25 @@ def test_build_env_emits_from_env_contract_keys(tmp_path):
     assert env["JIRA_TOKEN_REF"] == "testuser/jira-token"
     assert env["GITLAB_TOKEN_REF"] == "testuser/gitlab-token"
     assert env["CLAUDE_OAUTH_TOKEN_REF"] == "testuser/claude-oauth-token"
+
+
+def test_build_env_roundtrips_google_chat_user_id_when_present(tmp_path):
+    """google_chat_user_id가 있으면 spawner가 방출하고 from_env가 멘션용으로 수신."""
+    base = str(tmp_path / "secrets")
+    user = _user(google_chat_user_id="123456789")
+    env = Spawner(_cfg(base)).build_env(user)
+    assert env["DISPATCH_GOOGLE_CHAT_USER_ID"] == "123456789"
+    creds = UserCreds.from_env(user.username, env=env)
+    assert creds.google_chat_user_id == "123456789"
+
+
+def test_build_env_omits_google_chat_user_id_when_absent(tmp_path):
+    """없으면 방출 생략 → from_env는 빈 값(display_name 폴백)."""
+    base = str(tmp_path / "secrets")
+    env = Spawner(_cfg(base)).build_env(_user())  # google_chat_user_id=""
+    assert "DISPATCH_GOOGLE_CHAT_USER_ID" not in env
+    creds = UserCreds.from_env("testuser", env=env)
+    assert creds.google_chat_user_id == ""
 
 
 def test_build_env_does_not_leak_token_values(tmp_path):

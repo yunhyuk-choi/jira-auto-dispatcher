@@ -121,6 +121,22 @@ class SecretsConfig:
 
 
 @dataclass
+class NotifyConfig:
+    """[notify] 섹션 — 잡 종료 시 Google Chat 알림(best-effort, central↔worker 공유).
+
+    웹훅 URL은 **시크릿**이므로 값이 아니라 참조(secrets.base_dir 상대 파일 경로)만
+    담는다(webhook_ref). worker가 잡 종료(터미널 상태)에 팀 스페이스 웹훅으로 POST한다.
+    """
+
+    enabled: bool = False
+    # 팀 스페이스 incoming webhook URL이 담긴 파일의 secrets.base_dir 상대 참조(시크릿).
+    # env GOOGLE_CHAT_WEBHOOK_REF 폴백. 값 자체는 절대 여기/추적 파일에 넣지 않는다.
+    webhook_ref: str = ""
+    notify_interrupted: bool = True  # 토큰 한도(interrupted) 시에도 짧게 알림
+    notify_cancelled: bool = True    # 취소(cancelled) 시 짧게 알림
+
+
+@dataclass
 class RunConfig:
     """[run] 섹션 — 오케스트레이터 실행 파라미터(central↔worker 공유)."""
 
@@ -154,6 +170,7 @@ class AppConfig:
     spawn: SpawnConfig = field(default_factory=SpawnConfig)
     git: GitConfig = field(default_factory=GitConfig)
     secrets: SecretsConfig = field(default_factory=SecretsConfig)
+    notify: NotifyConfig = field(default_factory=NotifyConfig)
     run: RunConfig = field(default_factory=RunConfig)
     # dispatch HTTP(worker→central) 공유 시크릿. env WORKER_SHARED_SECRET 우선.
     worker_shared_secret: str = ""
@@ -245,6 +262,7 @@ def _build_config(raw: dict) -> AppConfig:
     spawn = _section(raw, "spawn")
     git = _section(raw, "git")
     secrets = _section(raw, "secrets")
+    notify = _section(raw, "notify")
     run = _section(raw, "run")
 
     cfg = AppConfig(
@@ -286,6 +304,12 @@ def _build_config(raw: dict) -> AppConfig:
             github_owner=str(git.get("github_owner", "")),
         ),
         secrets=SecretsConfig(base_dir=str(secrets.get("base_dir", ""))),
+        notify=NotifyConfig(
+            enabled=bool(notify.get("enabled", False)),
+            webhook_ref=str(notify.get("webhook_ref", "")),
+            notify_interrupted=bool(notify.get("notify_interrupted", True)),
+            notify_cancelled=bool(notify.get("notify_cancelled", True)),
+        ),
         run=RunConfig(
             orchestrator_repo=str(run.get("orchestrator_repo", "")),
             dlc_meta_repo=str(run.get("dlc_meta_repo", "")),
@@ -330,6 +354,13 @@ def _apply_env_overrides(cfg: AppConfig) -> None:
     worker_secret = os.environ.get("WORKER_SHARED_SECRET")
     if worker_secret:
         cfg.worker_shared_secret = worker_secret
+
+    # 완료 알림 웹훅 참조(시크릿 파일 참조) env 폴백 — YAML보다 우선. 값이 아니라 참조.
+    webhook_ref = os.environ.get("GOOGLE_CHAT_WEBHOOK_REF")
+    if webhook_ref:
+        cfg.notify.webhook_ref = webhook_ref
+    if os.environ.get("NOTIFY_ENABLED"):
+        cfg.notify.enabled = os.environ["NOTIFY_ENABLED"].strip().lower() in ("1", "true", "yes", "on")
 
     # 호스트 배포 디렉토리(worker 바인드 source용). env HOST_DEPLOY_DIR 폴백 우선.
     host_deploy_dir = os.environ.get("HOST_DEPLOY_DIR")

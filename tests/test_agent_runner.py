@@ -155,10 +155,34 @@ def test_build_prompt_binds_trigger_ticket_as_work_ticket():
     assert "/app/dlc-meta" in prompt
 
 
+def test_build_prompt_mode_a_leaves_mr_link_comment():
+    """A 모드: 종료 문구가 MR 링크 코멘트로 남기고 진행 중(리뷰 대기)."""
+    prompt = ar.build_prompt({"ticket": "PROJ-142", "autonomy_mode": "A"}, None)
+    assert "MR 링크를 코멘트로 남기고" in prompt
+    assert "'리뷰 대기'" in prompt
+    # A는 여전히 MR 초안 생성.
+    assert "MR 초안" in prompt
+
+
 def test_build_prompt_mode_b_wording():
     prompt = ar.build_prompt({"ticket": "PROJ-9", "autonomy_mode": "B"}, None)
     assert "autonomy_mode=B" in prompt
     assert "경량 1차" in prompt
+
+
+def test_build_prompt_mode_b_pushes_branch_and_leaves_branch_journal_comment():
+    """B 모드 핸드오프 수정: auto/<ticket> 원격 push 지시 + 브랜치/저널 코멘트 지시,
+    MR은 만들지 않음(하드코딩 'MR 링크' 문구가 B에 새지 않아야 한다)."""
+    prompt = ar.build_prompt({"ticket": "PROJ-9", "autonomy_mode": "B"}, None)
+    # 원격(GitLab) push를 반드시 하라는 지시.
+    assert "원격" in prompt and "push" in prompt
+    assert "auto/PROJ-9" in prompt
+    # 종료 시 브랜치명 + runs 저널 위치를 코멘트로 남긴다.
+    assert "runs/PROJ-9/" in prompt
+    assert "fetch" in prompt  # 로컬에서 fetch해 이어서 완성
+    # B는 MR을 만들지 않는다 — 'MR 링크를 코멘트로' 문구가 새지 않아야 한다.
+    assert "MR 링크를 코멘트로 남기고" not in prompt
+    assert "MR은 만들지 말라" in prompt
 
 
 # --- build_command -----------------------------------------------------------

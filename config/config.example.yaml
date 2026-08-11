@@ -38,6 +38,17 @@ git: { branch_prefix: auto/, github_owner: <your-github-owner> }   # github은 c
 
 secrets: { base_dir: "${SECRETS_DIR}" }   # 로컬=C:/temp, 컨테이너=/run/secrets 또는 볼륨
 
+# 완료 알림(Google Chat incoming webhook) — best-effort. 잡 종료 시 팀 스페이스
+# 웹훅으로 마무리 멘트 + 다음 할 일을 보내고, 담당자를 @멘션한다(레지스트리의
+# google_chat_user_id, 없으면 이름만). ⚠️ 웹훅 URL은 시크릿이므로 값이 아니라
+# 참조(secrets.base_dir 상대 파일 경로)만 둔다. 그 파일에 웹훅 URL을 0600으로 저장.
+# env GOOGLE_CHAT_WEBHOOK_REF / NOTIFY_ENABLED 폴백(YAML보다 우선).
+notify:
+  enabled: false
+  webhook_ref: service/google-chat-webhook   # 웹훅 URL이 담긴 파일(시크릿). 값 아님 — 예시 경로만.
+  notify_interrupted: true                    # 토큰 한도(interrupted) 시에도 짧게 알림
+  notify_cancelled: true                      # 취소(cancelled) 시 짧게 알림
+
 run:
   # worker가 오케스트레이터로 동작할 3개 레포의 로컬 경로(central↔worker 공유).
   orchestrator_repo: /app/orchestrator        # 프레임워크(pristine, read-only)

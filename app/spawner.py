@@ -264,6 +264,12 @@ class Spawner:
             env["DISPATCH_JIRA_EMAIL"] = user.jira_email
             env["JIRA_EMAIL"] = user.jira_email
 
+        # (선택) 완료 알림 @멘션용 Google Chat 사용자 ID(값이지만 시크릿 아님).
+        # from_env는 DISPATCH_GOOGLE_CHAT_USER_ID를 읽는다. 없으면 방출 생략(이름 폴백).
+        gcid = getattr(user, "google_chat_user_id", "") or ""
+        if gcid:
+            env["DISPATCH_GOOGLE_CHAT_USER_ID"] = gcid
+
         return env
 
     def build_volumes(self, user, settings_path: Optional[str] = None) -> dict:

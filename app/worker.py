@@ -46,6 +46,7 @@ from app.agent_runner import (  # 계승 재노출(단일 원천)
     resume_job,
     run_job,
 )
+from app.notify import notify_job_end
 
 log = logging.getLogger("jad.worker")
 
@@ -333,12 +334,16 @@ def _process_job(
     rollback: Callable,
     control_poll: Callable,
     control_poll_sec: int,
+    notify: Callable,
 ) -> None:
     """단일 잡 처리 — 진행중 보고 → 실행(취소 폴링) → (한도면 재개 반복) → 최종 회신.
 
     실행 중 취소 신호(control)가 오면 agent_runner가 abort하고 STATUS_CANCELLED로
     돌려준다. 그러면 worker가 **롤백**(가역 산출 되돌리기)을 수행한 뒤 cancelled로
     회신한다(§10.4).
+
+    각 터미널/전이 결과(성공·failed·interrupted·cancelled)마다 완료 알림을
+    best-effort로 발송한다(notify). 알림은 채널 F 회신과 독립이며 잡을 죽이지 않는다.
     """
     ticket = str(job.get("ticket") or "")
     branch = job.get("branch") or (f"auto/{ticket}" if ticket else None)
@@ -356,7 +361,7 @@ def _process_job(
     if result.status == agent_runner.STATUS_CANCELLED:
         _handle_cancel(job, config, creds, result, http=http, central=central,
                        user=user, ticket=ticket, headers=headers, branch=branch,
-                       rollback=rollback)
+                       rollback=rollback, notify=notify)
         return
 
     # 한도(interrupted)면 reset_at까지 대기 후 재개를 반복.
@@ -365,6 +370,7 @@ def _process_job(
             http, central, user, ticket, headers,
             _channel_f_payload(result, branch),
         )
+        _safe_notify(notify, config, result, job, creds)  # 짧은 '멈춤' 알림(configurable)
         _wait_until(result.reset_at, sleep=sleep, now=now,
                     buffer_sec=buffer_sec, stop_event=stop_event)
         if stop_event is not None and stop_event.is_set():
@@ -374,10 +380,11 @@ def _process_job(
         if result.status == agent_runner.STATUS_CANCELLED:
             _handle_cancel(job, config, creds, result, http=http, central=central,
                            user=user, ticket=ticket, headers=headers, branch=branch,
-                           rollback=rollback)
+                           rollback=rollback, notify=notify)
             return
 
     _post_status(http, central, user, ticket, headers, _channel_f_payload(result, branch))
+    _safe_notify(notify, config, result, job, creds)  # 터미널(성공/failed) 알림
 
 
 def _handle_cancel(
@@ -393,8 +400,9 @@ def _handle_cancel(
     headers: dict,
     branch: Optional[str],
     rollback: Callable,
+    notify: Callable,
 ) -> None:
-    """취소된 실행 후처리 — 롤백(best-effort) 후 cancelled 회신(§10.4)."""
+    """취소된 실행 후처리 — 롤백(best-effort) 후 cancelled 회신(§10.4) + 짧은 알림."""
     try:
         rb = rollback(job, creds, config)
     except Exception:  # noqa: BLE001 — 롤백 실패해도 회신은 해야 락/dedup가 풀린다
@@ -415,6 +423,7 @@ def _handle_cancel(
     if audit:
         payload["audit_refs"] = audit
     _post_status(http, central, user, ticket, headers, payload)
+    _safe_notify(notify, config, result, job, creds)  # 짧은 '취소됨' 알림
 
 
 def _channel_f_payload(result: agent_runner.AgentResult, branch: Optional[str]) -> dict:
@@ -422,6 +431,24 @@ def _channel_f_payload(result: agent_runner.AgentResult, branch: Optional[str]) 
     payload = result.to_status_payload(branch=branch)
     payload["status"] = _STATUS_TO_CHANNEL_F.get(result.status, result.status)
     return payload
+
+
+def _safe_notify(
+    notify: Callable,
+    config: Any,
+    result: agent_runner.AgentResult,
+    job: dict,
+    creds: UserCreds,
+) -> None:
+    """완료 알림 발송(best-effort 이중 격리) — 실패해도 잡/루프에 영향 없음.
+
+    notify(=notify_job_end)는 자체적으로 예외를 삼키지만, 주입된 대역이 던질
+    가능성까지 방어한다. 알림은 채널 F 회신과 **독립**이며 결코 잡을 죽이지 않는다.
+    """
+    try:
+        notify(config, result, job, creds)
+    except Exception:  # noqa: BLE001 — 알림 실패는 격리(런에 영향 없음)
+        log.warning("완료 알림 실패(격리)")
 
 
 def worker_loop(
@@ -438,6 +465,7 @@ def worker_loop(
     max_iterations: Optional[int] = None,
     rollback: Optional[Callable] = None,
     control_poll: Optional[Callable] = None,
+    notify: Optional[Callable] = None,
 ) -> int:
     """중앙 폴링 루프(worker 프로세스 진입점). 처리 반복 수를 반환(테스트용).
 
@@ -461,6 +489,7 @@ def worker_loop(
     now = now or (lambda: datetime.now(timezone.utc))
     rollback = rollback or rollback_job
     control_poll = control_poll or _fetch_control
+    notify = notify or notify_job_end
     poll = _poll_interval(env)
     control_poll_sec = _control_poll_interval(env)
     headers = {"X-Worker-Secret": secret} if secret else {}
@@ -480,7 +509,7 @@ def worker_loop(
                 http=http, central=central, user=user, headers=headers,
                 run=run, resume=resume, sleep=sleep, now=now, stop_event=stop_event,
                 rollback=rollback, control_poll=control_poll,
-                control_poll_sec=control_poll_sec,
+                control_poll_sec=control_poll_sec, notify=notify,
             )
         except Exception:  # noqa: BLE001 — 한 잡 실패가 루프를 죽이지 않게 격리
             log.exception("worker 루프 반복 실패(격리)")

@@ -147,6 +147,8 @@ class UserCreds:
     gitlab_token_ref: str = ""
     claude_oauth_token_ref: str = ""
     claude_oauth_token_value: str = ""
+    # (선택) Google Chat 사용자 숫자 ID — 완료 알림 @멘션용. 없으면 display_name 폴백.
+    google_chat_user_id: str = ""
 
     @staticmethod
     def from_env(user: str, env: Optional[dict] = None) -> "UserCreds":
@@ -158,6 +160,7 @@ class UserCreds:
             JIRA_TOKEN_REF / GITLAB_TOKEN_REF        secrets.base_dir 상대 참조
             CLAUDE_OAUTH_TOKEN_REF                    (선택) 참조
             CLAUDE_CODE_OAUTH_TOKEN                   (폴백) 값 직접
+            DISPATCH_GOOGLE_CHAT_USER_ID              (선택) 완료 알림 @멘션 ID
         """
         e = env if env is not None else os.environ
         return UserCreds(
@@ -169,6 +172,7 @@ class UserCreds:
             gitlab_token_ref=e.get("GITLAB_TOKEN_REF", ""),
             claude_oauth_token_ref=e.get("CLAUDE_OAUTH_TOKEN_REF", ""),
             claude_oauth_token_value=e.get("CLAUDE_CODE_OAUTH_TOKEN", ""),
+            google_chat_user_id=e.get("DISPATCH_GOOGLE_CHAT_USER_ID", ""),
         )
 
     @staticmethod
@@ -186,6 +190,7 @@ class UserCreds:
             claude_oauth_token_ref=(
                 getattr(secrets_ref, "claude_oauth_token", "") if secrets_ref else ""
             ),
+            google_chat_user_id=getattr(record, "google_chat_user_id", ""),
         )
 
 
@@ -201,6 +206,8 @@ class AgentResult:
     mr_url: Optional[str] = None
     reset_at: Optional[str] = None
     log_summary: str = ""
+    # 최종 result 이벤트의 마무리 멘트(마스킹됨) — 완료 알림 본문에 쓰인다.
+    final_text: str = ""
     returncode: Optional[int] = None
     audit_refs: dict = field(default_factory=dict)
 
@@ -399,6 +406,12 @@ def build_prompt(job: Any, config: Any = None) -> str:
     ctx = _job_field(job, "context_refs", {}) or {}
     target_repos = _job_field(job, "target_repos", []) or []
 
+    # 자율 실행 공통 불변식: '완료(Done)' 전이는 절대 금지. 완료 전이는 로컬
+    # 오케스트레이터가 리뷰·머지 시점에 사람 루프로 수행한다(자율 실행은 거기까지
+    # 가지 않는다). 종료 시 티켓은 '진행 중'(리뷰 대기)으로 유지한다. 다만 **무엇을
+    # 코멘트로 남기고 산출을 어떻게 넘기는지는 모드마다 다르다** — A는 MR 링크,
+    # B는 원격 push한 브랜치 + runs 저널 위치(MR 없음). 따라서 mode_desc·closing을
+    # 모드별로 분기하고, 하드코딩된 "MR 링크" 문구가 B에 새지 않도록 한다.
     if mode == "A":
         mode_desc = (
             "A(완전자율) — 코드까지 완성하고 MR 초안까지 생성한다. "
@@ -406,13 +419,29 @@ def build_prompt(job: Any, config: Any = None) -> str:
             "MR을 만든 뒤 그 MR 링크를 티켓 코멘트로 남기고, 티켓은 '진행 중'으로 "
             "유지한 채 '리뷰 대기' 상태로 종료하라."
         )
+        closing = (
+            "중요: 자율 실행은 티켓을 '완료(Done)'로 전이하지 말라(절대 금지). "
+            "완료 전이는 로컬 오케스트레이터가 MR 리뷰·머지 시점에 수행하며, "
+            "자율 실행은 거기까지 가지 않는다. 작업 종료 시 MR 링크를 코멘트로 남기고 "
+            "티켓을 '진행 중'으로 유지한 채 '리뷰 대기'로 종료하라."
+        )
     else:
         mode_desc = (
             "B(경량 1차) — 트리아지 + 브랜치 + 스캐폴딩 + 최소 1차 시도 + "
             "runs 저널까지 수행한다. 실질적 완성은 로컬 사람 루프에서 이뤄지므로 "
-            "MR을 강행하지 말고 1차 산출과 저널을 남긴다. 착수 시 '진행 중'으로 "
-            "전이하되, 작업이 끝나도 '완료'로 전이하지 말고 티켓을 '진행 중'으로 "
-            "유지한 채 '리뷰 대기' 상태로 종료하라."
+            "MR은 만들지 말고 1차 산출과 저널을 남긴다. 단, 1차 산출이 워커 컨테이너 "
+            f"안에만 갇히지 않도록 {branch} 브랜치를 원격(GitLab)에 **반드시 push**해 "
+            "로컬 사용자가 fetch할 수 있게 하라. 착수 시 '진행 중'으로 전이하되, 작업이 "
+            "끝나도 '완료'로 전이하지 말고 티켓을 '진행 중'으로 유지한 채 '리뷰 대기' "
+            "상태로 종료하라."
+        )
+        closing = (
+            "중요: 자율 실행은 티켓을 '완료(Done)'로 전이하지 말라(절대 금지). "
+            "완료 전이는 로컬 오케스트레이터가 리뷰·머지 시점에 수행하며, 자율 실행은 "
+            "거기까지 가지 않는다. MR은 만들지 말라. 작업 종료 시 원격에 push한 "
+            f"브랜치명({branch})과 runs/{ticket}/ 저널 위치를 티켓 코멘트로 남기고"
+            "('로컬에서 fetch해 이어서 완성' 안내 포함), 티켓을 '진행 중'으로 유지한 채 "
+            "'리뷰 대기'로 종료하라."
         )
 
     lines = [
@@ -420,14 +449,7 @@ def build_prompt(job: Any, config: Any = None) -> str:
         "이 트리거 티켓이 곧 작업 티켓이다 — 새 사이클 티켓을 만들지 말고 "
         "이 티켓에 바인딩하라(루프 방지).",
         f"autonomy_mode={mode}: {mode_desc}",
-        # 자율 실행 공통 불변식: '완료(Done)' 전이는 절대 금지. 완료 전이는 로컬
-        # 오케스트레이터가 MR 리뷰·머지 시점에 사람 루프로 수행한다(자율 실행은
-        # 거기까지 가지 않는다). 자율 실행은 MR 링크를 코멘트로 남기고 티켓을
-        # '진행 중'(리뷰 대기)으로 유지한 채 종료한다.
-        "중요: 자율 실행은 티켓을 '완료(Done)'로 전이하지 말라(절대 금지). "
-        "완료 전이는 로컬 오케스트레이터가 MR 리뷰·머지 시점에 수행하며, "
-        "자율 실행은 거기까지 가지 않는다. 작업 종료 시 MR 링크를 코멘트로 남기고 "
-        "티켓을 '진행 중'으로 유지한 채 '리뷰 대기'로 종료하라.",
+        closing,
         f"브랜치는 {branch} 를 사용하라.",
         f"작업 산출은 runs/{ticket}/ 저널에 기록하라(재개 컨텍스트).",
     ]
@@ -640,6 +662,7 @@ def _consume(proc, secret_values: list, *, cancel_check: Optional[Callable[[], b
     session_id: Optional[str] = None
     mr_url: Optional[str] = None
     reset_at: Optional[str] = None
+    final_text = ""
     limit_hit = False
     error_seen = False
     cancelled = False
@@ -672,6 +695,10 @@ def _consume(proc, secret_values: list, *, cancel_check: Optional[Callable[[], b
                     limit_hit = True
                     if r:
                         reset_at = r
+                # 마무리 멘트(최종 텍스트) 캡처 — 완료 알림 본문 재료.
+                ft = event.get("result") or event.get("error") or ""
+                if isinstance(ft, str) and ft.strip():
+                    final_text = ft.strip()
             if event.get("type") == "error" or event.get("is_error"):
                 error_seen = True
             line = _summarize_event(event)
@@ -687,6 +714,7 @@ def _consume(proc, secret_values: list, *, cancel_check: Optional[Callable[[], b
             session_id=session_id,
             mr_url=mr_url,
             log_summary=summary,
+            final_text=_redact(final_text, secret_values),
             returncode=getattr(proc, "returncode", None),
         )
 
@@ -707,6 +735,7 @@ def _consume(proc, secret_values: list, *, cancel_check: Optional[Callable[[], b
         mr_url=mr_url,
         reset_at=reset_at,
         log_summary=summary,
+        final_text=_redact(final_text, secret_values),
         returncode=rc,
     )
 

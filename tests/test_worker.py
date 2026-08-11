@@ -117,6 +117,37 @@ def test_loop_interrupted_then_resume_to_done():
     assert interrupted_payload["reset_at"] == "2026-01-01T00:00:00Z"
 
 
+def test_loop_notifies_on_terminal_done():
+    """터미널(done) 결과에서 완료 알림(notify)이 호출된다(주입 대역으로 검증)."""
+    job = {"ticket": "PROJ-N", "autonomy_mode": "A", "branch": "auto/PROJ-N"}
+    http = FakeHTTP([FakeResp(200, job), FakeResp(204)])
+    result = ar.AgentResult(status=ar.STATUS_DONE, session_id="s1", mr_url="http://mr/1")
+    seen = []
+    w.worker_loop(_cfg(), env=dict(_ENV), http=http,
+                  run=lambda *a, **k: result, resume=lambda *a, **k: result,
+                  sleep=lambda s: None, now=_NOW, max_iterations=2,
+                  notify=lambda cfg, res, j, creds: seen.append((res.status, j["ticket"])))
+    assert seen == [(ar.STATUS_DONE, "PROJ-N")]
+
+
+def test_loop_notify_failure_does_not_kill_job():
+    """알림 대역이 던져도 잡/루프는 죽지 않고 채널 F 회신은 정상(격리)."""
+    job = {"ticket": "PROJ-NF", "autonomy_mode": "B"}
+    http = FakeHTTP([FakeResp(200, job), FakeResp(204)])
+    result = ar.AgentResult(status=ar.STATUS_DONE, session_id="s1")
+
+    def boom_notify(*a, **k):
+        raise RuntimeError("chat down")
+
+    n = w.worker_loop(_cfg(), env=dict(_ENV), http=http,
+                      run=lambda *a, **k: result, resume=lambda *a, **k: result,
+                      sleep=lambda s: None, now=_NOW, max_iterations=2,
+                      notify=boom_notify)
+    assert n == 2
+    # 알림 실패에도 최종 회신(완료)은 남는다.
+    assert _statuses(http) == ["진행중", "완료"]
+
+
 def test_loop_exception_isolation_does_not_crash():
     job = {"ticket": "PROJ-3"}
     http = FakeHTTP([FakeResp(200, job), FakeResp(204)])
