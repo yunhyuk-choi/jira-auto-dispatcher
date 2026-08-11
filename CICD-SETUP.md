@@ -18,25 +18,24 @@ jira-auto-dispatcher 전용 러너를 등록한다. 잡별 요구 능력:
 | 잡 | 필요 능력 | executor 권장 |
 |---|---|---|
 | `test` | python 컨테이너 실행 | **docker executor** (`image: python:3.12` 사용) |
-| `build` | `docker build` (아웃바운드 인터넷 egress 필요 — Dockerfile 이 claude CLI 설치) | **docker executor + DinD** (기본) 또는 **docker 설치된 shell executor** |
+| `build` | **Kaniko** 로 이미지 빌드 검증(아웃바운드 egress 필요 — Dockerfile 이 claude CLI 설치) | **일반 docker executor** — ⭐**privileged 불필요, DinD 불필요** |
 | `deploy` | ssh + rsync 로 개발서버 접속 | docker executor(alpine 이미지에 apk 설치) 또는 shell executor |
+
+⭐ **build 는 Kaniko 를 쓴다** — docker 데몬·DinD·privileged 전부 불필요. 공유 러너(다른 프로젝트와
+같이 쓰는)를 privileged 로 못 바꾸는 환경을 위한 선택. 러너 config 를 건드릴 필요가 없다.
 
 등록 절차(예):
 
 1. 프로젝트 → Settings → CI/CD → Runners → "New project runner".
 2. 서버/VM 에서 `gitlab-runner register` → URL `https://gitlab.example.com`, 발급된 토큰 입력.
-3. executor 선택:
-   - **docker executor** 를 쓰면 `test` 는 그대로 돈다. `build` 는 DinD 를 위해
-     러너 config 에서 `privileged = true` 필요(`/etc/gitlab-runner/config.toml`).
-   - **shell executor** 를 쓰면 그 호스트에 `docker`, `git`, `ssh`, `rsync` 가 설치돼
-     있어야 하고, `.gitlab-ci.yml` 의 `build` 잡에서 `image:`/`services:`/`DOCKER_HOST`
-     줄을 제거해야 한다(주석 참조).
+3. **executor = docker** (일반 설정으로 충분). `test`(python:3.12)·`build`(kaniko)·`deploy`(alpine) 모두
+   일반 docker executor 에서 돈다. **`privileged = true` 불필요.** 러너에 gcr.io·claude.ai 등 아웃바운드
+   egress 만 있으면 된다(kaniko 이미지 pull + Dockerfile claude 설치).
 4. 러너에 **태그**를 붙였다면 `.gitlab-ci.yml` 잡에 동일 `tags:` 를 추가해 라우팅한다
    (현재 파일은 태그 미지정 = 프로젝트의 아무 가용 러너나 사용).
 
-> DinD 를 쓸 수 없는 환경이면 `build` 잡을 docker 설치된 shell 러너로 돌리는 편이 단순하다.
-> `build` 는 "빌드 성사 게이트"일 뿐이고, 실제 배포 이미지는 `deploy` 가 서버에서 빌드한다
-> (사내 레지스트리 미사용 — DEPLOY.md).
+> `build`(kaniko `--no-push`)는 "빌드 성사 게이트"일 뿐이고, 실제 배포 이미지는 `deploy` 가 서버에서
+> 빌드한다(사내 레지스트리 미사용 — DEPLOY.md). MR 파이프라인(`merge_request_event`)에서도 돌아 **MR 빌드 검증**을 한다.
 
 ---
 
