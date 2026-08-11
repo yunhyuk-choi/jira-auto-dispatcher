@@ -81,10 +81,16 @@ _SESSION_ID_KEYS = ("session_id", "sessionId", "sessionID", "session")
 # 이벤트 안에서 중첩 탐색할 컨테이너 키(방어적).
 _NESTED_KEYS = ("data", "system", "message", "result", "init", "meta", "usage", "error")
 
-# 한도(usage limit) 감지 패턴(영/한, 버전차 방어).
+# 한도(usage/quota limit) 감지 패턴(영/한, 버전차 방어).
+#
+# ⚠️ 여기 매칭은 **오직 "구독/사용량 한도"** 에만 특정한다. 과거 광의 매칭
+# (단독 ``rate limit``·``limit reached``·``limit exceeded``·``too many requests``)은
+# 일반 코드·콘텐츠·thinking·툴출력(HTTP 429, 앱 rate limit 로그 등)에 흔히 등장해
+# **오탐(false-positive) → 잡 interrupted** 를 유발했다(실측: 실제 quota 3% 미만인데도
+# phantom limit 재개 루프). 따라서 "usage/quota/사용량 한도"에 특정되게 좁힌다.
 _LIMIT_PATTERN = re.compile(
-    r"(usage\s+limit|rate\s*limit|limit\s+reached|limit\s+exceeded|"
-    r"too\s+many\s+requests|out\s+of\s+(?:usage|quota)|quota\s+exceeded|"
+    r"(claude\s+usage\s+limit|usage\s+limit|"
+    r"out\s+of\s+(?:usage|quota)|quota\s+exceeded|"
     r"사용\s*한도|사용량\s*한도|한도\s*(?:도달|초과))",
     re.IGNORECASE,
 )
@@ -649,19 +655,23 @@ def _consume(proc, secret_values: list, *, cancel_check: Optional[Callable[[], b
             event = parse_stream_event(raw)
             if event is None:
                 continue
+            # session_id·mr_url 추출은 기존대로 **모든 이벤트**에서 유지한다.
             sid = extract_session_id(event)
             if sid:
                 session_id = sid
             url = extract_mr_url(event)
             if url:
                 mr_url = url
-            is_lim, r = detect_limit_and_reset(event)
-            if is_lim:
-                limit_hit = True
-                if r:
-                    reset_at = r
-            if event.get("type") == "result" and event.get("is_error"):
-                error_seen = True
+            # 한도(usage/quota limit) 판정은 **최종 result 이벤트에서만** 수행한다.
+            # 중간 이벤트(assistant/tool/thinking)의 텍스트에 "rate limit" 같은
+            # 문구가 섞여도 한도로 오판하지 않도록 게이트한다(실측 오탐 방지).
+            # 실제 사용량-한도 신호는 최종 result 이벤트에 온다.
+            if event.get("type") == "result":
+                is_lim, r = detect_limit_and_reset(event)
+                if is_lim:
+                    limit_hit = True
+                    if r:
+                        reset_at = r
             if event.get("type") == "error" or event.get("is_error"):
                 error_seen = True
             line = _summarize_event(event)

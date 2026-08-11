@@ -92,7 +92,7 @@ def test_detect_limit_with_epoch_reset_in_text():
 
 
 def test_detect_limit_with_iso_reset_in_text():
-    text = "rate limit; reset at 2099-01-01T00:00:00Z"
+    text = "usage limit; reset at 2099-01-01T00:00:00Z"
     is_limit, reset = ar.detect_limit_and_reset(text)
     assert is_limit is True and reset == "2099-01-01T00:00:00Z"
 
@@ -102,6 +102,41 @@ def test_detect_limit_structured_reset_field_epoch():
           "reset_at": 1893456000}
     is_limit, reset = ar.detect_limit_and_reset(ev)
     assert is_limit is True and reset is not None and reset.startswith("2030-")
+
+
+# --- 패턴 축소(오탐 방지) 회귀: 광의 문구는 이제 한도로 보지 않는다 -----------
+
+
+def test_detect_limit_false_for_bare_rate_limit_and_broad_phrases():
+    # 일반 코드/콘텐츠/HTTP 문맥에 흔한 문구는 이제 한도(usage-limit)로 보지 않는다.
+    for text in (
+        "rate limit",
+        "ratelimit exceeded",
+        "the rate-limit middleware returned 429",
+        "limit reached for the pagination cursor",
+        "limit exceeded on array bounds",
+        "429 too many requests",
+        "too many requests to the search endpoint",
+    ):
+        is_limit, _ = ar.detect_limit_and_reset(text)
+        assert is_limit is False, text
+
+
+def test_detect_limit_true_for_usage_and_quota_phrases():
+    # "usage/quota/사용량 한도"에 특정된 문구만 한도로 본다(영/한).
+    for text in (
+        "Claude usage limit reached. reset at 2099-01-01T00:00:00Z",
+        "usage limit exceeded",
+        "you are out of quota",
+        "out of usage",
+        "quota exceeded",
+        "사용 한도에 도달했습니다",
+        "사용량 한도 초과",
+        "한도 도달",
+        "한도 초과",
+    ):
+        is_limit, _ = ar.detect_limit_and_reset(text)
+        assert is_limit is True, text
 
 
 # --- build_prompt ------------------------------------------------------------
@@ -256,6 +291,63 @@ def test_run_job_limit_returns_interrupted_with_reset(tmp_path):
     assert res.status == ar.STATUS_INTERRUPTED
     assert res.session_id == "sess-xyz"
     assert res.reset_at == "2099-01-01T00:00:00Z"
+
+
+def test_run_job_no_false_limit_from_midstream_content(tmp_path):
+    """중간 이벤트(assistant/tool result)의 텍스트에 'rate limit'·'limit reached'·
+    '429 too many requests'가 있어도 한도로 오판하지 않는다(핵심 회귀).
+
+    최종 result 이벤트는 정상 성공 → interrupted 아님, done.
+    """
+    cfg = _cfg(tmp_path)
+    creds = ar.UserCreds(user="u1")
+    lines = [
+        '{"type":"system","subtype":"init","session_id":"sess-mid"}\n',
+        # 오케스트레이터가 작업 중 코드/콘텐츠에 흔한 문구를 흘림 — 오탐 유발 소지.
+        '{"type":"assistant","message":"editing the rate limit middleware; '
+        'note: limit reached branch"}\n',
+        '{"type":"user","message":"tool result: HTTP 429 too many requests from upstream"}\n',
+        '{"type":"result","subtype":"success","is_error":false,"result":"done"}\n',
+    ]
+    res = ar.run_job({"ticket": "PROJ-mid"}, creds, cfg,
+                     popen_factory=_factory(lines, returncode=0))
+    assert res.status == ar.STATUS_DONE          # interrupted 아님
+    assert res.reset_at is None
+    assert res.session_id == "sess-mid"
+
+
+def test_run_job_real_usage_limit_result_is_interrupted(tmp_path):
+    """진짜 usage-limit result 이벤트면 interrupted + reset_at."""
+    cfg = _cfg(tmp_path)
+    creds = ar.UserCreds(user="u1")
+    lines = [
+        '{"type":"system","subtype":"init","session_id":"sess-lim"}\n',
+        # 중간엔 광의 문구가 섞여도 무해해야 한다.
+        '{"type":"assistant","message":"retrying after rate limit backoff"}\n',
+        '{"type":"result","is_error":true,'
+        '"result":"Claude usage limit reached. reset at 2099-01-01T00:00:00Z"}\n',
+    ]
+    res = ar.run_job({"ticket": "PROJ-lim"}, creds, cfg,
+                     popen_factory=_factory(lines, returncode=1))
+    assert res.status == ar.STATUS_INTERRUPTED
+    assert res.reset_at == "2099-01-01T00:00:00Z"
+    assert res.session_id == "sess-lim"
+
+
+def test_run_job_generic_error_result_is_failed_not_interrupted(tmp_path):
+    """한도가 아닌 일반 에러 result(usage-limit 아님)는 failed."""
+    cfg = _cfg(tmp_path)
+    creds = ar.UserCreds(user="u1")
+    lines = [
+        '{"type":"system","subtype":"init","session_id":"sess-err"}\n',
+        # 에러 텍스트에 광의 문구가 있어도 한도가 아니므로 failed여야 한다.
+        '{"type":"result","is_error":true,"subtype":"error_during_execution",'
+        '"result":"downstream service rate limit / 429 too many requests"}\n',
+    ]
+    res = ar.run_job({"ticket": "PROJ-err"}, creds, cfg,
+                     popen_factory=_factory(lines, returncode=1))
+    assert res.status == ar.STATUS_FAILED
+    assert res.reset_at is None
 
 
 def test_run_job_failure_when_rc_nonzero_no_limit(tmp_path):
