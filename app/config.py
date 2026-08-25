@@ -123,14 +123,13 @@ class DeployConfig:
     """[deploy] 섹션 — 배포 형태 하나로 나머지 배포 값 파생.
 
     프로파일(local | cloud_vm | onprem_server) 하나를 고르면
-    ``docker_host``·``secrets_base_dir``·``workspace_volume``·``host_deploy_dir`` 이
+    ``docker_host``·``secrets_base_dir``·``workspace_volume`` 이
     :data:`app.setup_schema.PROFILE_DEFAULTS` 에서 파생된다. 개별 값을 명시하면 그게
     우선하고, 레거시 ``spawn.*``/``secrets.base_dir`` 도 계속 존중한다(그리고 계산 결과는
     그 레거시 필드에 **미러**되어 spawner 등 기존 리더가 손대지 않아도 된다).
     """
 
     profile: str = "local"
-    host_deploy_dir: str = ""
     docker_host: str = "unix:///var/run/docker.sock"
     secrets_base_dir: str = ""
     workspace_volume: str = "jad-workspace"
@@ -251,16 +250,9 @@ class SpawnConfig:
     mem_limit: str = "4g"
     docker_host: str = "unix:///var/run/docker.sock"
     run_as: str = "1000:1000"  # worker 컨테이너 비-root 실행 사용자(특권 축소)
-    # ⚠️ 호스트 배포 디렉토리의 **절대경로**(central 컨테이너 내부 경로가 아님).
-    # central이 Docker SDK(socket-proxy 경유)로 worker를 띄울 때 바인드 마운트의
-    # source 경로는 **호스트 docker 데몬**이 해석한다(sibling container). 따라서
-    # worker 바인드 source를 호스트 경로로 주려면 central이 자신의 호스트 배포
-    # 경로를 알아야 한다. 예: /home/<deploy-user>/deploy/jira-auto-dispatcher.
-    # env HOST_DEPLOY_DIR 폴백 우선. 비어 있으면(로컬 개발 등) 직접 경로 폴백.
-    host_deploy_dir: str = ""
     # 공유 워크스페이스 **named 볼륨** 이름(central·모든 워커가 공유하는 단일 클론
     # 지점, 설계 §4). central compose가 이 이름으로 선언(`jad-workspace`)하고 worker는
-    # spawner가 같은 이름으로 마운트한다 → 레포 한 벌 공유. named 볼륨이라 host_deploy_dir
+    # spawner가 같은 이름으로 마운트한다 → 레포 한 벌 공유. named 볼륨이라 호스트 경로
     # 무관(볼륨명으로 docker가 해석). 볼륨 bind 경로는 run.workspace_dir.
     workspace_volume: str = "jad-workspace"
 
@@ -475,6 +467,10 @@ class AppConfig:
     worker_shared_secret: str = ""
     # 티켓 components/labels → 레포 매핑(REPO-MAP). {키: [repo,...]} 또는 {키: repo}.
     repo_map: dict = field(default_factory=dict)
+    # 이 설정이 로드된 파일 경로(:func:`load_config` 가 채운다). spawner 가 워커에
+    # config **원문**을 주입할 때 쓴다(:meth:`app.spawner.Spawner.config_text`).
+    # dict 로부터 만든 설정은 원본 파일이 없으므로 빈 문자열이다.
+    config_path: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -532,7 +528,7 @@ def _build_deploy(deploy: dict, spawn: dict, secrets: dict) -> DeployConfig:
 
     우선순위(항목별 독립):
         1. 명시 ``deploy.<key>``
-        2. 명시 레거시 키(``spawn.host_deploy_dir``·``spawn.docker_host``·
+        2. 명시 레거시 키(``spawn.docker_host``·
            ``spawn.workspace_volume``·``secrets.base_dir``)
         3. ``deploy.profile`` 파생 기본(:data:`app.setup_schema.PROFILE_DEFAULTS`)
         4. 코드 기본값(dataclass)
@@ -548,8 +544,6 @@ def _build_deploy(deploy: dict, spawn: dict, secrets: dict) -> DeployConfig:
     derived = PROFILE_DEFAULTS[profile]
     return DeployConfig(
         profile=profile,
-        host_deploy_dir=str(_pick(deploy, "host_deploy_dir", spawn, "host_deploy_dir",
-                                  derived["host_deploy_dir"])),
         docker_host=str(_pick(deploy, "docker_host", spawn, "docker_host",
                               derived["docker_host"])),
         secrets_base_dir=str(_pick(deploy, "secrets_base_dir", secrets, "base_dir",
@@ -657,7 +651,6 @@ def _sync_deploy_aliases(cfg: "AppConfig") -> None:
     적용되므로 **양방향 수렴**이 필요하다: 먼저 deploy → 레거시로 밀고, env 단계 이후에는
     레거시 → deploy 로 되당겨(:func:`_apply_env_overrides` 끝) 두 값이 항상 일치하게 한다.
     """
-    cfg.spawn.host_deploy_dir = cfg.deploy.host_deploy_dir
     cfg.spawn.docker_host = cfg.deploy.docker_host
     cfg.spawn.workspace_volume = cfg.deploy.workspace_volume
     cfg.secrets.base_dir = cfg.deploy.secrets_base_dir
@@ -725,7 +718,9 @@ def load_config(path: str = DEFAULT_CONFIG_PATH) -> AppConfig:
         raise ConfigError(f"설정 최상위는 매핑이어야 합니다: {path}")
 
     raw = _substitute_env(raw)
-    return _build_config(raw)
+    cfg = _build_config(raw)
+    cfg.config_path = path      # 워커 주입 시 원문을 다시 읽을 자리(단일 원천).
+    return cfg
 
 
 def load_config_from_dict(raw: dict) -> AppConfig:
@@ -822,10 +817,9 @@ def _build_config(raw: dict) -> AppConfig:
             central_url=str(spawn.get("central_url", "http://central:8787")),
             mem_limit=str(spawn.get("mem_limit", "4g")),
             run_as=str(spawn.get("run_as", "1000:1000")),
-            # docker_host·host_deploy_dir·workspace_volume 은 deploy 가 정본이다
+            # docker_host·workspace_volume 은 deploy 가 정본이다
             # (레거시 spawn.* 값도 _build_deploy 가 이미 흡수했다).
             docker_host=deploy.docker_host,
-            host_deploy_dir=deploy.host_deploy_dir,
             workspace_volume=deploy.workspace_volume,
         ),
         git=GitConfig(
@@ -1030,18 +1024,13 @@ def _apply_env_overrides(cfg: AppConfig) -> None:
     if fractal_central is not None and fractal_central.strip():
         cfg.run.fractal_central = fractal_central.strip().lower() in ("1", "true", "yes", "on")
 
-    # 호스트 배포 디렉토리(worker 바인드 source용). env HOST_DEPLOY_DIR 폴백 우선.
-    host_deploy_dir = os.environ.get("HOST_DEPLOY_DIR")
-    if host_deploy_dir:
-        cfg.spawn.host_deploy_dir = host_deploy_dir
-    # env 미설정으로 ${HOST_DEPLOY_DIR} 토큰이 미치환으로 남았으면 빈 값으로
-    # 취급한다(→ spawner가 직접 경로 폴백 + 경고). 조용한 broken bind 방지.
-    if "${" in cfg.spawn.host_deploy_dir:
-        cfg.spawn.host_deploy_dir = ""
+    # ⚠️ ``HOST_DEPLOY_DIR`` env 와 ``deploy.host_deploy_dir`` 키는 **제거됐다**.
+    # 워커에 거는 마운트가 전부 named 볼륨이 되어(나머지는 스폰 시 주입 —
+    # :mod:`app.inject`) 호스트 경로를 알 필요가 사라졌기 때문이다. 기존 배포의
+    # .env·config.yaml 에 값이 남아 있어도 **조용히 무시**된다(무해).
 
     # env 는 레거시 필드(spawn.*/secrets.base_dir)에 적용됐다 — deploy 정본으로 되당겨
     # 두 표현이 항상 같은 값을 갖게 한다(역방향 수렴).
-    cfg.deploy.host_deploy_dir = cfg.spawn.host_deploy_dir
     cfg.deploy.docker_host = cfg.spawn.docker_host
     cfg.deploy.workspace_volume = cfg.spawn.workspace_volume
     cfg.deploy.secrets_base_dir = cfg.secrets.base_dir

@@ -95,9 +95,7 @@ def test_legacy_key_map_covers_renamed_keys():
 def test_profile_defaults_cover_every_declared_profile():
     for profile in S.DEPLOY_PROFILES:
         d = S.PROFILE_DEFAULTS[profile]
-        assert set(d) == {
-            "docker_host", "host_deploy_dir", "secrets_base_dir", "workspace_volume",
-        }
+        assert set(d) == {"docker_host", "secrets_base_dir", "workspace_volume"}
     # local 만 도커 소켓 직결이고 서버 프로파일은 socket-proxy 경유(특권 축소).
     assert S.PROFILE_DEFAULTS["local"]["docker_host"].startswith("unix://")
     assert S.PROFILE_DEFAULTS["cloud_vm"]["docker_host"].startswith("tcp://")
@@ -143,7 +141,6 @@ _KEY_TO_ATTR = {
     "run.docs_repo": "run.docs_repo",
     "run.docs_repo_url": "run.docs_repo_url",
     "deploy.profile": "deploy.profile",
-    "deploy.host_deploy_dir": "deploy.host_deploy_dir",
     "deploy.docker_host": "deploy.docker_host",
     "deploy.secrets_base_dir": "deploy.secrets_base_dir",
     "deploy.workspace_volume": "deploy.workspace_volume",

@@ -403,8 +403,8 @@ Tier-4의 ai-dlc 서브에이전트는 프레임워크가 지금도 하는 일 �
 #### enabler 4 — 자격/귀속 격리 보존
 
 실제 작업은 **각 사용자 본인 컨테이너**에서 그 사용자의 Jira/GitLab 토큰 + git author로
-돈다(`build_env` `agent_runner.py:534-602`, 스포너 per-user 시크릿 마운트
-`spawner.py`). Central은 **스케줄링만** 한다. 이것이 per-user 컨테이너가 존재하는 이유이며
+돈다(`build_env` `agent_runner.py:534-602`, 스포너의 per-user 시크릿 전달 —
+지금은 마운트가 아니라 스폰 시 주입이다 `spawner.py`·`inject.py`). Central은 **스케줄링만** 한다. 이것이 per-user 컨테이너가 존재하는 이유이며
 계층화에도 불변으로 유지된다. Tier-1/2(central)는 사용자 토큰을 만지지 않는다.
 
 #### enabler 5 — 크로스-티어 트랜스포트: 단방향 큐 → 요청/응답(await)

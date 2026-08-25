@@ -580,7 +580,18 @@ def run_worker(
         기동한 worker 루프 스레드(threading.Thread).
     """
     from app.config import load_config
+    from app import inject
     from app import worker as worker_mod
+
+    # 0) **스폰 시 주입 materialize** — load_config 보다 반드시 먼저 한다.
+    # central 이 config.yaml · per-user 시크릿 · 알림 웹훅을 컨테이너 env 로 실어
+    # 보냈다면(bind 마운트와 spawn.host_deploy_dir 를 없앤 방식 — :mod:`app.inject`)
+    # 여기서 이 컨테이너 안의 파일로 되살린다. 주입 env 가 없으면 no-op 이라, 파일을
+    # 직접 마운트해 주는 옛 배포·수동 기동도 그대로 동작한다.
+    # ⚠️ 실패를 삼키지 않는다 — 조용히 넘어가면 설정/토큰 없는 워커가 **정상적으로
+    # 떠서** 잡 실행 시점에야 엉뚱하게 죽는(이번 작업이 없앤) 실패로 되돌아간다.
+    if config is None:
+        inject.materialize(config_dest=os.path.abspath(config_path))
 
     cfg = config if config is not None else load_config(config_path)
     loop = worker_loop_fn or worker_mod.worker_loop

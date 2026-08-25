@@ -4,8 +4,7 @@
 주입한다(CI: GitHub Actions ubuntu 에서 그대로 돈다). 그래서 각 검사 함수는 대역을
 받도록 설계돼 있다.
 
-특히 다음 두 가지를 집중해서 지킨다:
-    - ``host_deploy_dir`` 함정 — 비었을 때/컨테이너 경로일 때 **실패시켜야** 한다.
+특히 다음을 집중해서 지킨다:
     - 마스킹 — 진단 출력에 토큰 값이 절대 실리지 않는다.
 """
 
@@ -36,7 +35,7 @@ def make_cfg(**over):
     raw = {
         "role": "central",
         "consent": {"full_permissions": True, "accepted_at": "2026-08-25T09:00:00+09:00"},
-        "deploy": {"profile": "cloud_vm", "host_deploy_dir": "/srv/jad",
+        "deploy": {"profile": "cloud_vm",
                    "secrets_base_dir": "/run/secrets"},
         "forge": {"kind": "gitlab", "token_ref": "service/forge-token"},
         "jira": {"base_url": "https://acme.atlassian.net", "project": "ACME",
@@ -64,79 +63,6 @@ def write_secret(root, ref, value="s3cret-value", mode=0o600):
     if os.name == "posix":
         os.chmod(path, mode)
     return path
-
-
-# ---------------------------------------------------------------------------
-# host_deploy_dir — 이 리포에서 가장 자주 밟는 함정
-# ---------------------------------------------------------------------------
-
-
-def test_empty_host_deploy_dir_on_server_profile_fails(tmp_path):
-    cfg = make_cfg(deploy={"profile": "cloud_vm", "host_deploy_dir": ""})
-    r = D.check_host_deploy_dir(cfg, project_dir=str(tmp_path))
-    assert r.status == D.STATUS_FAIL
-    assert "HOST_DEPLOY_DIR" in r.hint
-
-
-def test_empty_host_deploy_dir_with_remote_docker_fails(tmp_path):
-    """local 프로파일이어도 docker 엔드포인트가 원격이면 폴백 전제가 깨진다."""
-    cfg = make_cfg(deploy={"profile": "local", "host_deploy_dir": "",
-                           "docker_host": "tcp://socket-proxy:2375",
-                           "secrets_base_dir": str(tmp_path)})
-    r = D.check_host_deploy_dir(cfg, project_dir=str(tmp_path))
-    assert r.status == D.STATUS_FAIL
-
-
-def test_empty_host_deploy_dir_with_compose_file_warns(tmp_path):
-    """compose 로 띄우면 깨지지만 소켓 직결 로컬이면 괜찮다 — 경고가 맞다."""
-    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
-    cfg = make_cfg(deploy={"profile": "local", "host_deploy_dir": "",
-                           "docker_host": "unix:///var/run/docker.sock",
-                           "secrets_base_dir": str(tmp_path)})
-    r = D.check_host_deploy_dir(cfg, project_dir=str(tmp_path))
-    assert r.status == D.STATUS_WARN
-    assert "HOST_DEPLOY_DIR=$PWD" in r.hint
-
-
-def test_empty_host_deploy_dir_pure_local_passes(tmp_path):
-    cfg = make_cfg(deploy={"profile": "local", "host_deploy_dir": "",
-                           "docker_host": "unix:///var/run/docker.sock",
-                           "secrets_base_dir": str(tmp_path)})
-    r = D.check_host_deploy_dir(cfg, project_dir=str(tmp_path))
-    assert r.status == D.STATUS_PASS
-
-
-@pytest.mark.parametrize("value", ["/run/secrets", "/app", "/app/config"])
-def test_container_path_as_host_deploy_dir_fails(tmp_path, value):
-    cfg = make_cfg(deploy={"host_deploy_dir": value})
-    r = D.check_host_deploy_dir(cfg, project_dir=str(tmp_path))
-    assert r.status == D.STATUS_FAIL
-    assert "컨테이너" in r.message
-
-
-def test_backslash_host_deploy_dir_fails(tmp_path):
-    cfg = make_cfg(deploy={"host_deploy_dir": "C:\\Users\\me\\jad"})
-    r = D.check_host_deploy_dir(cfg, project_dir=str(tmp_path))
-    assert r.status == D.STATUS_FAIL
-
-
-def test_relative_host_deploy_dir_fails(tmp_path):
-    cfg = make_cfg(deploy={"host_deploy_dir": "deploy/jad"})
-    assert D.check_host_deploy_dir(cfg, project_dir=str(tmp_path)).status == D.STATUS_FAIL
-
-
-def test_existing_deploy_dir_with_layout_passes(tmp_path):
-    (tmp_path / "config").mkdir()
-    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
-    cfg = make_cfg(deploy={"host_deploy_dir": str(tmp_path).replace("\\", "/")})
-    r = D.check_host_deploy_dir(cfg, project_dir=str(tmp_path))
-    assert r.status == D.STATUS_PASS
-
-
-def test_existing_dir_without_layout_warns(tmp_path):
-    cfg = make_cfg(deploy={"host_deploy_dir": str(tmp_path).replace("\\", "/")})
-    r = D.check_host_deploy_dir(cfg, project_dir=str(tmp_path))
-    assert r.status == D.STATUS_WARN
 
 
 # ---------------------------------------------------------------------------
@@ -583,8 +509,8 @@ def test_run_checks_runs_every_check_and_keeps_going(tmp_path):
 
 def test_run_checks_subset(tmp_path):
     results = D.run_checks(make_cfg(), project_dir=str(tmp_path),
-                           only=("config", "host_deploy_dir"))
-    assert [r.name for r in results] == ["config", "host_deploy_dir"]
+                           only=("config", "worker_secret"))
+    assert [r.name for r in results] == ["config", "worker_secret"]
 
 
 def test_run_checks_rejects_unknown_names():
@@ -598,7 +524,7 @@ def test_a_crashing_check_does_not_kill_the_run(monkeypatch, tmp_path):
 
     monkeypatch.setattr(D, "check_config", boom)
     results = D.run_checks(make_cfg(), project_dir=str(tmp_path),
-                           only=("config", "host_deploy_dir"))
+                           only=("config", "worker_secret"))
     assert results[0].status == D.STATUS_FAIL and "예외" in results[0].message
     assert len(results) == 2
 

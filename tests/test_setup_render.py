@@ -24,7 +24,6 @@ ANSWERS = {
     "consent.full_permissions": True,
     "consent.accepted_at": "2026-08-25T09:00:00+09:00",
     "deploy.profile": "cloud_vm",
-    "deploy.host_deploy_dir": "/srv/jad",
     "deploy.secrets_base_dir": "/run/secrets",
     "forge.kind": "github",
     "forge.token_ref": "service/forge-token",
@@ -56,7 +55,6 @@ def test_answers_land_in_the_output(rendered):
     assert data["jira"]["base_url"] == "https://acme.atlassian.net"
     assert data["jira"]["trigger_statuses"] == ["To Do", "선택 대기"]
     assert data["forge"]["kind"] == "github"
-    assert data["deploy"]["host_deploy_dir"] == "/srv/jad"
     assert data["consent"]["full_permissions"] is True
 
 
@@ -287,7 +285,7 @@ def test_rendered_config_loads_through_the_real_parser(tmp_path, rendered, monke
     monkeypatch.delenv("SECRETS_DIR", raising=False)
     cfg = C.load_config(path)
     assert cfg.jira.project == "ACME"
-    assert cfg.deploy.host_deploy_dir == "/srv/jad"
     assert cfg.deploy.docker_host == "tcp://socket-proxy:2375"
+    assert cfg.deploy.secrets_base_dir == "/run/secrets"
     assert cfg.consent.full_permissions is True
     assert cfg.forge.kind == "github"

@@ -100,10 +100,10 @@ run:
 > Jira 커스텀필드 id·완료 전이 id 는 **인스턴스마다 다르다**. 알아내는 방법(`/rest/api/3/field`
 > 조회 등)은 `config/config.example.yaml` 의 `jira:` 절 주석에 있다 — 여기 복제하지 않는다.
 
-### 2.2 ⚠️ 갈래마다 달라지는 4개 값 (틀리면 worker 마운트가 조용히 깨진다)
+### 2.2 갈래마다 달라지는 값 (프로파일 하나면 끝난다)
 
-`deploy.profile` 하나만 고르면 나머지가 파생되지만(`app/setup_schema.PROFILE_DEFAULTS`),
-**`host_deploy_dir` 만은 자동으로 알 수 없어 직접 채워야 한다.**
+`deploy.profile` 하나만 고르면 나머지가 파생된다(`app/setup_schema.PROFILE_DEFAULTS`).
+**설치자가 직접 계산해 넣어야 하는 호스트 경로는 없다.**
 
 | 키 | A. 로컬 | B. 클라우드 VM | C. 온프렘 |
 |---|---|---|---|
@@ -111,40 +111,41 @@ run:
 | `deploy.docker_host` | `unix:///var/run/docker.sock` | `tcp://socket-proxy:2375` | `tcp://socket-proxy:2375` |
 | `deploy.secrets_base_dir` | `""`(→ env `SECRETS_DIR`) | `/run/secrets` | `/run/secrets` |
 | `deploy.workspace_volume` | `jad-workspace` | `jad-workspace` | `jad-workspace` |
-| `deploy.host_deploy_dir` | **compose 로 띄우면 필수** | **필수** | **필수** |
 
-> 세 갈래 모두 `host_deploy_dir` 은 **이 리포 디렉토리의 호스트 절대경로**다(central
-> 컨테이너 내부 경로가 아니다). 비워 두면 "호스트 = central 파일시스템" 을 전제한 폴백으로
-> 내려가는데(경고 로그가 남는다), **compose 로 central 을 컨테이너에 띄우는 순간 그 전제가
-> 깨진다** — central 안의 `/run/secrets` 는 호스트에 없는 경로라 worker 바인드가 조용히
-> 어긋난다. `docker compose` 를 쓰면 로컬이라도 채워라(`.env` 에 `HOST_DEPLOY_DIR=$PWD`).
+> ⚠️ **`host_deploy_dir` 은 없어졌다.** 예전에는 "이 리포 디렉토리의 **호스트** 절대경로"를
+> 설치자가 정확히 적어야 했고, 틀리면 worker 가 **에러 없이 뜬 채** 빈 디렉토리를 마운트해
+> 한참 뒤 엉뚱한 실패로 나타났다. 이제 그 값이 필요한 자리가 하나도 없다(아래).
+> 기존 `config.yaml`·`.env` 에 남아 있어도 **무시**되므로 지워도 되고 둬도 된다
+> (`python -m app.setup validate` 가 "선언되지 않은 항목" 경고로 알려 준다).
 
-**왜 `host_deploy_dir` 이 필요한가.** central 이 socket-proxy(또는 docker.sock)를 통해
-worker 를 띄우면 그 컨테이너는 **형제(sibling)** 로 생성되고, 바인드 마운트의 source 는
-central 컨테이너 내부가 아니라 **호스트 docker 데몬**이 해석한다. 그래서 worker 의
-config·시크릿 마운트 source 는 반드시 **호스트 경로**여야 한다. 여기가 틀리면 worker 는
-뜨지만 설정/토큰을 못 읽어 **조용히** 실패한다.
+**왜 없어도 되나.** central 이 socket-proxy(또는 docker.sock)를 통해 worker 를 띄우면 그
+컨테이너는 **형제(sibling)** 로 생성되고, 바인드 마운트의 source 는 central 컨테이너 내부가
+아니라 **호스트 docker 데몬**이 해석한다. 그래서 예전엔 worker 마운트에 호스트 경로가
+필요했다. 지금 worker 에 거는 마운트는 **named 볼륨 2개뿐**이고(볼륨은 *이름* 으로
+해석되므로 호스트 경로 개념이 없다), 나머지는 central 이 컨테이너 스펙에 실어 보낸다:
 
-- env `HOST_DEPLOY_DIR` 로 주입해도 된다(compose 가 `.env` 를 자동 로드; env 가 우선).
-- `workspace_volume` 은 **named 볼륨**이라 `host_deploy_dir` 과 무관하게 이름으로 해석된다
-  — central·모든 worker 가 이 볼륨 하나를 공유해 레포를 **한 벌만** 클론한다.
-- 레거시 키(`spawn.docker_host`·`spawn.host_deploy_dir`·`spawn.workspace_volume`·
-  `secrets.base_dir`)도 계속 읽으므로 기존 `config.yaml` 은 그대로 둬도 동작한다.
+| worker 가 필요한 것 | 전달 방식 |
+|---|---|
+| `~/.claude`(인증/세션 영속) | named 볼륨 `jad-<user>` |
+| 공유 워크스페이스(레포 한 벌) | named 볼륨 `jad-workspace` |
+| `config/config.yaml` | **스폰 시 주입** → worker 가 부팅 시 `/app/config/config.yaml` 로 기록 |
+| 그 사용자의 시크릿 + 사전 인가 settings | **스폰 시 주입** → worker 의 `/run/secrets`(tmpfs, RAM 전용) |
+| 알림 웹훅 파일 하나 | **스폰 시 주입**(같은 채널) |
+
+주입 계약의 단일 원천은 `app/inject.py` 다. central 은 여전히 자기 `./config` 와
+`./secrets` 를 **자기 compose 마운트**로 읽는다 — 그건 compose CLI 가 호스트에서 해석하는
+상대 경로라 애초에 틀릴 여지가 없다.
+
+- 레거시 키(`spawn.docker_host`·`spawn.workspace_volume`·`secrets.base_dir`)도 계속 읽으므로
+  기존 `config.yaml` 은 그대로 둬도 동작한다.
 
 ### 2.3 호스트 OS 별 표기 (리눅스 / 맥 / 윈도우)
 
-코드에는 플랫폼 분기가 없다 — 컨테이너 안은 항상 리눅스다. **다만 호스트 경로를 적는
-두 값**(`deploy.host_deploy_dir`, `deploy.secrets_base_dir`)은 호스트 OS 표기를 따른다.
+코드에는 플랫폼 분기가 없다 — 컨테이너 안은 항상 리눅스다. 호스트 절대경로를 직접 적는
+설정 항목은 이제 없다(§2.2). 남는 것은 `deploy.secrets_base_dir` 하나인데, 컨테이너 배포
+(갈래 B·C)면 이 값은 **컨테이너 경로**(`/run/secrets`)라 호스트 OS 와 무관하고, 로컬 개발
+(갈래 A)이면 그냥 로컬 디렉토리다(윈도우도 슬래시 표기: `C:/Users/<you>/.jad/secrets`).
 
-| 호스트 | `host_deploy_dir` 예 | 비고 |
-|---|---|---|
-| 리눅스 | `/opt/jira-auto-dispatcher` | 그대로 |
-| 맥 | `/Users/<you>/jira-auto-dispatcher` | Docker Desktop 파일 공유 대상 경로여야 한다 |
-| 윈도우(Docker Desktop) | `/c/Users/<you>/jira-auto-dispatcher` 또는 `C:/Users/<you>/jira-auto-dispatcher` | **슬래시(`/`)를 쓴다.** 백슬래시(`C:\...`)는 데몬이 해석하지 못한다 |
-| 윈도우(WSL2 안에서 clone) | `/home/<you>/jira-auto-dispatcher` | WSL 파일시스템에 두는 편이 성능·권한 모두 낫다(권장) |
-
-- `secrets_base_dir` 도 같은 규칙이다. 컨테이너 배포(갈래 B·C)면 이 값은 **컨테이너 경로**
-  (`/run/secrets`)이므로 호스트 OS 와 무관하다.
 - 시크릿 파일 권한 하드닝(`chmod 600`)은 리눅스/맥에서만 의미가 있다. 윈도우에서는 chmod 가
   무시되므로(코드도 `OSError` 를 무해하게 넘긴다) NTFS ACL 로 별도 보호해야 한다 —
   **윈도우 호스트는 개인 평가용으로만 쓰는 것을 권한다.**
@@ -177,13 +178,13 @@ config·시크릿 마운트 source 는 반드시 **호스트 경로**여야 한�
 | `discover` | **이 Jira 인스턴스에 실제로 있는 값**을 조회(커스텀필드 후보·프로젝트 상태·전이 id/name·라벨·`accountId`). 설정에 적힌 id·상태 이름이 **이 인스턴스에 실재하는지**까지 검증한다 | `config.yaml`(base_url·watcher_email·토큰만 있으면 됨) → 후보 목록 + 붙여넣을 `jira:` 블록 / `--json` |
 | `validate` | 수집한 답변을 `app/setup_schema.py` 선언에 대고 검증(누락·조건부 필수·허용값·타입·시크릿 값 혼입을 **전부 모아서** 보고) | 답변 JSON(파일 또는 stdin) → 사람용 출력 / `--json` |
 | `render` | 검증을 통과한 답변으로 `config.yaml` 생성. **`config/config.example.yaml` 을 템플릿으로 써서 주석(=이 안내)을 그대로 물려준다.** 덤으로 `.env` 의 `WORKER_SHARED_SECRET` 을 **없으면** 만든다(멱등 — 있으면 손대지 않는다) | 답변 JSON → `config/config.yaml`(`-o` 로 변경, 기존 파일은 `--force` + 자동 `.bak-*` 백업) + `.env` |
-| `doctor` | 그 설정으로 **실제로 붙는지** 실측: Jira 자격·JQL 경로, forge 토큰 권한, dlc-meta 원격 도달성, docker 접속, 알림 웹훅 참조, `host_deploy_dir` 함정 | `config/config.yaml` → 검사별 PASS/FAIL/WARN/SKIP + 고치는 법 |
+| `doctor` | 그 설정으로 **실제로 붙는지** 실측: Jira 자격·JQL 경로, forge 토큰 권한, dlc-meta 원격 도달성, docker 접속, 알림 웹훅 참조 | `config/config.yaml` → 검사별 PASS/FAIL/WARN/SKIP + 고치는 법 |
 
 ```bash
 cat > answers.json <<'JSON'
 {
   "consent": {"full_permissions": true, "accepted_at": "2026-01-01T09:00:00+09:00"},
-  "deploy":  {"profile": "cloud_vm", "host_deploy_dir": "/home/you/jira-auto-dispatcher",
+  "deploy":  {"profile": "cloud_vm",
               "secrets_base_dir": "/run/secrets"},
   "forge":   {"kind": "gitlab", "token_ref": "service/forge-token"},
   "jira":    {"base_url": "https://your-org.atlassian.net", "project": "PROJ",
@@ -263,7 +264,7 @@ python -m app.setup discover --json > jira.json   # 기계용(후속 온보딩·
   막는다(그 값을 출력에 싣지 않는다).
 - `doctor` 는 기본적으로 **알림을 발송하지 않는다.** 실제 발송까지 시험하려면
   `--send-test-notification`(팀 채널에 메시지가 남는다).
-- 일부만 돌리려면 `--only`: `config, secrets, worker_secret, host_deploy_dir, jira_auth,
+- 일부만 돌리려면 `--only`: `config, secrets, worker_secret, jira_auth,
   jira_search, forge_token, dlc_meta, docker, notifier`.
 - ⚠️ **`forge_token` 검사는 갈 곳을 모르면 요청 자체를 하지 않는다(SKIP).** `forge.base_url`
   이 비어 있으면 설정된 레포 URL(`run.dlc_meta_repo_url` · `run.docs_repo_url`)의 호스트에서
@@ -300,9 +301,8 @@ printf '%s' '<JIRA_API_TOKEN>'  > secrets/service/jira-token
 printf '%s' '<FORGE_PAT>'       > secrets/service/forge-token
 chmod -R go-rwx secrets && find secrets -type f -exec chmod 600 {} \;
 
-# (3) 호스트 경로 + worker 공유 시크릿(dispatch HTTP 인증) + central 자기 claude 토큰
-printf 'HOST_DEPLOY_DIR=%s\n' "$PWD" >> .env   # ⚠️ >> (§2.5 render 가 만든 .env 를 덮어쓰지 않게)
-#                                                 compose 로 띄우면 로컬도 필요하다(§2.2)
+# (3) worker 공유 시크릿(dispatch HTTP 인증) + central 자기 claude 토큰
+#     ⚠️ HOST_DEPLOY_DIR 은 더 이상 필요 없다 — 워커 마운트가 전부 named 볼륨이다(§2.2).
 # WORKER_SHARED_SECRET 은 `python -m app.setup render`(§2.5)가 이미 넣었다(멱등).
 # 그 명령을 쓰지 않았다면:
 #   printf 'WORKER_SHARED_SECRET=%s\n' "$(openssl rand -hex 32)" >> .env
@@ -351,8 +351,7 @@ socket-proxy 경유가 **기본**이다(docker.sock 직결 금지 — compose �
 git clone <이 저장소> ~/jira-auto-dispatcher && cd ~/jira-auto-dispatcher
 cp config/config.example.yaml config/config.yaml   # → §2 대로 채운다
 
-# ⚠️ host_deploy_dir 필수 — 이 디렉토리의 호스트 절대경로
-printf 'HOST_DEPLOY_DIR=%s\n' "$PWD" >> .env   # ⚠️ >> 이다 — render 가 만든 .env 를 덮어쓰지 않는다
+# ⚠️ 호스트 절대경로를 적을 항목은 없다(§2.2).
 # WORKER_SHARED_SECRET 은 `python -m app.setup render`(§2.5)가 이미 넣었다(멱등).
 # 그 명령을 쓰지 않았다면:
 #   printf 'WORKER_SHARED_SECRET=%s\n' "$(openssl rand -hex 32)" >> .env
@@ -428,7 +427,7 @@ curl -fsS -XPOST http://localhost:8787/api/doctor/refresh    # (3) 수동 재실
 무엇이 실패했고 어떻게 고치는지가 함께 보인다.
 
 > ⚠️ **워커 실행에 치명적인 FAIL 이면 사용자 온보딩(`POST /onboard`)이 409 로 막힌다** —
-> `config` · `secrets` · `host_deploy_dir` · `jira_auth` · `jira_search` · `docker`. 그 상태로
+> `config` · `secrets` · `jira_auth` · `jira_search` · `docker`. 그 상태로
 > 워커를 띄우면 에러 없이 아무 일도 안 하거나 **조용히 실패하는 잡**만 쌓이기 때문이다.
 > `forge_token` · `dlc_meta` · `notifier` · `worker_secret` 은 **막지 않는다**(central 자신의
 > git·알림 경로가 degrade 될 뿐, 잡은 돌고 MR/PR 도 나온다). 막히는 항목은 전부 관리 UI
@@ -465,7 +464,7 @@ docker compose exec central python -m app.setup doctor
 
 | 증상 | 원인 | 잡는 검사 |
 |---|---|---|
-| worker 가 뜨는데 설정/토큰을 못 읽음 | `deploy.host_deploy_dir` 이 비었거나 **컨테이너 내부 경로**로 적혔다(§2.2) | `--only host_deploy_dir` |
+| worker 가 뜨는데 설정/토큰을 못 읽음 | 워커 이미지가 **낡았다**(스폰 시 주입 materialize 를 모르는 옛 이미지). central 과 워커는 같은 이미지를 쓴다 — `docker compose build && docker compose up -d` 로 다시 올리면 central 이 부팅 시 낡은 워커를 재생성한다 | central 로그의 `주입 config materialize` 라인 |
 | dlc-meta pull/push 가 안 됨 | 사설 GitLab 을 이 호스트에서 열 수 없거나 토큰 권한 부족 | `--only dlc_meta` |
 | 시크릿 파일을 못 읽음 | 참조 경로 오타 · 파일 부재 · 값을 config 에 직접 적음 | `--only secrets` (+ `validate`) |
 | 온보딩이 `Read-only file system` 500 | central 의 `./secrets` 마운트를 `:ro` 로 바꿨다 — central 은 **rw** 여야 한다 | — |

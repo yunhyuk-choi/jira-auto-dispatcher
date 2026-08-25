@@ -93,13 +93,13 @@ cp config/config.example.yaml config/config.yaml
 ```
 
 온프렘은 `deploy.profile: onprem_server` 다. **socket-proxy를 쓰는 기본 구성이면 반드시**
-`deploy.docker_host` 를 프록시로 맞추고, `deploy.host_deploy_dir` 를 **호스트 절대경로**로
-채운다(central 컨테이너 내부 경로가 아니다 — 이 값이 틀리면 worker 마운트가 조용히 깨진다):
+`deploy.docker_host` 를 프록시로 맞춘다. 호스트 절대경로를 적을 항목은 없다 — worker 에
+거는 마운트는 전부 named 볼륨이고, config·시크릿·알림 웹훅은 central 이 컨테이너 스펙에
+**주입**한다(`app/inject.py`, INSTALL §2.2):
 
 ```yaml
 deploy:
   profile: onprem_server
-  host_deploy_dir: /opt/jira-auto-dispatcher   # ← 이 서버의 실제 배포 경로
   docker_host: tcp://socket-proxy:2375         # ← socket-proxy 기본 구성. (직결 시 unix:///var/run/docker.sock)
   secrets_base_dir: /run/secrets
   workspace_volume: jad-workspace
@@ -111,8 +111,9 @@ spawn:
   run_as: "1000:1000"
 ```
 
-> 레거시 키(`spawn.docker_host`·`spawn.host_deploy_dir`·`spawn.workspace_volume`·
-> `secrets.base_dir`)도 계속 읽으므로 기존 `config.yaml` 은 그대로 둬도 동작한다.
+> 레거시 키(`spawn.docker_host`·`spawn.workspace_volume`·`secrets.base_dir`)도 계속 읽으므로
+> 기존 `config.yaml` 은 그대로 둬도 동작한다. 제거된 `host_deploy_dir`(과 env
+> `HOST_DEPLOY_DIR`)이 남아 있어도 **무시**된다 — 지우지 않아도 무해하다.
 
 `config/config.yaml`은 compose가 `/app/config:ro` 로 마운트한다(gitignore·이미지 미포함).
 
@@ -120,12 +121,18 @@ spawn:
 
 ## 3. 시크릿 배치 (`secrets.base_dir`)
 
-컨테이너는 `SECRETS_DIR=/run/secrets` 로 주입되고, 호스트 `./secrets/` 를 마운트한다.
-여기에 **service 시크릿**(central 공용)과 **per-user 시크릿**을 파일로 둔다.
+**central** 컨테이너는 `SECRETS_DIR=/run/secrets` 로 주입되고, 호스트 `./secrets/` 를
+마운트한다. 여기에 **service 시크릿**(central 공용)과 **per-user 시크릿**을 파일로 둔다 —
+이 저장 위치는 예나 지금이나 같다.
 ⚠️ **central은 rw로 마운트한다** — 온보딩 UI가 새 사용자 시크릿을 `secrets.base_dir/<user>/`
-에 직접 쓰기 때문(`:ro`면 온보딩이 `Read-only file system` 500으로 실패). worker는
-spawner가 **자기 per-user 시크릿만 ro**로 마운트하므로 워커측 격리는 유지된다.
+에 직접 쓰기 때문(`:ro`면 온보딩이 `Read-only file system` 500으로 실패).
 호스트 `./secrets/` 소유는 컨테이너 uid(1000:1000)에 맞춘다.
+
+**worker** 는 이 디렉토리를 **마운트하지 않는다.** central 이 spawn 시 그 사용자 몫만
+컨테이너 스펙에 실어 보내고(`app/inject.py`), worker 가 부팅 시 자기 `/run/secrets`
+tmpfs(RAM 전용, 0600)에 기록한다. 그래서 워커 사이에는 공유 부모 디렉토리 자체가 없다
+— A 가 B 의 시크릿에 닿을 경로가 존재하지 않는다. 알림 웹훅도 같은 채널로 **파일 하나만**
+간다(`service/` 디렉토리 전체는 절대 안 간다 — 거기엔 central watcher 의 Jira 토큰이 있다).
 
 ```bash
 cd /opt/jira-auto-dispatcher
@@ -232,8 +239,8 @@ central·모든 worker는 **하나의 named 볼륨**(`jad-workspace` → `/app/w
 
 - **볼륨 공유**: compose가 `jad-workspace` 를 `name: jad-workspace` 로 고정 선언하고,
   spawner가 워커에 **같은 이름의 named 볼륨**을 `run.workspace_dir` 로 마운트한다
-  (`config.deploy.workspace_volume`, 기본 `jad-workspace`). named 볼륨이라 `host_deploy_dir`
-  와 무관하게 볼륨명으로 docker가 해석한다.
+  (`config.deploy.workspace_volume`, 기본 `jad-workspace`). named 볼륨이라 호스트 경로와
+  무관하게 볼륨명으로 docker가 해석한다.
 - **경로 파생**: `run.orchestrator_repo`/`dlc_meta_repo`/`docs_repo` 를 비우면
   `<workspace_dir>/orchestrator|dlc-meta|docs` 로 자동 파생한다(명시하면 존중).
   ⚠️ 파생 디렉토리명이 옛 `dataspace_docs` → 범용 `docs` 로 바뀌었다. 경로를 **명시한**
@@ -345,7 +352,30 @@ docker ps --filter name=jad-worker-     # 동적 worker 목록
 docker stop jad-worker-<user>           # 개별 worker 중지(또는 UI disable)
 ```
 
-- config.yaml·시크릿 변경 후에는 `docker compose restart central`. worker 토큰 갱신은
-  6단계의 재기동 절차를 따른다.
-- 이미지 갱신(재빌드) 시 `docker compose up -d --build central` 후, 기존 worker는
-  UI에서 stop→start(또는 `docker rm -f jad-worker-<user>` 후 재활성화)로 새 이미지 반영.
+- config.yaml·시크릿 변경 후에는 `docker compose restart central`. central 은 부팅 시
+  각 워커에 **구워진 주입 페이로드**(config·시크릿)를 지금 값과 대조해, 달라졌으면 그
+  워커를 재생성한다 — 활성 잡이 있으면 그 잡이 끝난 뒤로 미룬다(드레인). 그래서 별도
+  조작 없이 다음 재기동에서 새 값이 반영된다.
+- 이미지 갱신(재빌드) 시 `docker compose up -d --build central` 후, 기존 worker는 central
+  이 같은 reconcile 로 재생성한다(수동으로 하려면 UI stop→start 또는
+  `docker rm -f jad-worker-<user>` 후 재활성화).
+
+### 9.1 업그레이드 — `host_deploy_dir` 제거 (기존 배포)
+
+worker 의 bind 마운트가 전부 사라지면서 `deploy.host_deploy_dir` / env `HOST_DEPLOY_DIR`
+이 **없어졌다**(INSTALL §2.2). 기존 배포의 이관 절차는 사실상 없다:
+
+1. **시크릿을 옮기지 않는다.** `./secrets/` 는 central 이 계속 쓰는 그대로다 — 바뀐 것은
+   *워커에게 전달하는 방법*뿐이다.
+2. `docker compose build && docker compose up -d` 로 **central 과 이미지를 같이** 올린다
+   (central·worker 는 같은 이미지다). central 이 부팅 시 낡은 워커를 감지해 재생성한다.
+3. `.env` 의 `HOST_DEPLOY_DIR=`, `config.yaml` 의 `deploy.host_deploy_dir:` 는 **지워도 되고
+   둬도 된다** — 아무도 읽지 않는다. `python -m app.setup validate` 가 "선언되지 않은
+   항목" 경고로 남아 있음을 알려 준다.
+4. 확인: `docker inspect jad-worker-<user> --format '{{json .HostConfig.Binds}}'` 가
+   `null` 이면(=bind 없음) 새 방식으로 뜬 것이다. central 로그에 `주입 config
+   materialize` / `주입 시크릿 materialize` 라인이 워커 부팅마다 남는다.
+
+> ⚠️ **부분 업그레이드 금지**: 새 central + 낡은 워커 이미지 조합이면, 워커가 주입 env 를
+> 해석하지 못해 config 없이 부팅한다(크래시 루프 — 조용하지 않고 로그에 바로 뜬다).
+> 위 2번처럼 이미지를 함께 올리면 발생하지 않는다.

@@ -245,15 +245,15 @@ def _check(name, status):
 
 
 def test_onboard_is_blocked_when_a_fatal_check_failed(tmp_path, isolated_state):
-    """워커 바인드가 어긋난 상태로 사용자를 붙이면 조용히 실패하는 잡만 쌓인다."""
+    """docker 에 닿지 못하는 상태로 사용자를 붙이면 조용히 실패하는 잡만 쌓인다."""
     from app import setup_doctor as D
 
     client, reg, base = _wire_with_doctor(
-        tmp_path, [_check("host_deploy_dir", D.STATUS_FAIL)])
+        tmp_path, [_check("docker", D.STATUS_FAIL)])
     res = client.post("/onboard", json=_FULL)
     assert res.status_code == 409
     body = res.get_json()
-    assert body["blocking"] == ["host_deploy_dir"]
+    assert body["blocking"] == ["docker"]
     assert body["failures"][0]["hint"]          # 어떻게 고치는지가 응답에 있다
     # ⚠️ 아무 것도 쓰지 않았다 — 레지스트리도 시크릿 파일도 그대로다.
     assert reg.get("testuser") is None

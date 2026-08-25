@@ -210,7 +210,7 @@ def test_doctor_reports_failures_with_exit_one(tmp_path, capsys):
         "https://gitlab.example.com/<your-group>/dlc-meta.git")
     open(path, "w", encoding="utf-8", newline="").write(text)
     code = CLI.main(["doctor", "--config", path, "--project-dir", str(tmp_path),
-                     "--only", "config,host_deploy_dir"])
+                     "--only", "config,worker_secret"])
     assert code == CLI.EXIT_GATE_FAILED
     out = capsys.readouterr().out
     assert "[FAIL] config" in out          # dlc_meta_repo_url 자리표시자가 되살아났다
@@ -219,9 +219,9 @@ def test_doctor_reports_failures_with_exit_one(tmp_path, capsys):
 def test_doctor_json_output(tmp_path, capsys):
     path = _rendered_config(tmp_path, capsys)
     CLI.main(["doctor", "--config", path, "--project-dir", str(tmp_path),
-              "--only", "host_deploy_dir", "--json"])
+              "--only", "worker_secret", "--json"])
     payload = json.loads(capsys.readouterr().out)
-    assert payload["checks"][0]["name"] == "host_deploy_dir"
+    assert payload["checks"][0]["name"] == "worker_secret"
     assert set(payload["counts"]) == {"pass", "fail", "warn", "skip"}
 
 

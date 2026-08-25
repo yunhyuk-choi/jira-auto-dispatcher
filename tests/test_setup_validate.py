@@ -16,8 +16,7 @@ from app import setup_validate as V
 # 통과하는 최소 답변(각 테스트가 필요한 부분만 바꿔 쓴다).
 GOOD = {
     "consent": {"full_permissions": True, "accepted_at": "2026-08-25T09:00:00+09:00"},
-    "deploy": {"profile": "cloud_vm", "host_deploy_dir": "/srv/jad",
-               "secrets_base_dir": "/run/secrets"},
+    "deploy": {"profile": "cloud_vm", "secrets_base_dir": "/run/secrets"},
     "forge": {"kind": "gitlab", "token_ref": "service/forge-token"},
     "jira": {"base_url": "https://acme.atlassian.net", "project": "ACME",
              "trigger_statuses": ["To Do"],
@@ -102,15 +101,17 @@ def test_required_if_fires_only_when_condition_matches():
     assert fixed.ok
 
 
-def test_host_deploy_dir_is_required_on_server_profiles():
-    """스키마의 required_if 가 그대로 강제된다(워커 바인드가 조용히 깨지는 조합)."""
-    bad = _merged(deploy={"profile": "onprem_server", "host_deploy_dir": ""})
-    result = V.validate_answers(bad)
-    assert V.CODE_MISSING_REQUIRED_IF in _codes(result, "deploy.host_deploy_dir")
+def test_removed_host_deploy_dir_is_only_a_warning_now():
+    """제거된 ``deploy.host_deploy_dir`` 이 남아 있어도 설치를 막지 않는다.
 
-    local_ok = _merged(deploy={"profile": "local", "host_deploy_dir": ""})
-    assert V.CODE_MISSING_REQUIRED_IF not in _codes(
-        V.validate_answers(local_ok), "deploy.host_deploy_dir")
+    워커 마운트가 전부 named 볼륨이 되어(나머지는 스폰 시 주입) 이 값이 필요 없어졌다.
+    기존 배포가 config.yaml 에 남겨 둬도 **경고**로만 알리고 통과시킨다 — 무해하게
+    무시되기 때문이다(app/config.py 는 모르는 키를 읽지 않는다).
+    """
+    result = V.validate_answers(
+        _merged(deploy={"profile": "onprem_server", "host_deploy_dir": "/srv/jad"}))
+    assert result.ok
+    assert V.CODE_UNKNOWN_KEY in _codes(result, "deploy.host_deploy_dir")
 
 
 # --- 허용값·타입 ---------------------------------------------------------------

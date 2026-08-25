@@ -4,7 +4,7 @@
     :mod:`app.setup_validate` 는 "답변이 스키마에 맞는가"를 본다. 그건 종이 위의 검사다.
     이 모듈은 그 설정으로 **실제로 붙는가**를 본다: Jira 가 응답하는가, forge 토큰에 권한이
     있는가, dlc-meta 원격을 이 호스트에서 fetch 할 수 있는가, docker 로 워커를 띄울 수
-    있는가, 워커 바인드가 조용히 어긋날 조합은 아닌가.
+    있는가.
 
     설치가 실패하는 자리는 대부분 "설정 문법"이 아니라 **환경**이다 — 사설 GitLab 의
     dlc-meta 를 퍼블릭 클라우드 VM 에서 못 여는 조합, 토큰 스코프 부족, 컨테이너 경로와
@@ -289,86 +289,6 @@ def check_worker_secret(cfg: Any, *, project_dir: str = ".") -> CheckResult:
         f"{DEFAULT_ENV_FILE} 에 {WORKER_SECRET_ENV}=$(openssl rand -hex 32) 를 넣으세요. "
         f"⚠️ 이미 워커가 떠 있다면 값을 **바꾸지** 마세요(전부 401 이 됩니다).",
     )
-
-
-def check_host_deploy_dir(cfg: Any, *, project_dir: str = ".") -> CheckResult:
-    """⚠️ **워커 바인드가 조용히 어긋나는 조합**을 잡는다(가장 자주 밟는 함정).
-
-    ``spawn.host_deploy_dir`` 을 비우면 :mod:`app.spawner` 는 "호스트 파일시스템 ==
-    central 파일시스템"을 전제한 폴백으로 내려간다(경고 로그 한 줄만 남는다). 그런데
-    compose 로 central 을 **컨테이너에** 띄우는 순간 그 전제가 깨진다 — central 안의
-    ``/run/secrets`` 는 호스트에 없는 경로라, 워커의 바인드 source 가 호스트 docker 데몬
-    기준으로 해석되면서 **아무 에러 없이** 빈 디렉토리가 마운트된다. 워커는 뜨는데
-    설정·토큰을 못 읽는다.
-
-    ``deploy.profile`` 이 서버 프로파일이면 스키마의 ``required_if`` 가 이미 잡는다.
-    여기서 더 잡는 것은 스키마가 볼 수 없는 조합들이다:
-        - ``local`` 프로파일인데 docker 엔드포인트가 원격/프록시(tcp://) → central 이
-          컨테이너 안이라는 뜻이므로 호스트 경로가 필요하다.
-        - ``local`` + compose 파일이 있고 값이 비었다 → compose 로 띄우면 깨진다(경고).
-        - 값이 **컨테이너 내부 경로**(/app·/run/secrets)나 백슬래시 표기다 → 확실한 오설정.
-    """
-    deploy = getattr(cfg, "deploy", None)
-    profile = str(getattr(deploy, "profile", "local") or "local")
-    value = str(getattr(deploy, "host_deploy_dir", "") or "")
-    docker_host = str(getattr(deploy, "docker_host", "") or "")
-    compose_here = os.path.exists(os.path.join(project_dir, "docker-compose.yml"))
-
-    if not value:
-        if profile != "local":
-            return CheckResult(
-                "host_deploy_dir", STATUS_FAIL,
-                f"프로파일 {profile!r} 인데 비어 있습니다 — 워커 바인드가 조용히 어긋납니다",
-                "이 리포 디렉토리의 **호스트 절대경로**를 넣으세요. "
-                "예: .env 에 HOST_DEPLOY_DIR=$PWD (env 가 config 보다 우선합니다).",
-            )
-        if docker_host.startswith("tcp://"):
-            return CheckResult(
-                "host_deploy_dir", STATUS_FAIL,
-                f"비어 있는데 docker 엔드포인트가 원격/프록시입니다({docker_host}) — "
-                f"central 이 컨테이너 안이면 폴백 전제(호스트==central 파일시스템)가 깨집니다",
-                "HOST_DEPLOY_DIR 에 이 리포의 호스트 절대경로를 주세요(.env 에 "
-                "HOST_DEPLOY_DIR=$PWD).",
-            )
-        if compose_here:
-            return CheckResult(
-                "host_deploy_dir", STATUS_WARN,
-                "비어 있습니다 — docker.sock 직결 로컬 실행이면 괜찮지만, "
-                "docker compose 로 central 을 띄우면 워커 마운트가 조용히 깨집니다",
-                "compose 를 쓸 거라면 .env 에 HOST_DEPLOY_DIR=$PWD 를 넣으세요(INSTALL §2.2).",
-            )
-        return CheckResult(
-            "host_deploy_dir", STATUS_PASS,
-            "비어 있으나 로컬 프로파일 + 도커 소켓 직결이라 직접 경로 폴백이 성립합니다")
-
-    problems: list = []
-    if "\\" in value:
-        problems.append("백슬래시 표기입니다(호스트 docker 데몬이 해석하지 못합니다)")
-    if not (value.startswith("/") or (len(value) > 2 and value[1] == ":")):
-        problems.append("절대경로가 아닙니다")
-    if value.startswith(("/app", "/run/secrets")):
-        problems.append("central **컨테이너 내부** 경로로 보입니다(호스트 경로여야 합니다)")
-    if problems:
-        return CheckResult(
-            "host_deploy_dir", STATUS_FAIL, f"{value!r}: " + "; ".join(problems),
-            "central 컨테이너 안의 경로가 아니라, 이 리포가 놓인 **호스트**의 절대경로입니다"
-            "(윈도우는 슬래시로: /c/Users/you/jira-auto-dispatcher).",
-        )
-    # 이 호스트에 그 경로가 실재하면 배포 파일까지 확인한다(다른 호스트를 가리킬 수도 있어
-    # 부재 자체는 실패로 보지 않는다).
-    if os.path.isdir(value):
-        for needed in ("config", "docker-compose.yml"):
-            if not os.path.exists(os.path.join(value, needed)):
-                return CheckResult(
-                    "host_deploy_dir", STATUS_WARN,
-                    f"{value} 는 있으나 {needed} 가 없습니다 — 배포 디렉토리가 맞습니까?",
-                    "이 값은 config/ 와 docker-compose.yml 이 있는 배포 루트여야 합니다.",
-                )
-        return CheckResult("host_deploy_dir", STATUS_PASS,
-                           f"{value} (config/ · docker-compose.yml 확인됨)")
-    return CheckResult("host_deploy_dir", STATUS_WARN,
-                       f"{value} 가 이 머신에 없습니다 — 다른 호스트의 경로라면 정상입니다",
-                       "배포할 호스트에서 이 경로가 이 리포의 루트인지 확인하세요.")
 
 
 def _jira_client(cfg: Any, project_dir: str) -> tuple:
@@ -744,7 +664,7 @@ def _is_compose_internal(docker_host: str) -> bool:
 
 #: 실행 순서 = 의존 순서(앞이 깨지면 뒤가 왜 깨지는지 읽힌다).
 CHECK_ORDER: tuple = (
-    "config", "secrets", "worker_secret", "host_deploy_dir",
+    "config", "secrets", "worker_secret",
     "jira_auth", "jira_search", "forge_token", "dlc_meta", "docker", "notifier",
 )
 
@@ -777,7 +697,6 @@ def run_checks(cfg: Any, *, config_path: str = "", project_dir: str = ".",
         "config": lambda: check_config(cfg, config_path=config_path),
         "secrets": lambda: check_secrets(cfg, project_dir=project_dir),
         "worker_secret": lambda: check_worker_secret(cfg, project_dir=project_dir),
-        "host_deploy_dir": lambda: check_host_deploy_dir(cfg, project_dir=project_dir),
         "jira_auth": lambda: check_jira_auth(cfg, project_dir=project_dir,
                                              client=jira_client),
         "jira_search": lambda: check_jira_search(cfg, project_dir=project_dir,

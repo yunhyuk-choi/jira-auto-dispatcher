@@ -34,7 +34,7 @@ match:
   optout_labels: ["자동화_추적_해제"]
 spawn:
   docker_host: tcp://socket-proxy:2375
-  host_deploy_dir: /home/deploy/jad
+  host_deploy_dir: /home/deploy/jad     # 제거된 키 — 남아 있어도 무시된다(하위호환)
   workspace_volume: legacy-ws
 secrets: { base_dir: "${SECRETS_DIR}" }
 notify:
@@ -59,7 +59,6 @@ def test_legacy_config_still_loads_identically(tmp_path, monkeypatch):
     assert cfg.match.cancel_statuses == ["취소됨"]
     assert cfg.match.optout_labels == ["자동화_추적_해제"]
     assert cfg.spawn.docker_host == "tcp://socket-proxy:2375"
-    assert cfg.spawn.host_deploy_dir == "/home/deploy/jad"
     assert cfg.spawn.workspace_volume == "legacy-ws"
     assert cfg.secrets.base_dir == "/run/secrets"
     assert cfg.notify.enabled is True
@@ -74,7 +73,6 @@ def test_legacy_config_still_loads_identically(tmp_path, monkeypatch):
     assert cfg.notifier.provider == "google_chat"   # enabled: true 의 레거시 의미
     assert cfg.notifier.notify_cancelled is False
     assert cfg.deploy.docker_host == "tcp://socket-proxy:2375"
-    assert cfg.deploy.host_deploy_dir == "/home/deploy/jad"
     assert cfg.deploy.workspace_volume == "legacy-ws"
     assert cfg.deploy.secrets_base_dir == "/run/secrets"
     assert cfg.run.docs_repo == "/app/workspace/dataspace_docs"
@@ -181,27 +179,25 @@ secrets: { base_dir: "${SECRETS_DIR}" }
 
 def test_env_overrides_converge_into_deploy(tmp_path, monkeypatch):
     monkeypatch.setenv("SECRETS_DIR", "/run/secrets")
-    monkeypatch.setenv("HOST_DEPLOY_DIR", "/srv/jad")
     cfg = C.load_config(_write(tmp_path, """
 role: central
 jira: { base_url: https://x, project: PROJ, watcher_token_file: t }
-deploy: { profile: cloud_vm, host_deploy_dir: "${HOST_DEPLOY_DIR}" }
+deploy: { profile: cloud_vm }
 """))
-    assert cfg.spawn.host_deploy_dir == "/srv/jad"
-    assert cfg.deploy.host_deploy_dir == "/srv/jad"      # 역방향 수렴
+    assert cfg.spawn.docker_host == cfg.deploy.docker_host   # 역방향 수렴
     assert cfg.deploy.secrets_base_dir == cfg.secrets.base_dir
 
 
-def test_unsubstituted_host_deploy_dir_clears_both_views(tmp_path, monkeypatch):
+def test_removed_host_deploy_dir_key_does_not_break_load(tmp_path, monkeypatch):
+    """제거된 키가 deploy 섹션에 남아 있어도 로드가 깨지지 않는다(하위호환)."""
     monkeypatch.setenv("SECRETS_DIR", "/run/secrets")
-    monkeypatch.delenv("HOST_DEPLOY_DIR", raising=False)
     cfg = C.load_config(_write(tmp_path, """
 role: central
 jira: { base_url: https://x, project: PROJ, watcher_token_file: t }
-deploy: { profile: cloud_vm, host_deploy_dir: "${HOST_DEPLOY_DIR}" }
+deploy: { profile: cloud_vm, host_deploy_dir: "/srv/jad" }
 """))
-    assert cfg.spawn.host_deploy_dir == ""
-    assert cfg.deploy.host_deploy_dir == ""
+    assert cfg.deploy.profile == "cloud_vm"
+    assert not hasattr(cfg.deploy, "host_deploy_dir")
 
 
 def test_notify_enabled_env_override_maps_to_provider(tmp_path, monkeypatch):
@@ -340,7 +336,6 @@ def test_unknown_enum_values_fail_fast(tmp_path, monkeypatch, section, body):
 def test_shipped_example_config_loads(monkeypatch):
     """배포되는 예시 파일이 실제로 로드된다(예시와 파서가 갈라지지 않게)."""
     monkeypatch.setenv("SECRETS_DIR", "/run/secrets")
-    monkeypatch.setenv("HOST_DEPLOY_DIR", "/srv/jad")
     cfg = C.load_config("config/config.example.yaml")
     assert cfg.role == "central"
     assert cfg.deploy.profile in ("local", "cloud_vm", "onprem_server")

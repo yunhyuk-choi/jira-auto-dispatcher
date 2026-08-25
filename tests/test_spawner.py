@@ -26,7 +26,7 @@ from app.spawner import (
 )
 
 
-def _cfg(base_dir: str, host_deploy_dir: str = "", notify=None):
+def _cfg(base_dir: str, notify=None, config_path: str = ""):
     ns = SimpleNamespace(
         spawn=SimpleNamespace(
             image="jira-auto-dispatcher:latest",
@@ -35,16 +35,31 @@ def _cfg(base_dir: str, host_deploy_dir: str = "", notify=None):
             mem_limit="4g",
             docker_host="unix:///var/run/docker.sock",
             run_as="1000:1000",
-            host_deploy_dir=host_deploy_dir,
             workspace_volume="jad-workspace",
         ),
         run=SimpleNamespace(workspace_dir="/app/workspace"),
         secrets=SimpleNamespace(base_dir=base_dir),
         worker_shared_secret="s3cr3t",
+        # central 이 로드한 config.yaml 원문 위치(워커 주입 소스). 비면 기본 경로.
+        config_path=config_path,
     )
     if notify is not None:
         ns.notify = notify
     return ns
+
+
+def _cfg_with_config(tmp_path, base_dir: str, notify=None, text: str = "role: central\n"):
+    """config 원문 파일까지 갖춘 설정(주입 페이로드 검증용)."""
+    path = tmp_path / "config.yaml"
+    path.write_text(text, encoding="utf-8", newline="\n")
+    return _cfg(base_dir, notify=notify, config_path=str(path))
+
+
+def _injected_secrets(env: dict) -> dict:
+    """worker env 의 주입 페이로드를 풀어 ``{ref: 내용}`` 으로."""
+    from app import inject
+
+    return inject.decode_secrets(env[inject.ENV_SECRETS])
 
 
 def _notify(enabled=True, webhook_ref="service/google-chat-webhook"):
@@ -142,13 +157,16 @@ def test_ensure_worker_run_args(tmp_path, isolated_state):
 
     vols = kwargs["volumes"]
     assert vols["jad-testuser"] == {"bind": "/home/app/.claude", "mode": "rw"}
-    # 사전 인가 settings.json은 더 이상 파일 바인드하지 않는다(두 번째 spawn 버그 픽스 —
-    # 명명 볼륨 하위 파일 경로에 바인드하면 runc가 거부). worker 부팅 시 복사로 대체.
+    # 사전 인가 settings.json은 파일 바인드하지 않는다(명명 볼륨 하위 파일 경로에
+    # 바인드하면 runc가 거부). 주입 → worker 부팅 시 복사로 대체.
     settings_binds = [v for v in vols.values() if v["bind"] == SETTINGS_PATH_IN_CONTAINER]
     assert settings_binds == []
-    # per-user 시크릿 디렉토리는 read-only(claude-settings.json도 여기 포함).
-    secret_binds = [v for v in vols.values() if v["bind"] == "/run/secrets/testuser"]
-    assert secret_binds and secret_binds[0]["mode"] == "ro"
+    # per-user 시크릿은 더 이상 마운트가 아니라 **주입**이다(호스트 경로 개념 제거).
+    assert not any(v["bind"] == "/run/secrets/testuser" for v in vols.values())
+    assert "testuser/claude-settings.json" in _injected_secrets(env)
+    # 시크릿이 사는 곳은 uid 소유 tmpfs(RAM 전용).
+    assert kwargs["tmpfs"] == {"/run/secrets":
+                               "rw,noexec,nosuid,nodev,size=8m,mode=0700,uid=1000,gid=1000"}
 
     # 레지스트리 상태 갱신.
     assert reg.get("testuser").container.status == "running"
@@ -174,29 +192,56 @@ def test_ensure_worker_default_run_as_when_unset(tmp_path, isolated_state):
     assert client.containers.run.call_args.kwargs["user"] == DEFAULT_RUN_AS
 
 
-def test_ensure_worker_writes_bypass_settings_file(tmp_path, isolated_state):
+def test_ensure_worker_injects_bypass_settings_instead_of_host_file(tmp_path, isolated_state):
+    """사전 인가 settings.json 은 **호스트에 쓰지 않고** 주입 페이로드로 넘어간다.
+
+    호스트 파일로 스테이징하던 시절엔 그 경로를 워커 바인드 source 로 쓰려고
+    host_deploy_dir 이 필요했다. 이제는 매 spawn 마다 렌더해 주입하므로 디스크에
+    남는 것도, 호스트 경로도 없다.
+    """
     base = str(tmp_path / "secrets")
     reg = Registry()
     u = _user()
     reg.upsert(u)
-    Spawner(_cfg(base), reg, client=_client_absent()).ensure_worker(u)
-    path = os.path.join(base, "testuser", "claude-settings.json")
-    assert os.path.exists(path)
-    data = json.load(open(path, encoding="utf-8"))
+    client = _client_absent()
+    Spawner(_cfg(base), reg, client=client).ensure_worker(u)
+
+    # central 디스크에는 쓰지 않는다.
+    assert not os.path.exists(os.path.join(base, "testuser", "claude-settings.json"))
+    env = client.containers.run.call_args.kwargs["environment"]
+    data = json.loads(_injected_secrets(env)["testuser/claude-settings.json"])
     assert data["permissions"]["defaultMode"] == "bypassPermissions"
 
 
-def test_jira_gitlab_secrets_passed_as_path_not_value(tmp_path, isolated_state):
+def test_jira_gitlab_token_pointers_stay_paths_not_plain_env_values(tmp_path, isolated_state):
+    """토큰 **포인터**(*_FILE/*_REF)에는 값이 실리지 않는다 — 값은 주입 채널에만.
+
+    ⚠️ 계약 변화(정직한 기술): 예전엔 Jira/forge 토큰 값이 컨테이너 스펙에 아예 실리지
+    않았다(호스트 디렉토리를 ro 바인드했으므로). bind 를 없애면서 값은 전용 주입 env
+    (JAD_INJECT_SECRETS, base64)로 이동했다. 노출 수준은 이미 전부터 env 로 넘기던
+    CLAUDE_CODE_OAUTH_TOKEN·WORKER_SHARED_SECRET 과 같다(docker API 접근자 = 호스트
+    root 동치라 어차피 호스트 secrets/ 를 읽을 수 있다). 여기서 지키는 것은
+    **평문이 일반 env 키로 새지 않는다**는 것과 아래 격리 불변식이다.
+    """
+    from app import inject
+
     base = str(tmp_path / "secrets")
     _write(base, "testuser/jira-token", "JIRA-SECRET-VAL")
     _write(base, "testuser/gitlab-token", "GL-SECRET-VAL")
     _write(base, "testuser/claude-oauth-token", "CLAUDE-XYZ")
     sp = Spawner(_cfg(base), Registry(), client=_client_absent())
     env = sp.build_env(_user())
-    # Jira/GitLab 토큰 "값"은 어떤 env에도 실리지 않는다(파일경로만).
-    joined = "\n".join(str(v) for v in env.values())
+
+    # 주입 채널을 뺀 어떤 env 값에도 Jira/forge 토큰 평문이 없다.
+    joined = "\n".join(str(v) for k, v in env.items() if k != inject.ENV_SECRETS)
     assert "JIRA-SECRET-VAL" not in joined
     assert "GL-SECRET-VAL" not in joined
+    # 주입 채널 자체도 평문이 아니라 base64 페이로드다.
+    assert "JIRA-SECRET-VAL" not in env[inject.ENV_SECRETS]
+    # 그리고 그 안에서 값이 정확히 왕복한다(워커가 파일로 되살릴 내용).
+    files = _injected_secrets(env)
+    assert files["testuser/jira-token"] == "JIRA-SECRET-VAL"
+    assert files["testuser/gitlab-token"] == "GL-SECRET-VAL"
     assert env["JIRA_TOKEN_FILE"].endswith("testuser/jira-token")
     assert env["GITLAB_TOKEN_FILE"].endswith("testuser/gitlab-token")
     # Claude setup-token은 값으로 주입(계약).
@@ -321,99 +366,46 @@ def test_module_level_ensure_worker(tmp_path, isolated_state):
     client.containers.run.assert_called_once()
 
 
-# --- build_volumes: 호스트 경로 바인드(sibling container 픽스) ---
+# --- build_volumes / 주입: bind 마운트 없음(host_deploy_dir 개념 제거) ---
 
 
-def test_build_volumes_uses_host_paths_when_host_deploy_dir_set(tmp_path, isolated_state):
+def test_build_volumes_has_no_bind_mounts_at_all(tmp_path, isolated_state):
+    """⚠️ **회귀 방지 핵심**: 워커 볼륨은 named 볼륨 2개뿐이고 bind 가 하나도 없다.
+
+    bind 가 하나라도 생기면 그 source 를 호스트 docker 데몬이 해석하므로(sibling
+    container) 다시 "호스트 배포 절대경로"라는 설치 항목이 필요해지고, 틀리면 워커가
+    **에러 없이 뜬 채** 빈 디렉토리를 마운트하는 조용한 실패로 돌아간다. 그래서 여기서
+    "bind source 로 보이는 경로가 없다"를 기계적으로 못 박는다.
+    """
     base = str(tmp_path / "secrets")
-    host = "/home/<deploy-user>/deploy/jira-auto-dispatcher"
-    sp = Spawner(_cfg(base, host_deploy_dir=host), Registry(), client=_client_absent())
-    settings_path = sp.write_settings("testuser", "bypass")
-    vols = sp.build_volumes(_user(), settings_path)
-
-    # config: 호스트 경로 → /app/config (ro) — 크래시 픽스.
-    assert vols[host + "/config"] == {"bind": CONFIG_DIR_IN_CONTAINER, "mode": "ro"}
-    # per-user 시크릿: 호스트 경로 → /run/secrets/<user> (ro).
-    assert vols[host + "/secrets/testuser"] == {"bind": "/run/secrets/testuser", "mode": "ro"}
-    # settings.json은 더 이상 파일 바인드하지 않는다(두 번째 spawn 버그 픽스).
-    assert host + "/secrets/testuser/claude-settings.json" not in vols
-    assert all(v["bind"] != SETTINGS_PATH_IN_CONTAINER for v in vols.values())
-    # 명명 볼륨은 호스트 경로 무관 — 그대로.
+    vols = Spawner(_cfg(base), Registry(), client=_client_absent()).build_volumes(_user())
+    assert set(vols) == {"jad-testuser", "jad-workspace"}
+    for src in vols:
+        assert "/" not in src and os.sep not in src, f"bind 마운트 발견: {src}"
     assert vols["jad-testuser"] == {"bind": "/home/app/.claude", "mode": "rw"}
-    # central 내부 경로(settings_path·base_dir/<user>)는 worker 바인드 source로 쓰이지 않는다.
-    assert settings_path not in vols
-    assert os.path.join(base, "testuser") not in vols
-
-
-def test_build_volumes_fallback_warns_and_uses_direct_paths(tmp_path, isolated_state, caplog):
-    import logging
-
-    base = str(tmp_path / "secrets")
-    sp = Spawner(_cfg(base), Registry(), client=_client_absent())  # host_deploy_dir 미설정
-    settings_path = sp.write_settings("testuser", "bypass")
-    with caplog.at_level(logging.WARNING, logger="jad.spawner"):
-        vols = sp.build_volumes(_user(), settings_path)
-    # 경고 로그.
-    assert any("host_deploy_dir" in r.getMessage() for r in caplog.records)
-    # 직접 경로 폴백: base_dir/<user> 를 source로. settings.json은 바인드 안 함.
-    assert settings_path not in vols
-    assert all(v["bind"] != SETTINGS_PATH_IN_CONTAINER for v in vols.values())
-    assert os.path.join(base, "testuser") in vols
-    # config 마운트는 폴백에서도 포함.
-    config_binds = [v for v in vols.values() if v["bind"] == CONFIG_DIR_IN_CONTAINER]
-    assert config_binds and config_binds[0]["mode"] == "ro"
-
-
-def test_build_volumes_config_mount_always_present(tmp_path, isolated_state):
-    base = str(tmp_path / "secrets")
-    # host_deploy_dir 설정·미설정 양쪽 모두 config 마운트가 항상 포함된다.
-    for cfg in (_cfg(base), _cfg(base, host_deploy_dir="/host/deploy")):
-        sp = Spawner(cfg, Registry(), client=_client_absent())
-        settings_path = sp.write_settings("testuser", "bypass")
-        vols = sp.build_volumes(_user(), settings_path)
-        binds = [v["bind"] for v in vols.values()]
-        assert CONFIG_DIR_IN_CONTAINER in binds
+    assert vols["jad-workspace"] == {"bind": "/app/workspace", "mode": "rw"}
 
 
 def test_build_volumes_no_settings_file_bind(tmp_path, isolated_state):
-    """두 번째 spawn 버그 픽스: settings.json을 명명 볼륨 하위 파일 경로에 바인드하면
-    runc가 거부한다 → 파일 바인드는 없어야 하고, config·per-user 시크릿 dir·claude
-    명명 볼륨·공유 워크스페이스 4개만 남는다(양쪽 host_deploy_dir 모드).
-    """
+    """사전 인가 settings.json 을 명명 볼륨 하위 파일 경로에 바인드하면 runc 가 거부한다."""
     base = str(tmp_path / "secrets")
-    for cfg in (_cfg(base), _cfg(base, host_deploy_dir="/host/deploy")):
-        sp = Spawner(cfg, Registry(), client=_client_absent())
-        settings_path = sp.write_settings("testuser", "bypass")
-        vols = sp.build_volumes(_user(), settings_path)
-        # settings.json 파일 바인드가 어느 source·bind로도 존재하지 않는다.
-        assert all(v["bind"] != SETTINGS_PATH_IN_CONTAINER for v in vols.values())
-        assert not any(
-            str(src).endswith("claude-settings.json") for src in vols.keys()
-        )
-        # 정확히 config·claude 명명 볼륨·per-user 시크릿 dir·공유 워크스페이스 4개만.
-        binds = sorted(v["bind"] for v in vols.values())
-        assert binds == sorted(
-            [CONFIG_DIR_IN_CONTAINER, "/home/app/.claude", "/run/secrets/testuser",
-             "/app/workspace"]
-        )
+    sp = Spawner(_cfg(base), Registry(), client=_client_absent())
+    vols = sp.build_volumes(_user())
+    assert all(v["bind"] != SETTINGS_PATH_IN_CONTAINER for v in vols.values())
+    assert not any(str(src).endswith("claude-settings.json") for src in vols)
 
 
 def test_build_volumes_mounts_shared_workspace(tmp_path, isolated_state):
-    """공유 워크스페이스 named 볼륨을 run.workspace_dir 에 rw로 마운트한다(설계 §4).
-
-    볼륨명은 config.spawn.workspace_volume(기본 jad-workspace)이고, named 볼륨이라
-    host_deploy_dir 설정/미설정 양쪽 모두 동일하게 존재한다(호스트 경로 매핑 무관).
-    """
+    """공유 워크스페이스 named 볼륨을 run.workspace_dir 에 rw로 마운트한다(설계 §4)."""
     base = str(tmp_path / "secrets")
-    for cfg in (_cfg(base), _cfg(base, host_deploy_dir="/host/deploy")):
-        vols = Spawner(cfg, Registry(), client=_client_absent()).build_volumes(_user())
-        assert vols["jad-workspace"] == {"bind": "/app/workspace", "mode": "rw"}
+    vols = Spawner(_cfg(base), Registry(), client=_client_absent()).build_volumes(_user())
+    assert vols["jad-workspace"] == {"bind": "/app/workspace", "mode": "rw"}
 
 
 def test_build_volumes_workspace_volume_name_configurable(tmp_path, isolated_state):
     """볼륨명·bind 경로가 config에서 온다(기본 폴백은 DEFAULT_WORKSPACE_VOLUME)."""
     base = str(tmp_path / "secrets")
-    cfg = _cfg(base, host_deploy_dir="/host/deploy")
+    cfg = _cfg(base)
     cfg.spawn.workspace_volume = "custom-ws"
     cfg.run.workspace_dir = "/srv/ws"
     vols = Spawner(cfg, Registry(), client=_client_absent()).build_volumes(_user())
@@ -428,62 +420,189 @@ def test_build_volumes_workspace_volume_name_configurable(tmp_path, isolated_sta
 def test_build_volumes_settings_path_optional(tmp_path, isolated_state):
     """settings_path 인자는 하위호환(무시)이라 없이도 호출 가능하고 결과가 같다."""
     base = str(tmp_path / "secrets")
-    sp = Spawner(_cfg(base, host_deploy_dir="/host/deploy"), Registry(), client=_client_absent())
+    sp = Spawner(_cfg(base), Registry(), client=_client_absent())
     assert sp.build_volumes(_user()) == sp.build_volumes(_user(), "ignored/path")
 
 
-# --- build_volumes: 완료 알림 웹훅 시크릿 마운트(worker notify 버그 픽스) ---
+# --- 주입: config 원문 ---
 
 
-def test_build_volumes_mounts_webhook_when_notify_configured(tmp_path, isolated_state):
-    """notify 설정(enabled+webhook_ref)+host_deploy_dir → 웹훅 파일 하나만 worker ro 마운트."""
+def test_injects_config_text_verbatim(tmp_path, isolated_state):
+    """worker 는 /app/config/config.yaml 을 읽는다 — 그 원문을 그대로 주입한다.
+
+    해석된 설정을 다시 직렬화하지 않는 이유: ``${SECRETS_DIR}`` 같은 토큰은 워커가
+    자기 env 로 치환해야 bind 마운트 시절과 같은 의미가 된다.
+    """
+    from app import inject
+
     base = str(tmp_path / "secrets")
-    host = "/home/<deploy-user>/deploy/jira-auto-dispatcher"
-    cfg = _cfg(base, host_deploy_dir=host, notify=_notify())
-    sp = Spawner(cfg, Registry(), client=_client_absent())
-    vols = sp.build_volumes(_user())
-
-    # host 경로 → /run/secrets/service/google-chat-webhook (ro). base_dir 기준 dest.
-    assert vols[host + "/secrets/service/google-chat-webhook"] == {
-        "bind": "/run/secrets/service/google-chat-webhook",
-        "mode": "ro",
-    }
-    # ⚠️ service 디렉토리 전체는 절대 노출하지 않는다(central watcher jira-token 보호).
-    #    마운트 dest도 source도 service '디렉토리'가 아니라 웹훅 '파일'이어야 한다.
-    assert "/run/secrets/service" not in [v["bind"] for v in vols.values()]
-    assert host + "/secrets/service" not in vols
-    assert not any(str(src).endswith("/secrets/service") for src in vols.keys())
-    # 기존 4개(config·claude 볼륨·per-user 시크릿·공유 워크스페이스) + 웹훅 1개 = 5개.
-    assert len(vols) == 5
+    text = "role: central\nspawn: { image: x }\n"
+    cfg = _cfg_with_config(tmp_path, base, text=text)
+    env = Spawner(cfg, Registry(), client=_client_absent()).build_env(_user())
+    assert inject.decode_config(env[inject.ENV_CONFIG]) == text
 
 
-def test_build_volumes_no_webhook_when_notify_disabled(tmp_path, isolated_state):
-    """notify.enabled=False면 웹훅 마운트를 추가하지 않는다(기존 3개만)."""
+def test_missing_config_file_warns_and_omits_payload(tmp_path, isolated_state, caplog):
+    """config 원문을 못 읽으면 **경고를 남기고** 주입 키를 생략한다(조용한 빈 값 금지)."""
+    import logging
+
+    from app import inject
+
     base = str(tmp_path / "secrets")
-    host = "/host/deploy"
-    cfg = _cfg(base, host_deploy_dir=host, notify=_notify(enabled=False))
-    vols = Spawner(cfg, Registry(), client=_client_absent()).build_volumes(_user())
-    assert not any(str(src).endswith("google-chat-webhook") for src in vols.keys())
-    assert len(vols) == 4
+    cfg = _cfg(base, config_path=str(tmp_path / "does-not-exist.yaml"))
+    with caplog.at_level(logging.WARNING, logger="jad.spawner"):
+        env = Spawner(cfg, Registry(), client=_client_absent()).build_env(_user())
+    assert inject.ENV_CONFIG not in env
+    assert any("config" in r.getMessage() for r in caplog.records)
 
 
-def test_build_volumes_no_webhook_when_ref_empty(tmp_path, isolated_state):
-    """enabled여도 webhook_ref가 비어 있으면 마운트하지 않는다."""
+# --- 주입: per-user 격리(이 리포에서 가장 중요한 불변식) ---
+
+
+def test_injection_contains_only_this_users_secrets(tmp_path, isolated_state):
+    """⚠️ **격리**: 워커 A 의 주입 페이로드에 워커 B 의 시크릿이 값도 경로도 없다."""
     base = str(tmp_path / "secrets")
-    host = "/host/deploy"
-    cfg = _cfg(base, host_deploy_dir=host, notify=_notify(webhook_ref=""))
-    vols = Spawner(cfg, Registry(), client=_client_absent()).build_volumes(_user())
-    assert all("google-chat-webhook" not in str(src) for src in vols.keys())
-    assert len(vols) == 4
+    _write(base, "testuser/jira-token", "MINE")
+    _write(base, "other/jira-token", "THEIRS-DO-NOT-LEAK")
+    _write(base, "service/jira-token", "CENTRAL-WATCHER-TOKEN")
+
+    sp = Spawner(_cfg(base), Registry(), client=_client_absent())
+    env = sp.build_env(_user())
+    files = _injected_secrets(env)
+
+    assert all(ref.startswith("testuser/") for ref in files), files.keys()
+    blob = "\n".join(files.values())
+    assert "THEIRS-DO-NOT-LEAK" not in blob
+    assert "CENTRAL-WATCHER-TOKEN" not in blob
+    # 페이로드 전체(base64 이전/이후) 어디에도 남의 사용자 이름 경로가 없다.
+    assert "other/jira-token" not in str(files)
 
 
-def test_build_volumes_no_webhook_without_host_deploy_dir(tmp_path, isolated_state):
-    """host_deploy_dir 미설정(로컬 폴백)이면 웹훅 마운트를 생략한다(단순 가드)."""
+def test_injection_drops_refs_outside_this_user(tmp_path, isolated_state, caplog):
+    """레지스트리가 남의 경로를 가리켜도 그 값은 실리지 않는다(경고 + 제외)."""
+    import logging
+
     base = str(tmp_path / "secrets")
-    cfg = _cfg(base, notify=_notify())  # host_deploy_dir 미설정
-    vols = Spawner(cfg, Registry(), client=_client_absent()).build_volumes(_user())
-    assert not any(str(src).endswith("google-chat-webhook") for src in vols.keys())
-    assert len(vols) == 4
+    _write(base, "other/jira-token", "THEIRS-DO-NOT-LEAK")
+    user = UserRecord(
+        username="testuser",
+        jira_account_id="acc",
+        jira_email="yh@x",
+        secrets_ref=SecretsRef(jira_token="other/jira-token"),
+    )
+    sp = Spawner(_cfg(base), Registry(), client=_client_absent())
+    with caplog.at_level(logging.WARNING, logger="jad.spawner"):
+        files = sp.collect_injected_secrets(user)
+    assert "other/jira-token" not in files
+    assert "THEIRS-DO-NOT-LEAK" not in "\n".join(files.values())
+    assert any("이 사용자" in r.getMessage() for r in caplog.records)
+
+
+def test_injection_rejects_path_traversal_ref(tmp_path, isolated_state):
+    """``..`` 로 시크릿 루트를 벗어나려는 참조는 담지 않는다(심층 방어)."""
+    base = str(tmp_path / "secrets")
+    user = UserRecord(
+        username="testuser",
+        jira_account_id="acc",
+        jira_email="yh@x",
+        secrets_ref=SecretsRef(jira_token="testuser/../service/jira-token"),
+    )
+    sp = Spawner(_cfg(base), Registry(), client=_client_absent())
+    files = sp.collect_injected_secrets(user)
+    assert all(".." not in ref for ref in files)
+
+
+def test_two_users_get_disjoint_payloads(tmp_path, isolated_state):
+    """두 사용자의 주입 페이로드는 (공용 웹훅을 빼면) 교집합이 없다."""
+    base = str(tmp_path / "secrets")
+    _write(base, "alice/jira-token", "ALICE-TOKEN")
+    _write(base, "bob/jira-token", "BOB-TOKEN")
+
+    def _u(name):
+        return UserRecord(username=name, jira_account_id="a", jira_email="e",
+                          secrets_ref=SecretsRef(jira_token=f"{name}/jira-token"))
+
+    sp = Spawner(_cfg(base), Registry(), client=_client_absent())
+    a = sp.collect_injected_secrets(_u("alice"))
+    b = sp.collect_injected_secrets(_u("bob"))
+    assert set(a) & set(b) == set()
+    assert "BOB-TOKEN" not in "\n".join(a.values())
+    assert "ALICE-TOKEN" not in "\n".join(b.values())
+
+
+# --- 주입: 완료 알림 웹훅(최소권한 — 파일 하나만) ---
+
+
+def test_injects_webhook_file_when_notify_configured(tmp_path, isolated_state):
+    """notify(enabled+webhook_ref) 면 웹훅 **파일 하나**를 주입한다.
+
+    예전엔 host_deploy_dir 이 있을 때만 바인드해서, 없으면 알림이 조용히 스킵됐다.
+    주입에는 그 조건이 없다 — 설정만 돼 있으면 항상 간다.
+    """
+    base = str(tmp_path / "secrets")
+    _write(base, "service/google-chat-webhook", "https://chat.example/hook")
+    _write(base, "service/jira-token", "CENTRAL-WATCHER-TOKEN")
+    cfg = _cfg(base, notify=_notify())
+    env = Spawner(cfg, Registry(), client=_client_absent()).build_env(_user())
+    files = _injected_secrets(env)
+    assert files["service/google-chat-webhook"] == "https://chat.example/hook"
+    # ⚠️ 최소권한: service/ 의 다른 파일(central watcher Jira 토큰)은 절대 안 간다.
+    assert "service/jira-token" not in files
+    assert "CENTRAL-WATCHER-TOKEN" not in "\n".join(files.values())
+
+
+def test_no_webhook_when_notify_disabled(tmp_path, isolated_state):
+    base = str(tmp_path / "secrets")
+    _write(base, "service/google-chat-webhook", "https://chat.example/hook")
+    cfg = _cfg(base, notify=_notify(enabled=False))
+    files = _injected_secrets(
+        Spawner(cfg, Registry(), client=_client_absent()).build_env(_user()))
+    assert not any("google-chat-webhook" in ref for ref in files)
+
+
+def test_no_webhook_when_ref_empty(tmp_path, isolated_state):
+    base = str(tmp_path / "secrets")
+    cfg = _cfg(base, notify=_notify(webhook_ref=""))
+    files = _injected_secrets(
+        Spawner(cfg, Registry(), client=_client_absent()).build_env(_user()))
+    assert not any("google-chat-webhook" in ref for ref in files)
+
+
+# --- 시크릿 tmpfs(비-root 소유 — run_as 파생) ---
+
+
+def test_secrets_tmpfs_uid_derives_from_run_as(tmp_path, isolated_state):
+    """tmpfs 소유 uid 는 ``spawn.run_as`` 에서 파생된다 — 둘이 어긋날 수 없다.
+
+    주입 파일을 **쓰는 주체와 읽는 주체가 같은 uid** 여야 워커가 조용히 시크릿을
+    못 읽는 사고가 안 난다.
+    """
+    base = str(tmp_path / "secrets")
+    cfg = _cfg(base)
+    cfg.spawn.run_as = "1001:1002"
+    spec = Spawner(cfg, Registry(), client=_client_absent()).build_spec(_user())
+    assert spec["tmpfs"]["/run/secrets"].endswith("mode=0700,uid=1001,gid=1002")
+    assert spec["user"] == "1001:1002"
+
+
+def test_secrets_tmpfs_falls_back_when_run_as_not_numeric(tmp_path, isolated_state):
+    """이름 형식 run_as 는 uid 로 못 옮기므로 mode=0777 로 둔다(컨테이너 전용 tmpfs)."""
+    base = str(tmp_path / "secrets")
+    cfg = _cfg(base)
+    cfg.spawn.run_as = "app"
+    spec = Spawner(cfg, Registry(), client=_client_absent()).build_spec(_user())
+    opts = spec["tmpfs"]["/run/secrets"]
+    assert "mode=0777" in opts and "uid=" not in opts
+    # 파일 자체는 여전히 0600 으로 기록된다(app/inject.py).
+    from app import inject
+
+    assert inject.SECRET_FILE_MODE == 0o600
+
+
+def test_secrets_tmpfs_is_hardened(tmp_path, isolated_state):
+    base = str(tmp_path / "secrets")
+    opts = Spawner(_cfg(base), Registry(), client=_client_absent()).build_spec(_user())["tmpfs"]
+    assert opts["/run/secrets"].startswith("rw,noexec,nosuid,nodev,size=")
 
 
 # --- 작업 C: 배포 시 워커 이미지 reconcile(stale 재생성 / 활성 잡 드레인) -------
@@ -744,3 +863,76 @@ def test_reconcile_per_user_error_isolated(tmp_path, isolated_state):
     summary = sp.reconcile_workers([bad, u], has_active_job=has_active)
     assert "baduser" in summary["errors"]
     assert "testuser" in summary["recreated"]
+
+
+# --- 주입 페이로드 드리프트 → stale 판정(bind 시절의 "파일이라 자동 반영"을 대체) ---
+
+
+class FakeDockerWithEnv(FakeDockerForReconcile):
+    """컨테이너에 **구워진 env** 까지 흉내내는 대역(주입 드리프트 판정용)."""
+
+    def __init__(self, baked_env: dict, **kw):
+        super().__init__(**kw)
+        self.baked_env = baked_env
+
+    def _get(self, name):
+        c = super()._get(name)
+        c.attrs = {"Config": {"Env": [f"{k}={v}" for k, v in self.baked_env.items()]}}
+        return c
+
+
+def test_reconcile_recreates_when_injected_payload_changed(tmp_path, isolated_state):
+    """이미지는 그대로인데 config·시크릿이 바뀌었으면 stale 로 보고 재생성한다.
+
+    bind 마운트 시절엔 파일이라 워커가 알아서 최신을 읽었다. 주입은 컨테이너 생성
+    시점에 고정되므로, 이 판정이 없으면 워커가 **옛 자격증명으로 조용히** 돈다.
+    """
+    base = str(tmp_path / "secrets")
+    _write(base, "testuser/jira-token", "OLD")
+    reg = Registry()
+    u = _user()
+    reg.upsert(u)
+    sp_old = Spawner(_cfg(base), reg, client=_client_absent())
+    baked = sp_old.build_injection(u)
+
+    _write(base, "testuser/jira-token", "ROTATED")  # 토큰 교체
+    fake = FakeDockerWithEnv(baked, container_img_id="img-1", current_img_id="img-1")
+    sp = Spawner(_cfg(base), reg, client=fake)
+
+    summary = sp.reconcile_workers([u], has_active_job=lambda name: False)
+    assert summary["recreated"] == ["testuser"]
+    assert fake.removed == [True]
+
+
+def test_reconcile_skips_when_injected_payload_unchanged(tmp_path, isolated_state):
+    """페이로드가 그대로면 no-op — 매 부팅마다 워커를 흔들지 않는다."""
+    base = str(tmp_path / "secrets")
+    _write(base, "testuser/jira-token", "SAME")
+    reg = Registry()
+    u = _user()
+    reg.upsert(u)
+    baked = Spawner(_cfg(base), reg, client=_client_absent()).build_injection(u)
+    fake = FakeDockerWithEnv(baked, container_img_id="img-1", current_img_id="img-1")
+
+    summary = Spawner(_cfg(base), reg, client=fake).reconcile_workers(
+        [u], has_active_job=lambda name: False)
+    assert summary["skipped"] == ["testuser"]
+    assert fake.removed == []
+
+
+def test_reconcile_defers_payload_drift_while_job_active(tmp_path, isolated_state):
+    """페이로드 드리프트도 이미지 stale 과 같은 드레인 규율을 따른다(in-flight 잡 보호)."""
+    base = str(tmp_path / "secrets")
+    _write(base, "testuser/jira-token", "OLD")
+    reg = Registry()
+    u = _user()
+    reg.upsert(u)
+    baked = Spawner(_cfg(base), reg, client=_client_absent()).build_injection(u)
+    _write(base, "testuser/jira-token", "ROTATED")
+    fake = FakeDockerWithEnv(baked, container_img_id="img-1", current_img_id="img-1")
+    sp = Spawner(_cfg(base), reg, client=fake)
+
+    summary = sp.reconcile_workers([u], has_active_job=lambda name: True)
+    assert summary["deferred"] == ["testuser"]
+    assert fake.removed == []
+    assert "testuser" in sp._pending_recreate

@@ -49,10 +49,15 @@ RUN curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${
 #   ~/.claude   : 사용자 인증/세션 영속(worker; 런타임에 per-user 볼륨이 마운트)
 #   /app/state  : central 영속(jobs/watermark/dedup/registry)
 #   /app/workspace : 오케스트레이터 작업 공간
+#   /run/secrets   : worker가 **주입받은 시크릿을 자기 컨테이너 안에** 기록하는 자리
+#                    (app/inject.py). 실운영에서는 spawner가 여기에 uid 소유 tmpfs를
+#                    걸어 RAM 전용으로 만들지만, tmpfs 없이 이미지를 그냥 돌려도 비-root
+#                    (uid 1000)가 쓸 수 있도록 미리 만들어 소유권을 맞춰 둔다.
 ENV HOME=/home/app
 RUN useradd --create-home --uid 1000 --shell /bin/bash app \
-    && mkdir -p /home/app/.claude /app/state /app/workspace \
-    && chown -R 1000:1000 /home/app /app
+    && mkdir -p /home/app/.claude /app/state /app/workspace /run/secrets \
+    && chown -R 1000:1000 /home/app /app /run/secrets \
+    && chmod 700 /run/secrets
 
 WORKDIR /app
 

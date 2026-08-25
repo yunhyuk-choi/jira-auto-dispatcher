@@ -50,7 +50,6 @@ log = logging.getLogger("jad.doctor")
 #: 고르는 기준은 하나다 — *이 상태로 워커를 띄우면 잡이 **조용히** 실패하는가?*
 #:     - ``config``          동의 미승인 · 남의 조직 예시 자리표시자(= 이 배포의 값이 아니다)
 #:     - ``secrets``         서비스 토큰 부재 → 폴러·dlc-meta 가 인증 없이 돈다
-#:     - ``host_deploy_dir`` 워커 바인드가 **에러 없이** 빈 디렉토리로 마운트된다(최악)
 #:     - ``jira_auth``       401 → 아무 티켓도 못 읽는다
 #:     - ``jira_search``     프로젝트 키 오류 → 조용히 아무 일도 안 한다
 #:     - ``docker``          워커를 아예 띄울 수 없다
@@ -64,7 +63,7 @@ log = logging.getLogger("jad.doctor")
 #: ⚠️ 목록에 **관리 UI 로 고칠 수 있는 것은 없다** — 전부 config.yaml·시크릿 파일·호스트
 #: 환경이라 UI 밖에서 고친다. 그래서 "고칠 방법이 UI 뿐인데 UI 를 막는" 자충수가 아니다.
 BLOCKING_CHECKS: tuple = (
-    "config", "secrets", "host_deploy_dir", "jira_auth", "jira_search", "docker",
+    "config", "secrets", "jira_auth", "jira_search", "docker",
 )
 
 #: 진단 상태.

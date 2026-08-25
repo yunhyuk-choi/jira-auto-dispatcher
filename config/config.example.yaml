@@ -26,15 +26,14 @@ consent:
 #   cloud_vm      클라우드 VM  — compose + socket-proxy 경유, 시크릿 /run/secrets
 #   onprem_server 사내 온프렘  — cloud_vm 과 같은 형태(다른 건 네트워크·정책이지 이 값들이 아니다)
 # 아래 개별 값을 명시하면 프로파일 파생보다 우선한다. 레거시 키(spawn.docker_host·
-# spawn.host_deploy_dir·spawn.workspace_volume·secrets.base_dir)도 계속 읽는다.
+# spawn.workspace_volume·secrets.base_dir)도 계속 읽는다.
+#
+# ⚠️ 예전에 여기 있던 host_deploy_dir(호스트 배포 절대경로)은 **없어졌다**. 워커에 거는
+# 마운트가 전부 named 볼륨이 되고, config·per-user 시크릿·알림 웹훅은 central 이 워커
+# 컨테이너 스펙에 **주입**하기 때문이다(app/inject.py) — 호스트 경로를 아무도 알 필요가
+# 없다. 기존 config.yaml 에 그 키가 남아 있어도 무시된다(무해).
 deploy:
   profile: cloud_vm
-  # ⚠️ 호스트 배포 디렉토리의 절대경로(central 컨테이너 내부 경로 아님).
-  # central이 socket-proxy 경유로 worker를 띄우면 바인드 source는 호스트 docker
-  # 데몬이 해석한다(sibling container) → worker 바인드 source가 호스트 경로여야 한다.
-  # 예: /home/<deploy-user>/deploy/jira-auto-dispatcher. env HOST_DEPLOY_DIR 폴백 우선.
-  # 비우면(로컬 개발) 직접 경로 폴백. worker의 config/시크릿 마운트에 필수.
-  host_deploy_dir: "${HOST_DEPLOY_DIR}"
   docker_host: tcp://socket-proxy:2375     # 직결 대안: unix:///var/run/docker.sock (특권 확대)
   # 시크릿 파일들의 루트(값 아님, 경로). 호스트 OS 무관 — 로컬 개발이면 임의의 로컬
   # 디렉토리(예: ~/.jad/secrets), 컨테이너면 /run/secrets 또는 마운트 볼륨.
@@ -42,7 +41,7 @@ deploy:
   secrets_base_dir: "${SECRETS_DIR}"
   # 공유 워크스페이스 named 볼륨 이름(단일 클론·단일 pull 지점, 설계 §4). central
   # compose가 이 이름으로 선언하고 spawner가 워커에 **같은 named 볼륨**을 run.workspace_dir
-  # 에 마운트 → central·모든 워커가 레포 한 벌 공유. named 볼륨이라 host_deploy_dir 무관.
+  # 에 마운트 → central·모든 워커가 레포 한 벌 공유. named 볼륨이라 호스트 경로 무관.
   workspace_volume: jad-workspace
 
 # 브랜치를 push 하고 MR/PR 을 만들 코드 호스팅. ⚠️ 사용자 **개인** forge 토큰은 여기가
@@ -134,8 +133,10 @@ webhook:
 
 resume: { work_hours: "08:00-18:00", timezone: Asia/Seoul, nightly_drain: "01:00-05:00", reset_buffer_sec: 120 }
 
-# worker 컨테이너 기동 파라미터. ⚠️ docker_host·host_deploy_dir·workspace_volume 은
-# 위 deploy 섹션으로 옮겼다(레거시로 여기 둬도 계속 읽지만, 새 설정은 deploy 를 쓴다).
+# worker 컨테이너 기동 파라미터. ⚠️ docker_host·workspace_volume 은 위 deploy 섹션으로
+# 옮겼다(레거시로 여기 둬도 계속 읽지만, 새 설정은 deploy 를 쓴다).
+# ⚠️ run_as 는 워커의 실행 uid 이자 **주입 시크릿 tmpfs(/run/secrets)의 소유 uid** 다
+# — spawner 가 이 값에서 파생하므로 둘이 어긋날 수 없다(app/spawner.py secrets_tmpfs).
 spawn:
   image: jira-auto-dispatcher:latest
   network: jad-net

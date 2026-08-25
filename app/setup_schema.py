@@ -160,21 +160,18 @@ PROFILE_DEFAULTS: dict = {
     # 개발자 노트북 — central 도 워커도 같은 로컬 도커. 시크릿은 로컬 디렉토리(env SECRETS_DIR).
     "local": {
         "docker_host": "unix:///var/run/docker.sock",
-        "host_deploy_dir": "",
         "secrets_base_dir": "",
         "workspace_volume": "jad-workspace",
     },
     # 클라우드 VM(EC2/GCE 등) — compose 로 socket-proxy 경유(도커 소켓 직결 금지).
     "cloud_vm": {
         "docker_host": "tcp://socket-proxy:2375",
-        "host_deploy_dir": "",
         "secrets_base_dir": "/run/secrets",
         "workspace_volume": "jad-workspace",
     },
     # 사내 온프렘 서버 — cloud_vm 과 같은 형태(다른 것은 네트워크·정책이지 이 값들이 아니다).
     "onprem_server": {
         "docker_host": "tcp://socket-proxy:2375",
-        "host_deploy_dir": "",
         "secrets_base_dir": "/run/secrets",
         "workspace_volume": "jad-workspace",
     },
@@ -568,19 +565,6 @@ _DEPLOY = SchemaSection(
                 "``cloud_vm``/``onprem_server``=compose + socket-proxy 경유."
             ),
             example="local",
-        ),
-        SchemaField(
-            key="deploy.host_deploy_dir",
-            type=FieldType.STRING,
-            default="",
-            required_if=RequiredIf("deploy.profile", equals=("cloud_vm", "onprem_server")),
-            legacy_keys=("spawn.host_deploy_dir",),
-            description=(
-                "**호스트**의 배포 디렉토리 절대경로(central 컨테이너 내부 경로가 아니다). "
-                "central 이 sibling 컨테이너로 워커를 띄울 때 바인드 source 를 호스트 "
-                "docker 데몬이 해석하기 때문에 필요하다. env ``HOST_DEPLOY_DIR`` 이 우선."
-            ),
-            example="/home/<deploy-user>/deploy/jira-auto-dispatcher",
         ),
         SchemaField(
             key="deploy.docker_host",

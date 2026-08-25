@@ -226,30 +226,37 @@ secrets: { base_dir: "${SECRETS_DIR}" }
     assert "SECRETS_DIR" in str(exc.value) or "미치환" in str(exc.value)
 
 
-def test_host_deploy_dir_env_override_priority(tmp_path, monkeypatch):
+def test_legacy_host_deploy_dir_key_is_ignored_harmlessly(tmp_path, monkeypatch):
+    """제거된 host_deploy_dir 이 기존 config.yaml/env 에 남아 있어도 무해하다.
+
+    워커 마운트가 전부 named 볼륨이 되어(나머지는 스폰 시 주입) 호스트 경로가 필요
+    없어졌으므로 이 키는 사라졌다. 기존 배포를 깨지 않도록 **조용히 무시**한다
+    (설치 검증 `python -m app.setup validate` 는 "선언되지 않은 항목" 경고로 알려 준다).
+    """
     monkeypatch.setenv("SECRETS_DIR", "/run/secrets")
-    monkeypatch.setenv("HOST_DEPLOY_DIR", "/home/<deploy-user>/deploy/jad")
+    monkeypatch.setenv("HOST_DEPLOY_DIR", "/home/deploy/jad")
     cfg = C.load_config(_write(tmp_path, """
 role: central
 jira: { base_url: https://x, project: PROJ, watcher_token_file: t }
 secrets: { base_dir: "${SECRETS_DIR}" }
 spawn: { host_deploy_dir: "/from/yaml" }
+deploy: { host_deploy_dir: "/also/from/yaml" }
 """))
-    # env HOST_DEPLOY_DIR 폴백 우선 — yaml 값을 덮는다.
-    assert cfg.spawn.host_deploy_dir == "/home/<deploy-user>/deploy/jad"
+    assert not hasattr(cfg.spawn, "host_deploy_dir")
+    assert not hasattr(cfg.deploy, "host_deploy_dir")
+    # 나머지 값은 정상 로드된다(부팅이 깨지지 않는다).
+    assert cfg.secrets.base_dir == "/run/secrets"
 
 
-def test_host_deploy_dir_unresolved_token_becomes_empty(tmp_path, monkeypatch):
+def test_load_config_records_source_path_for_worker_injection(tmp_path, monkeypatch):
+    """spawner 가 워커에 주입할 **config 원문** 위치를 설정 자신이 들고 있다."""
     monkeypatch.setenv("SECRETS_DIR", "/run/secrets")
-    monkeypatch.delenv("HOST_DEPLOY_DIR", raising=False)
-    cfg = C.load_config(_write(tmp_path, """
+    path = _write(tmp_path, """
 role: central
 jira: { base_url: https://x, project: PROJ, watcher_token_file: t }
 secrets: { base_dir: "${SECRETS_DIR}" }
-spawn: { host_deploy_dir: "${HOST_DEPLOY_DIR}" }
-"""))
-    # env 미설정으로 토큰 미치환 → 빈 값(폴백). broken bind 방지.
-    assert cfg.spawn.host_deploy_dir == ""
+""")
+    assert C.load_config(path).config_path == path
 
 
 def test_repo_resolution_defaults_and_override(tmp_path, monkeypatch):
