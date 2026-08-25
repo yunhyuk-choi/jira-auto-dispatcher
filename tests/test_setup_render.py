@@ -118,12 +118,42 @@ def test_unanswered_list_is_reported(rendered):
 # --- 템플릿에 자리가 없는 키(삽입) ----------------------------------------------
 
 
-def test_missing_key_is_inserted_into_its_section(rendered):
-    """jira.watcher_email 은 예시 파일에 없다 — jira 섹션 안에 들어가야 한다."""
-    assert "jira.watcher_email" in rendered.inserted
-    data = _loaded(rendered.text)
-    assert data["jira"]["watcher_email"] == "bot@acme.example"
-    line = next(ln for ln in rendered.text.split("\n") if "watcher_email:" in ln)
+def test_template_has_a_slot_for_every_schema_key(rendered):
+    """예시 파일에 자리가 없는 스키마 항목이 없어야 한다(= 삽입 경로를 탈 일이 없다).
+
+    ⚠️ 드리프트 방지용이다. 필수 항목을 스키마에만 추가하고 예시 파일에 빠뜨리면 설치자는
+    "무엇을 채워야 하는지" 안내(=주석)를 영영 못 본다.
+    """
+    assert rendered.inserted == [], (
+        "예시 파일에 자리가 없어 새로 삽입된 항목: " + ", ".join(rendered.inserted)
+    )
+
+
+def test_watcher_email_lands_in_the_real_template(rendered):
+    """필수로 올라간 항목이 실제 예시 파일에서도 채워진다(Basic auth 는 이메일+토큰 쌍)."""
+    assert "jira.watcher_email" in rendered.replaced
+    assert _loaded(rendered.text)["jira"]["watcher_email"] == "bot@acme.example"
+
+
+def test_missing_key_is_inserted_into_its_section():
+    """자리가 없으면 그 **섹션 안에** 넣는다 — 손자 블록으로 들어가면 안 된다.
+
+    (실제 예시 파일에는 모든 항목의 자리가 있으므로 축소 템플릿으로 이 경로만 본다.)
+    """
+    template = "\n".join([
+        "jira:",
+        "  base_url: https://x",
+        "  project: X",
+        "  custom_fields:",
+        "    due_date: duedate",
+        "",
+    ])
+    out = R.render_config({"jira.project": "ACME",
+                           "jira.watcher_email": "bot@acme.example"},
+                          template_text=template)
+    assert "jira.watcher_email" in out.inserted
+    assert _loaded(out.text)["jira"]["watcher_email"] == "bot@acme.example"
+    line = next(ln for ln in out.text.split("\n") if "watcher_email:" in ln)
     assert line.startswith("  ")          # jira 섹션의 직계 자식 들여쓰기
     assert not line.startswith("    ")    # 손자(custom_fields 안)로 들어가면 안 된다
 

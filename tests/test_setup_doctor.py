@@ -319,11 +319,20 @@ class FakeHttp:
         return self.response
 
 
-def _cfg_with_forge_secret(tmp_path, kind="gitlab", token="glpat-TOPSECRETTOKEN"):
+def _cfg_with_forge_secret(tmp_path, kind="gitlab", token="glpat-TOPSECRETTOKEN",
+                           dlc_meta_url=None):
+    """forge 토큰이 놓인 설정.
+
+    ``dlc_meta_url`` 은 **토큰이 나갈 곳**을 정하는 근거다(forge.base_url 이 비어 있을 때
+    로더가 여기서 유도한다 — app/forge.resolve_base_url). 기본은 make_cfg 의 중립 호스트.
+    """
     root = str(tmp_path)
     write_secret(root, "service/forge-token", token)
     write_secret(root, "service/jira-token")
-    return make_cfg(deploy={"secrets_base_dir": root}, forge={"kind": kind}), root
+    over = {"deploy": {"secrets_base_dir": root}, "forge": {"kind": kind}}
+    if dlc_meta_url is not None:
+        over["run"] = {"dlc_meta_repo_url": dlc_meta_url}
+    return make_cfg(**over), root
 
 
 def test_forge_token_gitlab_success(tmp_path):
@@ -336,7 +345,13 @@ def test_forge_token_gitlab_success(tmp_path):
 
 
 def test_forge_token_github_uses_bearer_and_saas_endpoint(tmp_path):
-    cfg, root = _cfg_with_forge_secret(tmp_path, kind="github")
+    """레포 URL 이 github.com 이면 SaaS 확인 → base_url 없이 api.github.com 을 쓴다.
+
+    (``https://github.com`` 을 base_url 로 채워 버리면 오히려 틀린다 — GitHub SaaS 의
+    API 호스트는 ``api.github.com`` 이다.)
+    """
+    cfg, root = _cfg_with_forge_secret(tmp_path, kind="github",
+                                       dlc_meta_url="https://github.com/acme/dlc-meta.git")
     http = FakeHttp(FakeResponse(payload={"login": "svc-bot"},
                                  headers={"x-oauth-scopes": "repo, read:org"}))
     r = D.check_forge_token(cfg, project_dir=root, http=http)
@@ -599,3 +614,63 @@ def test_results_to_dict_ok_flag_ignores_warn_and_skip():
 def test_format_results_is_readable():
     text = D.format_results([D.CheckResult("a", D.STATUS_FAIL, "깨졌다", "이렇게 고쳐라")])
     assert "[FAIL] a — 깨졌다" in text and "이렇게 고쳐라" in text
+
+
+# ---------------------------------------------------------------------------
+# ⚠️ forge 토큰이 **엉뚱한 곳으로 나가지 않는가** (실제 보안 문제)
+# ---------------------------------------------------------------------------
+
+
+def test_forge_token_derives_base_url_from_the_repo_url(tmp_path):
+    """base_url 이 비어도 사내 레포 URL 이 있으면 그 호스트로 간다(gitlab.com 아님)."""
+    cfg, root = _cfg_with_forge_secret(
+        tmp_path, dlc_meta_url="https://gitlab.corp.example.com/g/dlc-meta.git")
+    http = FakeHttp()
+    r = D.check_forge_token(cfg, project_dir=root, http=http)
+    assert r.status == D.STATUS_PASS
+    url, _headers = http.calls[0]
+    assert url == "https://gitlab.corp.example.com/api/v4/user"
+    assert "gitlab.com" not in url
+
+
+def test_forge_token_skips_instead_of_sending_the_token_to_saas(tmp_path):
+    """⚠️ 갈 곳을 모르면 **요청 자체를 하지 않는다** — 사내 PAT 의 외부 전송 방지."""
+    cfg, root = _cfg_with_forge_secret(tmp_path, dlc_meta_url="")
+    cfg.run.docs_repo_url = ""
+    cfg.forge.base_url = ""
+    cfg.forge.base_url_source = ""
+    http = FakeHttp()
+    r = D.check_forge_token(cfg, project_dir=root, http=http)
+    assert r.status == D.STATUS_SKIP
+    assert http.calls == []                      # 토큰이 어디로도 나가지 않았다
+    assert "forge.base_url" in r.hint
+
+
+def test_forge_token_skips_when_self_hosted_url_has_no_http_scheme(tmp_path):
+    """ssh 로만 적힌 사내 레포 — self-hosted 신호는 있지만 주소를 모른다 → 보내지 않는다."""
+    cfg, root = _cfg_with_forge_secret(
+        tmp_path, dlc_meta_url="git@gitlab.corp.example.com:g/dlc-meta.git")
+    cfg.run.docs_repo_url = ""
+    http = FakeHttp()
+    r = D.check_forge_token(cfg, project_dir=root, http=http)
+    assert r.status == D.STATUS_SKIP
+    assert http.calls == []
+    assert "gitlab.corp.example.com" in r.message
+
+
+def test_forge_token_uses_gitlab_saas_when_the_repo_url_says_so(tmp_path):
+    cfg, root = _cfg_with_forge_secret(
+        tmp_path, dlc_meta_url="https://gitlab.com/acme/dlc-meta.git")
+    http = FakeHttp()
+    r = D.check_forge_token(cfg, project_dir=root, http=http)
+    assert r.status == D.STATUS_PASS
+    assert http.calls[0][0] == "https://gitlab.com/api/v4/user"
+
+
+def test_forge_token_skip_message_never_leaks_the_token(tmp_path):
+    token = "glpat-TOPSECRETTOKEN"
+    cfg, root = _cfg_with_forge_secret(tmp_path, token=token, dlc_meta_url="")
+    cfg.run.docs_repo_url = ""
+    cfg.forge.base_url_source = ""
+    r = D.check_forge_token(cfg, project_dir=root, http=FakeHttp())
+    assert token not in (r.message + r.hint)

@@ -88,6 +88,24 @@ SEARCH_JQL_PATH = "/rest/api/3/search/jql"
 #: 현재 자격의 계정 조회 경로(설정 진단용 읽기 — :meth:`JiraClient.myself`).
 MYSELF_PATH = "/rest/api/3/myself"
 
+# --- 설치 시점 **조회(discovery)** 경로 --------------------------------------
+# 인스턴스마다 다른 값(커스텀필드 id·상태·전이·라벨)을 사람이 타이핑하지 않게, 설치
+# 시점에 **그 인스턴스를 실제로 조회해** 존재하는 값만 고르게 하려고 쓴다. 전부 부작용
+# 없는 읽기다(:mod:`app.setup_discover` 가 소비).
+
+#: 필드 목록(시스템 필드 + 커스텀필드). 커스텀필드 id 는 인스턴스마다 다르다.
+FIELDS_PATH = "/rest/api/3/field"
+
+#: 인스턴스 **전역** 라벨 목록(startAt 페이지네이션).
+LABELS_PATH = "/rest/api/3/label"
+
+#: 프로젝트의 **이슈 타입별** 상태 목록.
+PROJECT_STATUSES_PATH = "/rest/api/3/project/{key}/statuses"
+
+#: :meth:`JiraClient.list_labels` 의 한 페이지 크기·최대 페이지 수(무한 루프 방어).
+LABELS_PAGE_SIZE = 1000
+LABELS_MAX_PAGES = 20
+
 #: 이 경로가 **없을 때** Jira 가 내는 상태코드들(= Server/DC 강한 신호).
 _ENDPOINT_ABSENT_STATUS = (404, 405, 410)
 
@@ -298,6 +316,30 @@ class JiraClient:
         except ValueError:
             return {}
 
+    def _json_array(self, resp: requests.Response, path: str) -> list:
+        """응답이 **JSON 배열**이어야 하는 경로용(``/field`` 등).
+
+        Cloud 전용 경로에서 Server/DC 나 로그인 리다이렉트는 배열이 아닌 것을 돌려준다.
+        그때 조용히 ``[]`` 를 주면 "이 인스턴스엔 커스텀필드가 없다"로 오인돼 설치자가
+        엉뚱한 곳을 뒤지게 되므로, 알아볼 수 없는 형태는 **에러로 올린다**.
+        """
+        if resp.status_code == 204 or not (getattr(resp, "content", b"") or b"").strip():
+            return []
+        try:
+            payload = resp.json()
+        except ValueError:
+            payload = None
+        if isinstance(payload, list):
+            return payload
+        snippet = (getattr(resp, "text", "") or "")[:200]
+        raise JiraError(
+            f"{path} 응답이 JSON 배열이 아닙니다 — 이 경로는 **Jira Cloud 전용**입니다"
+            f"(Server/Data Center 이거나 인증이 로그인 페이지로 리다이렉트됐을 수 "
+            f"있습니다). base_url={self.base_url!r} "
+            f"HTTP {getattr(resp, 'status_code', '?')} 응답 앞부분={snippet!r}",
+            status_code=getattr(resp, "status_code", None),
+        )
+
     # ------------------------------------------------------------------
     # 자격 확인(설정 진단 전용 — 이슈를 건드리지 않는 읽기)
     # ------------------------------------------------------------------
@@ -313,6 +355,63 @@ class JiraClient:
             JiraError: 401/403(자격 문제) · 404 등(경로 부재 → Server/DC 신호) · 네트워크.
         """
         return self._json_or_empty(self._request("GET", MYSELF_PATH))
+
+    # ------------------------------------------------------------------
+    # 인스턴스 조회(discovery) — 전부 **부작용 없는 읽기**
+    # ------------------------------------------------------------------
+    # 커스텀필드 id·상태·전이 id 는 인스턴스마다 다르다. 설치자가 눈에 보이는 표시명을
+    # 타이핑하면 API 의 name/id 와 어긋나고, 그 어긋남은 폴러가 **조용히 아무것도 못 찾는**
+    # 형태로 드러난다. 그래서 아래 메서드로 **실제 존재하는 값만** 고르게 한다
+    # (:mod:`app.setup_discover` 가 소비. 운영 경로는 이 메서드들을 쓰지 않는다).
+
+    def list_fields(self) -> list:
+        """필드 목록 GET (:data:`FIELDS_PATH`) — 시스템 필드 + 커스텀필드 **전부**.
+
+        원 응답(배열)을 그대로 돌려준다. 각 원소의 관심 키는 ``id``·``name``·``custom``·
+        ``schema``(``{"type": "date", ...}``). ``customfield_10015`` 같은 id 를 눈으로
+        찾지 않고 **이름으로 후보를 추리는** 것이 이 조회의 목적이다.
+        """
+        return self._json_array(self._request("GET", FIELDS_PATH), FIELDS_PATH)
+
+    def project_statuses(self, project_key: str) -> list:
+        """프로젝트의 **이슈 타입별** 상태 GET (:data:`PROJECT_STATUSES_PATH`).
+
+        원 응답(배열)을 그대로 돌려준다. 각 원소는 이슈 타입 하나이며 ``statuses`` 에
+        그 타입이 가질 수 있는 상태들이 ``{id, name, statusCategory}`` 로 들어 있다.
+        트리거 상태·취소 상태는 **여기 있는 이름 중에서만** 골라야 한다.
+        """
+        path = PROJECT_STATUSES_PATH.format(key=project_key)
+        return self._json_array(self._request("GET", path), path)
+
+    def list_labels(self, *, page_size: int = LABELS_PAGE_SIZE,
+                    max_pages: int = LABELS_MAX_PAGES) -> dict:
+        """인스턴스 **전역** 라벨 GET (:data:`LABELS_PATH`) — startAt 페이지네이션.
+
+        Returns:
+            ``{"labels": [...], "total": N, "truncated": bool}``. ``truncated`` 는
+            ``max_pages`` 에서 끊겼다는 뜻이다(라벨이 수만 개인 인스턴스가 있다).
+
+        ⚠️ 이 조회는 **참고용**이다. Jira 라벨은 미리 만들어 두지 않아도 티켓에 입력하는
+        순간 생성되므로, "이 라벨이 목록에 없다"는 오류가 아니다 — 설치자에게 정말
+        필요한 정보는 *그 라벨을 붙이면 자동화에서 제외된다*는 규칙 쪽이다.
+        """
+        labels: list = []
+        total = 0
+        truncated = False
+        start_at = 0
+        for _ in range(max(1, int(max_pages))):
+            resp = self._request("GET", LABELS_PATH,
+                                 params={"startAt": start_at, "maxResults": page_size})
+            payload = self._json_or_empty(resp)
+            values = payload.get("values") or []
+            labels.extend(str(v) for v in values)
+            total = int(payload.get("total") or len(labels))
+            if payload.get("isLast") is True or not values or len(labels) >= total:
+                break
+            start_at += len(values)
+        else:
+            truncated = True
+        return {"labels": labels, "total": total, "truncated": truncated}
 
     # ------------------------------------------------------------------
     # 이슈 읽기/쓰기

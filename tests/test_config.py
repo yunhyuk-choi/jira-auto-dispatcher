@@ -390,3 +390,104 @@ def test_read_secret(tmp_path):
     (tmp_path / "sub" / "token").write_text("abc123\n", encoding="utf-8")
     assert C.read_secret(str(tmp_path), "sub/token") == "abc123"
     assert C.read_secret(str(tmp_path), "sub/missing") is None
+
+
+# ---------------------------------------------------------------------------
+# 상태·전이의 {id, name} — **id 와 name 을 함께** 보존하되 소비처 타입은 안 바꾼다
+# ---------------------------------------------------------------------------
+
+
+def test_named_refs_keep_names_for_consumers_and_ids_on_the_side(tmp_path, monkeypatch):
+    monkeypatch.setenv("SECRETS_DIR", "/tmp/jad-secrets")
+    cfg = C.load_config(_write(tmp_path, """
+role: central
+jira:
+  base_url: https://x
+  project: PROJ
+  watcher_token_file: t
+  trigger_statuses: [{"id": "10000", "name": "해야 할 일"}, "선택 대기"]
+  cancel_statuses: [{"id": "10002", "name": "취소됨"}]
+secrets: { base_dir: "${SECRETS_DIR}" }
+"""))
+    # 소비처(폴러·워처·웹훅)는 예전 그대로 **이름 목록**을 본다.
+    assert cfg.jira.trigger_statuses == ["해야 할 일", "선택 대기"]
+    assert cfg.match.statuses == ["해야 할 일", "선택 대기"]     # 레거시 미러도 동일
+    assert cfg.jira.cancel_statuses == ["취소됨"]
+    # id 는 곁에 남아 진단이 짝을 검증할 수 있다.
+    assert cfg.jira.status_ids == {"취소됨": "10002", "해야 할 일": "10000"}
+
+
+def test_plain_string_statuses_still_work(tmp_path, monkeypatch):
+    """하위호환 — 옛 설정은 아무것도 안 바꿔도 오늘과 동일하게 읽힌다."""
+    monkeypatch.setenv("SECRETS_DIR", "/tmp/jad-secrets")
+    cfg = C.load_config(_write(tmp_path, """
+role: central
+jira: { base_url: https://x, project: PROJ, watcher_token_file: t }
+match: { statuses: ["해야 할 일"], cancel_statuses: ["취소됨"] }
+secrets: { base_dir: "${SECRETS_DIR}" }
+"""))
+    assert cfg.jira.trigger_statuses == ["해야 할 일"]
+    assert cfg.jira.status_ids == {}
+
+
+def test_done_transition_id_comes_from_the_single_named_ref(tmp_path, monkeypatch):
+    """discover 가 적어 준 {id, name} 하나면 전이 id 를 따로 관리하지 않아도 된다."""
+    monkeypatch.setenv("SECRETS_DIR", "/tmp/jad-secrets")
+    cfg = C.load_config(_write(tmp_path, """
+role: central
+jira:
+  base_url: https://x
+  project: PROJ
+  watcher_token_file: t
+  done_transition_names: [{"id": "41", "name": "완료"}]
+secrets: { base_dir: "${SECRETS_DIR}" }
+"""))
+    assert cfg.jira.done_transition_id == "41"
+    assert cfg.jira.done_transition_names == ["완료"]
+    assert cfg.jira.done_transition_ids == {"완료": "41"}
+
+
+def test_explicit_done_transition_id_wins_over_the_named_ref(tmp_path, monkeypatch):
+    monkeypatch.setenv("SECRETS_DIR", "/tmp/jad-secrets")
+    cfg = C.load_config(_write(tmp_path, """
+role: central
+jira:
+  base_url: https://x
+  project: PROJ
+  watcher_token_file: t
+  done_transition_id: "99"
+  done_transition_names: [{"id": "41", "name": "완료"}]
+secrets: { base_dir: "${SECRETS_DIR}" }
+"""))
+    assert cfg.jira.done_transition_id == "99"
+
+
+def test_ambiguous_named_transition_ids_are_left_to_name_matching(tmp_path, monkeypatch):
+    """id 가 여럿이면 어느 것이 '완료'인지 모른다 — 런타임 이름 매칭에 맡긴다."""
+    monkeypatch.setenv("SECRETS_DIR", "/tmp/jad-secrets")
+    cfg = C.load_config(_write(tmp_path, """
+role: central
+jira:
+  base_url: https://x
+  project: PROJ
+  watcher_token_file: t
+  done_transition_names: [{"id": "41", "name": "완료"}, {"id": "42", "name": "Done"}]
+secrets: { base_dir: "${SECRETS_DIR}" }
+"""))
+    assert cfg.jira.done_transition_id == ""
+    assert cfg.jira.done_transition_names == ["완료", "Done"]
+
+
+def test_named_ref_without_a_name_is_dropped(tmp_path, monkeypatch):
+    """이름이 없으면 JQL 에도 미러에도 실을 수 없다 — 조용히 버린다(검증기가 먼저 막는다)."""
+    monkeypatch.setenv("SECRETS_DIR", "/tmp/jad-secrets")
+    cfg = C.load_config(_write(tmp_path, """
+role: central
+jira:
+  base_url: https://x
+  project: PROJ
+  watcher_token_file: t
+  trigger_statuses: [{"id": "10000"}, "해야 할 일"]
+secrets: { base_dir: "${SECRETS_DIR}" }
+"""))
+    assert cfg.jira.trigger_statuses == ["해야 할 일"]

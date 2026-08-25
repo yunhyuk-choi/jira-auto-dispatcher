@@ -431,3 +431,62 @@ def test_repr_does_not_leak_token():
     c = JiraClient("https://your-org.atlassian.net", "you@example.com", "s3cr3t-token")
     assert "s3cr3t-token" not in repr(c)
     assert "token=***" in repr(c)
+
+
+# ---------------------------------------------------------------------------
+# 설치 시점 조회(discovery) — 부작용 없는 읽기
+# ---------------------------------------------------------------------------
+
+
+def test_list_fields_returns_the_array():
+    def responder(method, url, kwargs):
+        assert method == "GET" and url.endswith("/rest/api/3/field")
+        return FakeResponse(200, [{"id": "duedate", "name": "Due date"}])
+
+    assert make_client(responder).list_fields() == [{"id": "duedate", "name": "Due date"}]
+
+
+def test_project_statuses_uses_the_project_key():
+    seen = {}
+
+    def responder(method, url, kwargs):
+        seen["url"] = url
+        return FakeResponse(200, [{"id": "1", "name": "작업", "statuses": []}])
+
+    make_client(responder).project_statuses("ACME")
+    assert seen["url"].endswith("/rest/api/3/project/ACME/statuses")
+
+
+def test_array_endpoint_refuses_a_non_array_payload():
+    """Server/DC·로그인 리다이렉트를 '필드가 없다'로 오인하지 않는다(조용한 실패 금지)."""
+    def responder(method, url, kwargs):
+        return FakeResponse(200, None, text="<html>login</html>")
+
+    with pytest.raises(JiraError) as exc:
+        make_client(responder).list_fields()
+    assert "Jira Cloud 전용" in str(exc.value)
+
+
+def test_list_labels_follows_start_at_pagination():
+    pages = [
+        {"values": ["a", "b"], "total": 3, "isLast": False, "startAt": 0},
+        {"values": ["c"], "total": 3, "isLast": True, "startAt": 2},
+    ]
+    seen = []
+
+    def responder(method, url, kwargs):
+        seen.append(kwargs.get("params", {}).get("startAt"))
+        return FakeResponse(200, pages[len(seen) - 1])
+
+    out = make_client(responder).list_labels()
+    assert out == {"labels": ["a", "b", "c"], "total": 3, "truncated": False}
+    assert seen == [0, 2]
+
+
+def test_list_labels_stops_and_reports_truncation():
+    """라벨이 수만 개인 인스턴스가 있다 — 무한히 긁지 않고 잘렸다고 말한다."""
+    def responder(method, url, kwargs):
+        return FakeResponse(200, {"values": ["x"], "total": 999999, "isLast": False})
+
+    out = make_client(responder).list_labels(max_pages=3)
+    assert out["truncated"] is True and len(out["labels"]) == 3

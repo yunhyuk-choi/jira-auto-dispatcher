@@ -15,6 +15,9 @@
       I/O·전역 상태·부작용이 없다. 그 선언을 **강제**하는 쪽은 따로 있다:
       :mod:`app.setup_validate`(검증) · :mod:`app.setup_render`(config.yaml 생성) ·
       :mod:`app.setup_doctor`(실측 진단) · :mod:`app.setup`(얇은 CLI 껍데기).
+      그리고 그 앞자리에서 **답을 어디서 얻는가**를 맡는 :mod:`app.setup_discover`(조회)
+      가 있다 — 인스턴스마다 다른 값(커스텀필드 id·상태·전이)은 사람이 옮겨 적는 대신
+      실제 인스턴스를 조회해 고르게 한다.
       (대화형 온보딩 에이전트·웹 온보딩 확장은 여전히 후속이며, 그것들도 판정은
       위 라이브러리에 위임한다 — 게이트가 두 벌이 되면 반드시 갈라진다.)
 
@@ -53,6 +56,12 @@ class FieldType(str, Enum):
     ENUM = "enum"                 # choices 중 하나
     STRING_LIST = "string_list"   # 문자열 리스트(YAML 시퀀스)
     STRING_MAP = "string_map"     # 문자열→문자열 매핑(YAML 매핑)
+    #: 이름 목록이되 **id 를 함께 달 수 있는** 리스트 — 각 원소는 ``"이름"`` 또는
+    #: ``{id: "...", name: "..."}``. Jira 상태·전이가 여기 해당한다: 화면에 보이는 표시명과
+    #: API 의 id/name 이 어긋날 수 있고, JQL 은 name 으로 거는데 전이는 id 로 건다. 그래서
+    #: 설치 관문의 ``discover`` 가 **둘 다** 적어 주고, 런타임 소비처는 예전처럼 이름만
+    #: 본다. 문자열만 준 옛 설정도 그대로 읽는다(하위호환).
+    NAMED_REF_LIST = "named_ref_list"
 
 
 @dataclass(frozen=True)
@@ -344,29 +353,38 @@ _JIRA = SchemaSection(
         SchemaField(
             key="jira.watcher_email",
             type=FieldType.STRING,
-            default="",
-            description="감시 계정 이메일(Basic auth actor). 비우면 env ``JIRA_WATCHER_EMAIL`` 폴백.",
+            required=True,
+            description=(
+                "감시 계정 이메일. Jira Cloud 의 Basic auth 는 **(이메일, API 토큰) 쌍**이라 "
+                "토큰만으로는 인증되지 않는다 — 토큰을 발급받은 그 Atlassian 계정의 "
+                "이메일을 적는다. env ``JIRA_WATCHER_EMAIL`` 로 줘도 되지만, 그 경우에도 "
+                "설치 시점에는 **여기서 한 번 확인**한다(둘 다 없으면 폴러가 401 로 죽는다)."
+            ),
+            example="bot@your-org.example",
         ),
         SchemaField(
             key="jira.trigger_statuses",
-            type=FieldType.STRING_LIST,
+            type=FieldType.NAMED_REF_LIST,
             required=True,
             default=[],
             legacy_keys=("match.statuses",),
             description=(
                 "신규 착수(트리거) 상태 화이트리스트. **이 워크플로우의 상태 이름 그대로** "
-                "적는다(언어·명명 규칙이 조직마다 다르다)."
+                "적는다(언어·명명 규칙이 조직마다 다르다). ``discover`` 가 실제 존재하는 "
+                "상태를 ``{id, name}`` 으로 뽑아 주므로 손으로 타이핑하지 않는 것이 좋다 — "
+                "표시명과 API 의 name 이 어긋나면 폴러는 **조용히 아무 티켓도 못 찾는다**."
             ),
             example=["해야 할 일"],
         ),
         SchemaField(
             key="jira.cancel_statuses",
-            type=FieldType.STRING_LIST,
+            type=FieldType.NAMED_REF_LIST,
             default=["취소됨"],
             legacy_keys=("match.cancel_statuses",),
             description=(
                 "'취소' 상태 이름들. 이 상태로 들어온 티켓은 추적 잡을 즉시 취소한다. "
-                "명시적으로 빈 리스트를 주면 기능을 끈다(기본값은 하위호환 유지값)."
+                "명시적으로 빈 리스트를 주면 기능을 끈다(기본값은 하위호환 유지값). "
+                "``trigger_statuses`` 와 같이 ``{id, name}`` 형태도 받는다."
             ),
             example=["취소됨"],
         ),
@@ -413,12 +431,55 @@ _JIRA = SchemaSection(
         ),
         SchemaField(
             key="jira.done_transition_names",
-            type=FieldType.STRING_LIST,
+            type=FieldType.NAMED_REF_LIST,
             default=["완료", "Done"],
             description=(
                 "id 대신 **이름**으로 완료 전이를 식별할 때의 후보 목록. id 를 모르는 "
-                "설치자가 그대로 쓸 수 있게 하는 폴백 경로."
+                "설치자가 그대로 쓸 수 있게 하는 폴백 경로. ``{id, name}`` 형태로 주면 "
+                "``done_transition_id`` 가 비어 있을 때 그 id 를 그대로 쓴다(``discover`` "
+                "가 실측한 전이를 그 형태로 적어 준다 — 이름과 id 를 따로 관리하지 않게)."
             ),
+        ),
+    ),
+)
+
+_WEBHOOK = SchemaSection(
+    name="webhook",
+    title="Jira 웹훅 수신(선택)",
+    description=(
+        "Jira 가 이벤트를 밀어 넣는 경로(``POST /webhook/jira``). 켜면 폴링 주기를 "
+        "기다리지 않고 즉시 착수한다(폴링은 백스톱으로 남는다). ⚠️ 이 엔드포인트는 "
+        "**자율 실행의 방아쇠**라 무인증으로 열면 그대로 RCE 표면이 된다 — 그래서 수신 "
+        "토큰 참조가 없으면 엔드포인트가 503 으로 거부한다."
+    ),
+    optional=True,
+    fields=(
+        SchemaField(
+            key="webhook.enabled",
+            type=FieldType.BOOL,
+            default=True,
+            description=(
+                "웹훅 수신 엔드포인트를 열지. 끄면 폴링만으로 동작한다(기능은 그대로, "
+                "반응이 ``jira.poll_interval_sec`` 만큼 늦어질 뿐)."
+            ),
+        ),
+        SchemaField(
+            key="webhook.secret_ref",
+            type=FieldType.STRING,
+            secret_ref=True,
+            required_if=RequiredIf("webhook.enabled", truthy=True),
+            # ⚠️ 스키마 기본값을 두지 **않는다**. 파서(app/config.py)에는 하위호환용 기본
+            # 경로가 있지만, 여기에 같은 기본값을 두면 "답하지 않아도 채워진 것"이 되어
+            # 조건부 필수가 영원히 발동하지 않는다 — 그러면 토큰 없이 웹훅을 켠 설정이
+            # 게이트를 통과하고, 운영에서 503 으로만 드러난다.
+            default=None,
+            description=(
+                "Jira 웹훅 수신 토큰이 담긴 **파일의 secrets.base_dir 상대 참조**(값이 "
+                "아니다). Jira 쪽 Automation/웹훅이 헤더 ``X-Jira-Webhook-Token`` 또는 "
+                "쿼리 ``?token=`` 으로 같은 값을 보내야 하며, 상수시간 비교로 검사한다. "
+                "값은 아무 고엔트로피 문자열이면 된다(예: ``openssl rand -hex 32``)."
+            ),
+            example="service/jira-webhook",
         ),
     ),
 )
@@ -558,7 +619,7 @@ _CONSENT = SchemaSection(
 )
 
 #: 온보딩이 물어야 하는 항목 **전체**(선언 순서 = 권장 온보딩 진행 순서).
-SETUP_SCHEMA: Tuple = (_FORGE, _NOTIFIER, _JIRA, _DOCS_REPO, _DEPLOY, _CONSENT)
+SETUP_SCHEMA: Tuple = (_FORGE, _NOTIFIER, _JIRA, _WEBHOOK, _DOCS_REPO, _DEPLOY, _CONSENT)
 
 
 # ---------------------------------------------------------------------------

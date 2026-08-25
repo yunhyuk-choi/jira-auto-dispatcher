@@ -486,3 +486,118 @@ def test_notify_message_uses_pr_wording_on_github():
     assert "PR을 리뷰·머지" in msg
     # 기본(kind 미지정)은 종전 문구 그대로.
     assert "MR: " in build_message(result=result, job=job, creds=creds)
+
+
+# --- base URL 판정 — ⚠️ **토큰이 나갈 곳을 정하는 일이다** --------------------
+#
+# forge.base_url 이 비면 예전에는 요청이 곧장 SaaS(gitlab.com)로 나갔다. 사내 GitLab 을
+# 쓰는 팀이 그 값을 안 적으면 **사내 PAT 가 gitlab.com 으로 전송**됐다 — 진단 실패보다
+# 그쪽이 훨씬 나쁘다. 아래 테스트가 그 회귀를 못박는다.
+
+
+def _cfg_urls(kind="gitlab", base_url="", dlc_meta="", docs="", orchestrator=""):
+    """forge 설정 + 레포 URL 만 갖춘 최소 config 유사 객체."""
+    return SimpleNamespace(
+        forge=SimpleNamespace(kind=kind, base_url=base_url, token_ref=""),
+        run=SimpleNamespace(dlc_meta_repo_url=dlc_meta, docs_repo_url=docs,
+                            orchestrator_repo_url=orchestrator),
+    )
+
+
+@pytest.mark.parametrize("url,expected", [
+    ("https://gitlab.example.com/g/r.git", "https://gitlab.example.com"),
+    ("https://git.corp.example.com:8443/g/r.git", "https://git.corp.example.com:8443"),
+    ("https://oauth2:tok@gitlab.example.com/g/r.git", "https://gitlab.example.com"),
+    ("http://gitlab.internal/g/r.git", "http://gitlab.internal"),
+    ("git@gitlab.example.com:g/r.git", ""),        # scp 형식 — 스킴을 지어내지 않는다
+    ("ssh://git@gitlab.example.com/g/r.git", ""),  # ssh 는 API base URL 이 아니다
+    ("", ""),
+])
+def test_base_url_from_url(url, expected):
+    assert F.base_url_from_url(url) == expected
+
+
+def test_explicit_base_url_wins():
+    r = F.resolve_base_url(_cfg_urls(base_url="https://gitlab.corp.example.com/"))
+    assert r.base_url == "https://gitlab.corp.example.com"
+    assert r.source == F.SOURCE_CONFIG and r.usable
+
+
+def test_base_url_is_derived_from_the_dlc_meta_repo_url():
+    r = F.resolve_base_url(_cfg_urls(dlc_meta="https://gitlab.corp.example.com/g/m.git"))
+    assert r.base_url == "https://gitlab.corp.example.com"
+    assert r.source == F.SOURCE_DERIVED and r.origin == "run.dlc_meta_repo_url"
+
+
+def test_neutral_host_is_accepted_as_evidence():
+    """git.corp.example.com 은 forge 종류를 안 밝히지만, 토큰이 이미 그리로 나간다."""
+    r = F.resolve_base_url(_cfg_urls(dlc_meta="https://git.corp.example.com/g/m.git"))
+    assert r.base_url == "https://git.corp.example.com" and r.source == F.SOURCE_DERIVED
+
+
+def test_saas_host_is_confirmed_not_derived():
+    """⚠️ github.com 을 base_url 로 채우면 오히려 틀린다(API 는 api.github.com)."""
+    r = F.resolve_base_url(_cfg_urls(kind="github",
+                                     dlc_meta="https://github.com/acme/m.git"))
+    assert r.base_url == "" and r.source == F.SOURCE_SAAS and r.usable
+
+    r2 = F.resolve_base_url(_cfg_urls(dlc_meta="https://gitlab.com/acme/m.git"))
+    assert r2.base_url == "" and r2.source == F.SOURCE_SAAS and r2.usable
+
+
+def test_a_url_belonging_to_another_forge_is_ignored():
+    """한 배포가 여러 forge 를 섞어 쓴다 — github.com 레포가 gitlab 토큰의 근거일 리 없다."""
+    r = F.resolve_base_url(_cfg_urls(kind="gitlab",
+                                     dlc_meta="https://github.com/acme/m.git",
+                                     docs="https://gitlab.corp.example.com/g/d.git"))
+    assert r.base_url == "https://gitlab.corp.example.com"
+    assert r.origin == "run.docs_repo_url"
+
+
+def test_no_repo_url_at_all_is_not_usable():
+    """근거가 없으면 SaaS 로 떨어지지 않는다 — 부르는 쪽이 SKIP 해야 한다."""
+    r = F.resolve_base_url(_cfg_urls())
+    assert r.source == F.SOURCE_NONE and not r.usable and r.base_url == ""
+
+
+def test_ssh_only_self_hosted_url_is_unresolved_not_saas():
+    r = F.resolve_base_url(_cfg_urls(dlc_meta="git@gitlab.corp.example.com:g/m.git"))
+    assert r.source == F.SOURCE_UNRESOLVED and not r.usable
+    assert r.host == "gitlab.corp.example.com"
+
+
+def test_orchestrator_repo_url_is_not_evidence():
+    """공개 프레임워크 레포는 고정 리터럴(github.com)이라 조직의 forge 증거가 아니다.
+
+    이걸 근거로 삼으면 GitHub Enterprise 배포가 'SaaS 확인됨'으로 오판된다.
+    """
+    r = F.resolve_base_url(_cfg_urls(
+        kind="github", orchestrator="https://github.com/yunhyuk-choi/ai-dlc-orchestrator.git"))
+    assert r.source == F.SOURCE_NONE and not r.usable
+
+
+def test_loader_fills_base_url_from_repo_url(tmp_path, monkeypatch):
+    """실제 파서가 이 판정을 설정에 반영한다(+근거를 남긴다)."""
+    monkeypatch.setenv("SECRETS_DIR", "/run/secrets")
+    cfg = C.load_config_from_dict({
+        "role": "central",
+        "jira": {"base_url": "https://x", "project": "P", "watcher_token_file": "t"},
+        "secrets": {"base_dir": "${SECRETS_DIR}"},
+        "forge": {"kind": "gitlab"},
+        "run": {"dlc_meta_repo_url": "https://gitlab.corp.example.com/g/m.git"},
+    })
+    assert cfg.forge.base_url == "https://gitlab.corp.example.com"
+    assert cfg.forge.base_url_source == F.SOURCE_DERIVED
+    assert cfg.forge.base_url_origin == "run.dlc_meta_repo_url"
+
+
+def test_loader_leaves_saas_base_url_empty(monkeypatch):
+    monkeypatch.setenv("SECRETS_DIR", "/run/secrets")
+    cfg = C.load_config_from_dict({
+        "role": "central",
+        "jira": {"base_url": "https://x", "project": "P", "watcher_token_file": "t"},
+        "secrets": {"base_dir": "${SECRETS_DIR}"},
+        "forge": {"kind": "github"},
+        "run": {"dlc_meta_repo_url": "https://github.com/acme/m.git"},
+    })
+    assert cfg.forge.base_url == "" and cfg.forge.base_url_source == F.SOURCE_SAAS

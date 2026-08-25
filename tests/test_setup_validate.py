@@ -21,8 +21,10 @@ GOOD = {
     "forge": {"kind": "gitlab", "token_ref": "service/forge-token"},
     "jira": {"base_url": "https://acme.atlassian.net", "project": "ACME",
              "trigger_statuses": ["To Do"],
-             "watcher_token_file": "service/jira-token"},
+             "watcher_token_file": "service/jira-token",
+             "watcher_email": "bot@acme.example"},
     "notifier": {"provider": "none"},
+    "webhook": {"enabled": True, "secret_ref": "service/jira-webhook"},
 }
 
 
@@ -57,7 +59,9 @@ def test_nested_and_dotted_answers_are_equivalent():
               "jira.base_url": "https://acme.atlassian.net", "jira.project": "ACME",
               "jira.trigger_statuses": ["To Do"],
               "jira.watcher_token_file": "service/jira-token",
-              "notifier.provider": "none"}
+              "jira.watcher_email": "bot@acme.example",
+              "notifier.provider": "none",
+              "webhook.enabled": True, "webhook.secret_ref": "service/jira-webhook"}
     assert V.validate_answers(dotted).ok
     assert V.validate_answers(dotted).explicit == V.validate_answers(GOOD).explicit
 
@@ -281,3 +285,75 @@ def test_defaults_are_copied_not_shared():
     a.values["jira.cancel_statuses"].append("오염")
     b = V.validate_answers(GOOD)
     assert "오염" not in b.values["jira.cancel_statuses"]
+
+
+# --- 상태·전이의 {id, name} 형태(NAMED_REF_LIST) --------------------------------
+#
+# 화면 표시명과 API 의 name/id 가 어긋나는 것이 이 시스템에서 반복된 오설정이다.
+# discover 가 id 를 함께 적어 주므로 검증기도 그 형태를 받아야 한다(문자열도 계속).
+
+
+def test_named_ref_list_accepts_plain_names_and_id_name_pairs():
+    ok = V.validate_answers(_merged(jira={
+        "trigger_statuses": [{"id": "10000", "name": "해야 할 일"}, "선택 대기"],
+        "cancel_statuses": [{"name": "취소됨"}],
+        "done_transition_names": [{"id": "41", "name": "완료"}],
+    }))
+    assert ok.ok, ok.format_text()
+
+
+@pytest.mark.parametrize("value,reason", [
+    ([{"id": "10000"}], "name 이 없다"),
+    ([{"id": "10000", "name": ""}], "name 이 비었다"),
+    ([{"id": 10000, "name": "해야 할 일"}], "id 가 문자열이 아니다"),
+    ([{"name": "해야 할 일", "categoy": "new"}], "모르는 키(오타)"),
+    ([123], "문자열도 매핑도 아니다"),
+    ("해야 할 일", "목록이 아니다"),
+])
+def test_named_ref_list_rejects_malformed_entries(value, reason):
+    result = V.validate_answers(_merged(jira={"trigger_statuses": value}))
+    assert V.CODE_BAD_TYPE in _codes(result, "jira.trigger_statuses"), reason
+
+
+# --- 웹훅 수신 토큰(조건부 필수) -------------------------------------------------
+
+
+def test_webhook_secret_ref_is_required_while_the_endpoint_is_on():
+    """⚠️ 참조가 없으면 엔드포인트가 503 으로 거부한다 — 설치 시점에 잡는다."""
+    answers = {k: dict(v) for k, v in GOOD.items()}
+    answers["webhook"] = {"enabled": True}
+    result = V.validate_answers(answers)
+    assert V.CODE_MISSING_REQUIRED_IF in _codes(result, "webhook.secret_ref")
+    assert not result.ok
+
+
+def test_webhook_secret_ref_not_required_when_the_endpoint_is_off():
+    answers = {k: dict(v) for k, v in GOOD.items()}
+    answers["webhook"] = {"enabled": False}
+    assert V.validate_answers(answers).ok
+
+
+def test_webhook_default_is_on_so_the_secret_is_asked_for():
+    """webhook 섹션을 통째로 빼도 기본값(enabled=true)이라 참조를 묻는다."""
+    answers = {k: dict(v) for k, v in GOOD.items() if k != "webhook"}
+    result = V.validate_answers(answers)
+    assert V.CODE_MISSING_REQUIRED_IF in _codes(result, "webhook.secret_ref")
+
+
+def test_webhook_secret_value_pasted_into_the_reference_is_refused():
+    answers = {k: dict(v) for k, v in GOOD.items()}
+    answers["webhook"] = {"enabled": True, "secret_ref": "https://hooks.example/abc"}
+    result = V.validate_answers(answers)
+    assert V.CODE_SECRET_VALUE in _codes(result, "webhook.secret_ref")
+    assert "hooks.example" not in result.format_text()   # 값은 출력에 싣지 않는다
+
+
+# --- 감시 계정 이메일(필수) -------------------------------------------------------
+
+
+def test_watcher_email_is_required():
+    """Basic auth 는 (이메일, 토큰) 쌍이다 — 토큰만 물으면 폴러가 401 로 죽는다."""
+    answers = {k: dict(v) for k, v in GOOD.items()}
+    answers["jira"].pop("watcher_email")
+    result = V.validate_answers(answers)
+    assert V.CODE_MISSING_REQUIRED in _codes(result, "jira.watcher_email")

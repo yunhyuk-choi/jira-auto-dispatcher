@@ -298,6 +298,33 @@ def is_empty(value: Any) -> bool:
     return False
 
 
+#: ``{id, name}`` 매핑에서 허용하는 키. 그 밖의 키는 오타이거나 다른 스키마의 값이다.
+_NAMED_REF_KEYS = frozenset({"id", "name"})
+
+
+def _named_ref_error(item: Any) -> Optional[str]:
+    """:data:`app.setup_schema.FieldType.NAMED_REF_LIST` 원소 하나의 문제, 없으면 None.
+
+    ``"완료"`` 처럼 이름만 줘도 되고(하위호환), ``{"id": "41", "name": "완료"}`` 처럼
+    id 를 함께 줘도 된다. **name 은 언제나 필요하다** — 이름이 없으면 JQL 에도 레거시
+    ``match.*`` 미러에도 실을 수 없고, 파서가 그 항목을 조용히 버린다.
+    """
+    if isinstance(item, str):
+        return None
+    if isinstance(item, Mapping):
+        unknown = sorted(set(item) - _NAMED_REF_KEYS)
+        if unknown:
+            return f"매핑에 모르는 키가 있습니다: {', '.join(unknown)} (허용: id, name)"
+        name = item.get("name")
+        if not isinstance(name, str) or not name.strip():
+            return "매핑 항목에는 비어 있지 않은 문자열 name 이 필요합니다"
+        if "id" in item and not isinstance(item.get("id"), str):
+            return f"id 는 문자열이어야 합니다(받은 타입: {type(item.get('id')).__name__})"
+        return None
+    return (f"원소는 이름 문자열이거나 {{id, name}} 매핑이어야 합니다"
+            f"(받은 타입: {type(item).__name__})")
+
+
 def _type_error(f: S.SchemaField, value: Any) -> Optional[str]:
     """선언 타입과 맞지 않으면 사람이 읽는 이유, 맞으면 None."""
     t = f.type
@@ -324,6 +351,15 @@ def _type_error(f: S.SchemaField, value: Any) -> Optional[str]:
         bad = [v for v in value if not isinstance(v, str)]
         if bad:
             return f"목록의 원소는 전부 문자열이어야 합니다({len(bad)}개가 아닙니다)"
+        return None
+    if t is S.FieldType.NAMED_REF_LIST:
+        if not isinstance(value, (list, tuple)):
+            return (f"목록이어야 합니다 — 원소는 이름 문자열이거나 {{id, name}} 매핑입니다"
+                    f"(받은 타입: {type(value).__name__})")
+        for item in value:
+            reason = _named_ref_error(item)
+            if reason:
+                return reason
         return None
     if t is S.FieldType.STRING_MAP:
         if not isinstance(value, Mapping):

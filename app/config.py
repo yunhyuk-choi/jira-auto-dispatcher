@@ -88,8 +88,15 @@ class ForgeConfig:
     """
 
     kind: str = "gitlab"     # gitlab | github
-    base_url: str = ""       # self-hosted forge base URL(비우면 SaaS 기본)
+    base_url: str = ""       # self-hosted forge base URL(비우면 SaaS 기본 또는 판단 불가)
     token_ref: str = ""      # secrets.base_dir 상대 참조(값 아님)
+    # --- base_url 판정의 근거(로더가 채운다 — :func:`app.forge.resolve_base_url`) ---
+    # ⚠️ base_url 을 비워 둔 사내 forge 배포에서는 예전에 요청이 곧장 SaaS 로 나갔다
+    # (= 사내 PAT 가 gitlab.com 으로 전송됐다). 이제 로더가 설정된 레포 URL 에서 base_url
+    # 을 유도하고, 유도조차 못 하면 **비운 채로 근거만** 남긴다 — 부르는 쪽(setup_doctor)
+    # 이 그 근거를 보고 "SaaS 로 보내느니 검사를 건너뛴다"를 판단한다.
+    base_url_source: str = ""   # config | derived | saas | unresolved | ""(근거 없음)
+    base_url_origin: str = ""   # 근거가 된 설정 키(run.dlc_meta_repo_url 등)
 
 
 @dataclass
@@ -164,15 +171,25 @@ class JiraConfig:
     watcher_token_file: str = ""  # 중앙 감시 토큰(내 것/봇). secrets.base_dir 상대
     watcher_email: str = ""       # Basic auth actor(감시 계정 이메일). env JIRA_WATCHER_EMAIL 폴백
     # --- 인스턴스별 트리거/역-트리거(레거시 match.* 의 신규 이름 — 항상 미러) ---
+    # ⚠️ 타입은 예전 그대로 **이름 문자열의 리스트**다. 설정 파일에서는 ``{id, name}``
+    # 매핑으로도 줄 수 있고(:func:`_named_refs`), 그때 id 는 아래 ``status_ids`` 로 따로
+    # 보존한다 — 소비처(폴러·워처·웹훅)는 손대지 않아도 되고, 진단은 id↔name 짝을
+    # 검증할 수 있다.
     trigger_statuses: list = field(default_factory=list)
     cancel_statuses: list = field(default_factory=list)
     optout_labels: list = field(default_factory=list)
+    #: 상태 **이름 → 이 인스턴스의 상태 id**(설정이 ``{id, name}`` 으로 준 것만).
+    #: 화면 표시명과 API 의 name 이 어긋나는 사고를 진단이 잡을 수 있게 남긴다.
+    status_ids: dict = field(default_factory=dict)
     # --- 인스턴스별 필드/전이 식별 ---
     # 논리 키 → 커스텀필드 id. 논리 키 목록은 setup_schema.JIRA_CUSTOM_FIELD_KEYS.
     # 비거나 일부만 주면 나머지는 app/jira_client.py 모듈 상수 폴백(하위호환).
     custom_fields: dict = field(default_factory=dict)
     done_transition_id: str = ""   # 비우면 이름으로 식별 → 그래도 없으면 모듈 상수
     done_transition_names: list = field(default_factory=lambda: ["완료", "Done"])
+    #: 전이 **이름 → 전이 id**(``done_transition_names`` 를 ``{id, name}`` 으로 준 경우).
+    #: id 가 정확히 하나면 ``done_transition_id`` 가 비었을 때 그것을 쓴다(로더가 채운다).
+    done_transition_ids: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -568,6 +585,41 @@ def _build_notifier(notifier: dict, notify: dict) -> NotifierConfig:
     )
 
 
+def _named_refs(items: Any) -> tuple:
+    """``["이름"]`` 또는 ``[{id, name}]`` → ``(이름 목록, {이름: id})``.
+
+    왜 두 모양을 받는가:
+        Jira 는 화면에 보이는 **표시명**과 API 가 쓰는 **id/name** 이 어긋날 수 있고,
+        JQL 은 name 으로 거는데 전이는 id 로 건다. 사람이 눈에 보이는 상태명을 타이핑하면
+        어긋나고, 그러면 폴러가 **조용히 아무 티켓도 못 찾는다**(가장 나쁜 실패 모드).
+        그래서 설치 관문의 ``discover``(:mod:`app.setup_discover`)는 실제 인스턴스를 조회해
+        **id 와 name 을 함께** 적어 준다.
+
+    왜 반환 타입을 안 바꾸는가:
+        런타임 소비처(폴러·상태워처·웹훅)는 전부 **이름 목록**을 본다. 그 타입을 바꾸면
+        이 리포 전체를 건드려야 하고 레거시 ``match.*`` 미러까지 갈라진다. 그래서 이름은
+        예전 그대로 리스트로 주고, id 는 **곁에** 표로 돌려준다.
+
+    하위호환: 문자열만 준 옛 설정은 ``({이름들}, {})`` 로 그대로 읽힌다(무동작변경).
+    이름이 없는 항목(빈 문자열·매핑에 name 부재)은 조용히 버린다 — 이름이 없으면
+    JQL 에도 미러에도 쓸 수 없는 값이다.
+    """
+    names: list = []
+    ids: dict = {}
+    for item in list(items or []):
+        if isinstance(item, dict):
+            name = str(item.get("name", "") or "").strip()
+            ref_id = str(item.get("id", "") or "").strip()
+        else:
+            name, ref_id = str(item or "").strip(), ""
+        if not name:
+            continue
+        names.append(name)
+        if ref_id:
+            ids[name] = ref_id
+    return names, ids
+
+
 def _build_forge(forge: dict, run: dict) -> ForgeConfig:
     """[forge] 섹션 구성 — 레거시 ``run.repo_resolver_gitlab_token_ref`` 하위호환."""
     kind = str(forge.get("kind", "gitlab")).strip().lower() or "gitlab"
@@ -712,6 +764,20 @@ def _build_config(raw: dict) -> AppConfig:
     # 배포 값은 spawn/secrets 보다 먼저 확정한다(그 섹션들의 값을 이게 결정하므로).
     deploy = _build_deploy(deploy_sect, spawn, secrets)
 
+    # 상태·전이는 ``"이름"`` 과 ``{id, name}`` 두 모양을 다 받는다(:func:`_named_refs`).
+    # 키 부재 → 문서화된 기본. 명시 빈 리스트([]) → 기능 비활성(존중).
+    trigger_names, trigger_ids = _named_refs(
+        _pick_list(jira, "trigger_statuses", match, "statuses", []))
+    cancel_names, cancel_ids = _named_refs(
+        _pick_list(jira, "cancel_statuses", match, "cancel_statuses", ["취소됨"]))
+    done_names, done_ids = _named_refs(
+        jira.get("done_transition_names", ["완료", "Done"]) or [])
+    done_id = str(jira.get("done_transition_id", "") or "")
+    # id 를 명시하지 않았는데 이름 쪽에 id 가 **딱 하나** 달려 있으면 그것이 곧 완료 전이다
+    # (discover 가 실측해 적어 준 형태). 여러 개면 모호하므로 이름 매칭에 맡긴다.
+    if not done_id and len(set(done_ids.values())) == 1:
+        done_id = next(iter(done_ids.values()))
+
     cfg = AppConfig(
         role=str(raw.get("role", "central")).strip().lower(),
         server=ServerConfig(
@@ -724,19 +790,17 @@ def _build_config(raw: dict) -> AppConfig:
             poll_interval_sec=int(jira.get("poll_interval_sec", 60)),
             watcher_token_file=str(jira.get("watcher_token_file", "")),
             watcher_email=str(jira.get("watcher_email", "")),
-            # 신규 jira.* 우선, 없으면 레거시 match.*.
-            # 키 부재 → 문서화된 기본. 명시 빈 리스트([]) → 기능 비활성(존중).
-            trigger_statuses=_pick_list(jira, "trigger_statuses", match, "statuses", []),
-            cancel_statuses=_pick_list(jira, "cancel_statuses", match, "cancel_statuses",
-                                       ["취소됨"]),
+            # 신규 jira.* 우선, 없으면 레거시 match.* (위에서 _named_refs 로 정규화).
+            trigger_statuses=trigger_names,
+            cancel_statuses=cancel_names,
             optout_labels=_pick_list(jira, "optout_labels", match, "optout_labels",
                                      ["자동화_추적_해제"]),
+            status_ids={**cancel_ids, **trigger_ids},
             # 인스턴스별 필드/전이 식별 — 비면 jira_client 모듈 상수 폴백(하위호환).
             custom_fields=dict(jira.get("custom_fields", {}) or {}),
-            done_transition_id=str(jira.get("done_transition_id", "") or ""),
-            done_transition_names=list(
-                jira.get("done_transition_names", ["완료", "Done"]) or []
-            ),
+            done_transition_id=done_id,
+            done_transition_names=done_names,
+            done_transition_ids=done_ids,
         ),
         # match 는 jira.* 의 레거시 미러 — 아래 _sync_jira_match_aliases 가 채운다.
         match=MatchConfig(),
@@ -832,8 +896,40 @@ def _build_config(raw: dict) -> AppConfig:
 
     _derive_workspace_paths(cfg.run)
     _apply_env_overrides(cfg)
+    # 레포 URL 로 forge base_url 을 확정한다 — run.* 경로·env 가 모두 정해진 뒤에 한다.
+    _resolve_forge_base_url(cfg)
     _validate(cfg)
     return cfg
+
+
+def _resolve_forge_base_url(cfg: "AppConfig") -> None:
+    """``forge.base_url`` 이 비어 있으면 **설정된 레포 URL 에서 유도**한다(+근거 기록).
+
+    ⚠️ 보안 문제를 막는 자리다. 예전에는 이 값이 비면 forge 호출이 그대로 SaaS 기본
+    엔드포인트로 나갔다 — 사내 GitLab 을 쓰는 팀이 base_url 을 안 적으면 **사내 PAT 가
+    gitlab.com 으로 전송**됐다. 진단이 실패하는 것보다 토큰이 엉뚱한 곳으로 나가는 것이
+    문제다.
+
+    판정과 근거는 :func:`app.forge.resolve_base_url` 이 만든다(단일 원천). 여기서는
+    그 결과를 설정에 반영만 한다:
+        - self-hosted 로 **유도**됐으면 ``base_url`` 을 채운다.
+        - SaaS 임이 **확인**됐으면 채우지 않는다(각 forge 의 SaaS API 엔드포인트가
+          호스트와 다를 수 있다 — GitHub 은 ``api.github.com``).
+        - 근거가 없거나 주소를 못 뽑으면 **비운 채로 근거만** 남긴다. 그 경우
+          :mod:`app.setup_doctor` 는 SaaS 로 토큰을 보내는 대신 검사를 건너뛴다.
+    """
+    from app import forge as forge_mod   # 지연 import — forge 가 config 를 import 하지 않게
+
+    resolution = forge_mod.resolve_base_url(cfg)
+    cfg.forge.base_url_source = resolution.source
+    cfg.forge.base_url_origin = resolution.origin
+    if resolution.source == forge_mod.SOURCE_DERIVED and not cfg.forge.base_url:
+        cfg.forge.base_url = resolution.base_url
+        log.info(
+            "forge.base_url 이 비어 있어 %s 의 호스트에서 유도했습니다: %s "
+            "(사내 forge 라면 config.yaml 에 명시해 두는 편이 안전합니다)",
+            resolution.origin, resolution.base_url,
+        )
 
 
 def _derive_workspace_paths(run: RunConfig) -> None:

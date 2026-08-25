@@ -2,6 +2,7 @@
 
 이 파일에는 **정책이 없다.** 판정은 전부 라이브러리가 한다:
 
+    discover  :mod:`app.setup_discover`  이 Jira 인스턴스에 **실제로 있는 값**을 조회
     validate  :mod:`app.setup_validate`  답변이 스키마 선언을 만족하는가(종이 검사)
     render    :mod:`app.setup_render`    통과한 답변으로 config.yaml 생성(주석 보존)
     doctor    :mod:`app.setup_doctor`    그 설정으로 **실제로 붙는가**(실측 검사)
@@ -34,6 +35,11 @@
     python -m app.setup doctor
     docker compose exec central python -m app.setup doctor --only docker,secrets
 
+    # 0) 그리고 그 앞자리 — 값을 손으로 옮겨 적지 않기 위한 조회
+    #    (base_url·이메일·토큰만 채운 config.yaml 이면 돌아간다)
+    python -m app.setup discover
+    python -m app.setup discover --only custom_fields --json > jira-fields.json
+
 POLICY-ENCODING: 이 파일은 UTF-8(BOM 없음)·LF. 출력도 **로케일과 무관하게** UTF-8 로
 고정한다(:func:`_force_utf8_stdout`) — 윈도우 콘솔 기본 코드페이지에서 한글 메시지가
 깨지거나 UnicodeEncodeError 로 죽는 것을 막는다.
@@ -47,7 +53,7 @@ import os
 import sys
 from typing import Any, Optional
 
-from app import setup_doctor, setup_render, setup_validate
+from app import setup_discover, setup_doctor, setup_render, setup_validate
 
 EXIT_OK = 0
 EXIT_GATE_FAILED = 1
@@ -166,6 +172,30 @@ def cmd_render(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_discover(args: argparse.Namespace) -> int:
+    """``discover`` — 이 Jira 인스턴스에 **실제로 있는 값**을 조회한다(읽기 전용).
+
+    설치자가 커스텀필드 id·상태 이름·전이 id 를 눈으로 옮겨 적지 않게 하는 것이 목적이다
+    (그 옮겨 적기가 이 시스템에서 가장 자주 재발한 오설정이다 — :mod:`app.setup_discover`).
+    """
+    from app.config import ConfigError, load_config
+
+    try:
+        cfg = load_config(args.config)
+    except ConfigError as exc:
+        _die(f"설정을 로드할 수 없습니다({args.config}): {exc}")
+
+    only = tuple(n.strip() for n in (args.only or "").split(",") if n.strip())
+    try:
+        result = setup_discover.discover(cfg, project_dir=args.project_dir, only=only,
+                                         issue_key=args.issue)
+    except setup_discover.DiscoveryError as exc:   # 알 수 없는 --only 이름
+        _die(str(exc))
+
+    _emit(result.to_dict(), result.format_text(), args.json)
+    return EXIT_OK if result.ok else EXIT_GATE_FAILED
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """``doctor`` — 설정이 **실제로 동작하는지** 실측(선언이 아니라 실측)."""
     from app.config import ConfigError, load_config
@@ -201,11 +231,29 @@ def build_parser() -> argparse.ArgumentParser:
     """CLI 파서(테스트가 직접 쓸 수 있게 분리)."""
     parser = argparse.ArgumentParser(
         prog="python -m app.setup",
-        description="jira-auto-dispatcher 설치 관문 — 답변 검증 · config.yaml 생성 · 실측 진단",
+        description="jira-auto-dispatcher 설치 관문 — 인스턴스 조회 · 답변 검증 · config.yaml 생성 · 실측 진단",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="종료코드: 0=통과 / 1=게이트 실패 / 2=사용 오류",
     )
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p_discover = sub.add_parser(
+        "discover",
+        help="이 Jira 인스턴스에 실제로 있는 값(커스텀필드·상태·전이·라벨)을 조회한다")
+    p_discover.add_argument("--config", default="config/config.yaml",
+                            help="조회에 쓸 설정 파일(기본 config/config.yaml). "
+                                 "jira.base_url·watcher_email·watcher_token_file 만 "
+                                 "채워져 있으면 된다")
+    p_discover.add_argument("--project-dir", default=".",
+                            help="배포 디렉토리(호스트 쪽 secrets/ 폴백 계산 기준)")
+    p_discover.add_argument("--issue", default="",
+                            help="전이를 실측할 이슈 키(생략하면 최근 티켓 하나를 표본으로)")
+    p_discover.add_argument("--only", default="",
+                            help="쉼표로 구분한 조회 항목만. 가능: "
+                                 + ", ".join(setup_discover.SECTION_ORDER))
+    p_discover.add_argument("--json", action="store_true",
+                            help="기계가 읽는 출력(후속 대화형 온보딩·웹 UI 가 소비)")
+    p_discover.set_defaults(func=cmd_discover)
 
     p_validate = sub.add_parser(
         "validate", help="수집된 답변(JSON)을 스키마에 대고 검증한다")

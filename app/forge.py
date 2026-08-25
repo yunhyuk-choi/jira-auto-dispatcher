@@ -25,6 +25,15 @@ forge 종류 판정(:func:`kind_for`) — 우선순위와 그 이유:
     아무 힌트도 주지 않을 때(GitHub Enterprise 가 ``git.corp.example.com`` 인 경우 등)만
     설정값으로 내려간다.
 
+base URL 판정(:func:`resolve_base_url`) — ⚠️ **토큰이 나갈 곳을 정하는 일이다**:
+    ``forge.base_url`` 이 비어 있으면 예전에는 곧바로 SaaS 기본 엔드포인트
+    (``https://gitlab.com``)로 떨어졌다. 사내 GitLab 을 쓰는 팀이 그 값을 안 적으면
+    **사내 PAT 가 gitlab.com 으로 전송된다** — 진단이 실패하는 게 문제가 아니라 *토큰이
+    외부로 나가는 것*이 문제다. 그래서 base URL 도 :func:`infer_kind_from_url` 과 같은
+    방식으로 **설정된 레포 URL 에서 유도**하고, 유도조차 못 하면 SaaS 로 보내는 대신
+    **판단 불가**를 돌려준다(부르는 쪽이 SKIP 한다 — 엉뚱한 곳에 토큰을 보내느니 검사를
+    못 하는 편이 낫다).
+
 시크릿 규율:
     이 모듈은 토큰 **값**을 로그·예외에 절대 남기지 않는다. :func:`with_token` 은 토큰을
     반환 URL 에만 싣고, 마스킹은 호출부(:func:`app.repos._mask`)가 :data:`CRED_USERNAMES`
@@ -38,6 +47,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from app.setup_schema import FORGE_KINDS
@@ -167,6 +177,156 @@ def kind_for(*, url: Optional[str] = None, kind: Any = None, config: Any = None)
     if config is not None:
         return resolve_kind(config)
     return DEFAULT_KIND
+
+
+# --- base URL 판정(토큰이 나갈 곳) --------------------------------------------
+
+#: 각 forge 의 **SaaS 호스트**. 레포 URL 이 이 호스트면 self-hosted 가 아니라는 뜻이므로
+#: base_url 은 빈 채로 두고(각 forge 의 SaaS 기본 엔드포인트를 쓴다) "확인됨"만 기록한다.
+#: ⚠️ GitHub SaaS 의 API 는 ``api.github.com`` 이라 ``https://github.com`` 을 base_url 로
+#: 채우면 오히려 틀린다 — 그래서 SaaS 는 "유도"가 아니라 "확인"이다.
+_SAAS_HOSTS = {
+    KIND_GITLAB: ("gitlab.com", "www.gitlab.com"),
+    KIND_GITHUB: ("github.com", "www.github.com", "api.github.com"),
+}
+
+#: base_url 유도의 근거로 삼는 **설정된 레포 URL** 키(우선 순서 = 신뢰 순서).
+#: ⚠️ ``run.orchestrator_repo_url`` 은 일부러 뺐다 — 그건 공개 프레임워크 레포의 **고정
+#: 리터럴**(github.com)이라 이 조직이 어느 forge 를 쓰는지에 대한 증거가 아니다. 그걸
+#: 근거로 삼으면 GitHub Enterprise 배포가 "SaaS 확인됨"으로 오판된다.
+BASE_URL_SOURCE_KEYS: tuple = ("run.dlc_meta_repo_url", "run.docs_repo_url")
+
+SOURCE_CONFIG = "config"          # forge.base_url 에 사람이 적었다
+SOURCE_DERIVED = "derived"        # 레포 URL 에서 유도했다(self-hosted)
+SOURCE_SAAS = "saas"              # 레포 URL 이 SaaS 호스트임을 확인했다(기본 엔드포인트)
+SOURCE_UNRESOLVED = "unresolved"  # self-hosted 로 보이는데 base URL 을 뽑을 수 없다(ssh URL 등)
+SOURCE_NONE = ""                  # 근거가 전혀 없다(레포 URL 이 하나도 설정되지 않았다)
+
+
+@dataclass(frozen=True)
+class BaseUrlResolution:
+    """forge base URL 판정 결과 — **값과 그 근거를 함께** 돌려준다.
+
+    Attributes:
+        base_url: self-hosted base URL. ``""`` 는 "SaaS 기본 엔드포인트를 쓴다"(``source``
+            가 :data:`SOURCE_SAAS`)이거나 **판단 불가**(그 밖)라는 뜻이다 — 부르는 쪽은
+            반드시 ``source`` 를 함께 봐야 한다.
+        source: :data:`SOURCE_CONFIG` | :data:`SOURCE_DERIVED` | :data:`SOURCE_SAAS` |
+            :data:`SOURCE_UNRESOLVED` | :data:`SOURCE_NONE`.
+        origin: 근거가 된 설정 키(``forge.base_url`` · ``run.dlc_meta_repo_url`` …).
+        host: 근거 URL 의 호스트(진단 메시지용 — 토큰이 어디로 갈지 사람에게 보여준다).
+    """
+
+    base_url: str = ""
+    source: str = SOURCE_NONE
+    origin: str = ""
+    host: str = ""
+
+    @property
+    def usable(self) -> bool:
+        """이 판정으로 **실제 요청을 보내도 되는가**.
+
+        SaaS 임이 확인됐거나 base URL 을 손에 쥐었을 때만 참이다. 근거가 없거나
+        self-hosted 인데 주소를 모르면 거짓 — 그 경우 요청을 보내지 **않는** 것이 맞다.
+        """
+        return bool(self.base_url) or self.source == SOURCE_SAAS
+
+
+def _authority(url: str) -> str:
+    """URL 에서 ``호스트[:포트]`` 만(userinfo·경로 제거). 못 뽑으면 ""."""
+    raw = str(url or "").strip()
+    m = _SCHEME.match(raw)
+    if not m:
+        return ""                          # 스킴이 없으면(scp 형식 등) 주소를 지어내지 않는다
+    rest = m.group(2)
+    if "@" in rest:
+        rest = rest.split("@", 1)[1]
+    return rest.split("/", 1)[0].strip()
+
+
+def base_url_from_url(url: str) -> str:
+    """레포 URL → ``스킴://호스트[:포트]`` 의 base URL(못 뽑으면 "").
+
+    :func:`infer_kind_from_url` 과 같은 결이다 — "이 배포의 forge 가 어디 있는가"는
+    설정 전역값보다 **그 URL 자신**이 잘 안다. 스킴이 없는 scp 형식
+    (``git@host:group/repo.git``)은 http/https 를 **추측하지 않고** "" 를 돌려준다.
+    """
+    raw = str(url or "").strip()
+    m = _SCHEME.match(raw)
+    authority = _authority(raw)
+    if not m or not authority:
+        return ""
+    scheme = m.group(1).lower()
+    if not scheme.startswith(("http://", "https://")):
+        return ""                          # ssh://·git:// 는 API base URL 이 아니다
+    return f"{scheme}{authority}".rstrip("/")
+
+
+def is_saas_url(url: str, kind: Any = None) -> bool:
+    """이 URL 의 호스트가 그 forge 의 **SaaS 호스트**인가(gitlab.com·github.com)."""
+    host = _host(url)
+    if not host:
+        return False
+    k = normalize_kind(kind) or infer_kind_from_url(url) or DEFAULT_KIND
+    return host in _SAAS_HOSTS.get(k, ())
+
+
+def _config_value(config: Any, dotted: str) -> str:
+    """``run.dlc_meta_repo_url`` 같은 점 표기 경로를 안전하게 읽는다(없으면 "")."""
+    node: Any = config
+    for part in dotted.split("."):
+        node = getattr(node, part, None)
+        if node is None:
+            return ""
+    return str(node or "").strip()
+
+
+def resolve_base_url(config: Any, *, kind: Any = None) -> BaseUrlResolution:
+    """이 설정의 forge base URL 과 **그 근거**를 확정한다(순수 — I/O 없음).
+
+    우선순위:
+        1. ``forge.base_url`` 명시값 → :data:`SOURCE_CONFIG`
+        2. 설정된 레포 URL(:data:`BASE_URL_SOURCE_KEYS`) 중 **이 forge 것**인 첫 URL
+           - SaaS 호스트면 → :data:`SOURCE_SAAS` (base_url 은 빈 채로 — 위 ``_SAAS_HOSTS`` 주석)
+           - 아니면 스킴+호스트를 유도 → :data:`SOURCE_DERIVED`
+           - http(s) 가 아니라 유도할 수 없으면 → :data:`SOURCE_UNRESOLVED`
+        3. 아무 근거도 없으면 → :data:`SOURCE_NONE`
+
+    "이 forge 것"의 판정은 :func:`infer_kind_from_url` 이다. 호스트가 **다른** forge 를
+    분명히 말하면(설정은 gitlab 인데 URL 은 github.com) 그 URL 은 건너뛴다 — 한 배포가
+    여러 forge 를 섞어 쓰기 때문이다(모듈 docstring). 호스트가 아무 말도 안 하면
+    (``git.corp.example.com``) 그건 사내 forge 일 가능성이 높으므로 근거로 받아들인다 —
+    실제로 이 토큰이 그 호스트로 나가고 있는 URL 이다.
+    """
+    k = normalize_kind(kind) or resolve_kind(config)
+    explicit = _config_value(config, "forge.base_url").rstrip("/")
+    if explicit:
+        # 로더가 이미 채운 값이면 그때의 **근거를 그대로 물려준다**(멱등) — 그러지 않으면
+        # "레포 URL 에서 유도했다"가 두 번째 호출에서 "사람이 적었다"로 바뀐다.
+        recorded = _config_value(config, "forge.base_url_source")
+        origin = _config_value(config, "forge.base_url_origin") or "forge.base_url"
+        return BaseUrlResolution(explicit, recorded or SOURCE_CONFIG, origin,
+                                 _host(explicit))
+
+    unresolved: Optional[BaseUrlResolution] = None
+    for key in BASE_URL_SOURCE_KEYS:
+        url = _config_value(config, key)
+        if not url:
+            continue
+        inferred = infer_kind_from_url(url)
+        if inferred is not None and inferred != k:
+            continue                       # 다른 forge 의 레포 — 이 토큰의 근거가 아니다
+        host = _host(url)
+        if not host:
+            continue
+        if host in _SAAS_HOSTS.get(k, ()):
+            return BaseUrlResolution("", SOURCE_SAAS, key, host)
+        derived = base_url_from_url(url)
+        if derived:
+            return BaseUrlResolution(derived, SOURCE_DERIVED, key, host)
+        if unresolved is None:             # self-hosted 신호는 잡았으나 주소를 못 뽑았다
+            unresolved = BaseUrlResolution("", SOURCE_UNRESOLVED, key, host)
+    return unresolved or BaseUrlResolution()
 
 
 # --- forge별 동작 ------------------------------------------------------------

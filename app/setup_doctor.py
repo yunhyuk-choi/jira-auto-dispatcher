@@ -438,20 +438,53 @@ def check_jira_search(cfg: Any, *, project_dir: str = ".", client: Any = None) -
                        f"JQL 검색 경로 정상(project={project}, 표본 {count}건)")
 
 
+def _forge_destination_unknown(kind: str, resolution: Any) -> CheckResult:
+    """갈 곳을 확신할 수 없을 때의 SKIP — **토큰을 보내지 않고** 무엇을 적으라고 말한다."""
+    saas = {forge_mod.KIND_GITHUB: "github.com",
+            forge_mod.KIND_GITLAB: "gitlab.com"}.get(kind, "SaaS")
+    if resolution.source == forge_mod.SOURCE_UNRESOLVED:
+        why = (f"레포 URL 이 {resolution.host} 를 가리키는데(사내 forge 로 보입니다) "
+               f"http(s) base URL 을 뽑을 수 없습니다")
+    else:
+        why = ("forge.base_url 이 비어 있고 설정된 레포 URL(run.dlc_meta_repo_url · "
+               "run.docs_repo_url)로도 유도할 수 없습니다")
+    return CheckResult(
+        "forge_token", STATUS_SKIP,
+        f"{forge_mod.label(kind)} 엔드포인트를 확정할 수 없어 검사하지 않았습니다 — {why}",
+        f"forge.base_url 에 이 배포의 {forge_mod.label(kind)} 주소를 적으세요"
+        f"(SaaS 를 쓴다면 https://{saas} 를 그대로 적으면 됩니다). ⚠️ 모르는 채로 "
+        f"진행하면 사내 토큰이 {saas} 로 전송될 수 있어, 요청을 보내지 않고 "
+        f"건너뜁니다.",
+    )
+
+
 def check_forge_token(cfg: Any, *, project_dir: str = ".", http: Any = None) -> CheckResult:
     """central 서비스 forge 토큰이 실제로 붙는지 + 권한이 있는지.
 
     GitLab 은 ``GET /api/v4/user``, GitHub 은 ``GET /user`` 로 확인한다. GitHub 은 응답
     헤더로 스코프를 알려주므로 ``repo`` 스코프 부재까지 짚어 준다(그게 없으면 push 는
     성공처럼 보이다가 MR/PR 단계에서 막힌다).
+
+    ⚠️ **어디로 보내는가가 먼저다.** ``forge.base_url`` 이 비어 있으면 설정된 레포 URL 에서
+    유도하고(:func:`app.forge.resolve_base_url`), 유도조차 못 하면 SaaS 기본값으로 떨어지지
+    않고 **SKIP 한다** — 사내 PAT 가 gitlab.com 으로 나가는 것보다 검사를 못 하는 편이 낫다.
     """
     kind = forge_mod.resolve_kind(cfg)
-    base_url = str(getattr(getattr(cfg, "forge", None), "base_url", "") or "").rstrip("/")
     ref = central_forge_token_ref(cfg)
     if not ref:
         return CheckResult("forge_token", STATUS_SKIP,
                            "forge.token_ref 가 비어 있습니다(dlc-meta pull/push 를 하지 "
                            "않는 배포라면 정상)")
+
+    # ⚠️ **토큰을 어디로 보낼지부터 정한다** — 토큰을 읽기 전에. base_url 이 비면 예전에는
+    # 곧장 SaaS(gitlab.com)로 나갔고, 사내 forge 를 쓰는 팀에서는 그게 곧 **사내 PAT 의
+    # 외부 전송**이었다. 진단이 실패하는 것보다 그쪽이 훨씬 나쁘다 — 갈 곳을 확신할 수
+    # 없으면 보내지 않는다.
+    resolution = forge_mod.resolve_base_url(cfg, kind=kind)
+    if not resolution.usable:
+        return _forge_destination_unknown(kind, resolution)
+    base_url = resolution.base_url.rstrip("/")
+
     token, _root = _read_ref(cfg, ref, project_dir)
     if not token:
         return CheckResult("forge_token", STATUS_SKIP,

@@ -20,12 +20,12 @@ from app import setup_schema as S
 # --- 선언 일관성 -------------------------------------------------------------
 
 
-def test_sections_are_the_declared_six():
+def test_sections_are_the_declared_seven():
     assert [s.name for s in S.SETUP_SCHEMA] == [
-        "forge", "notifier", "jira", "docs_repo", "deploy", "consent",
+        "forge", "notifier", "jira", "webhook", "docs_repo", "deploy", "consent",
     ]
-    # docs_repo 만 섹션 전체가 선택이다.
-    assert [s.name for s in S.SETUP_SCHEMA if s.optional] == ["docs_repo"]
+    # 섹션 전체를 건너뛸 수 있는 것은 웹훅 수신과 설계문서 레포뿐이다.
+    assert [s.name for s in S.SETUP_SCHEMA if s.optional] == ["webhook", "docs_repo"]
 
 
 def test_field_keys_unique_and_documented():
@@ -56,9 +56,10 @@ def test_secret_flags_are_mutually_exclusive_and_refs_only():
         assert not (f.secret and f.secret_ref), f"{f.key}: 두 시크릿 성격을 동시에 주장한다"
     # 이 시스템은 시크릿 "값"을 config.yaml 에 담지 않는다 — 스키마에도 값 시크릿은 없다.
     assert [f.key for f in S.iter_fields() if f.secret] == []
-    # 참조 시크릿은 forge/notifier/jira 각각 하나씩 있다.
+    # 참조 시크릿은 forge/notifier/jira/webhook 각각 하나씩 있다.
     assert sorted(f.key for f in S.iter_fields() if f.secret_ref) == [
         "forge.token_ref", "jira.watcher_token_file", "notifier.webhook_ref",
+        "webhook.secret_ref",
     ]
 
 
@@ -133,6 +134,8 @@ _KEY_TO_ATTR = {
     "jira.custom_fields": "jira.custom_fields",
     "jira.done_transition_id": "jira.done_transition_id",
     "jira.done_transition_names": "jira.done_transition_names",
+    "webhook.enabled": "webhook.enabled",
+    "webhook.secret_ref": "webhook.secret_ref",
     "run.docs_repo": "run.docs_repo",
     "run.docs_repo_url": "run.docs_repo_url",
     "deploy.profile": "deploy.profile",

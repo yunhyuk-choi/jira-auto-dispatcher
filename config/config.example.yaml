@@ -68,7 +68,12 @@ forge:
 #    에러로 실패한다(app/jira_client.py).
 #
 # 🔎 **자기 인스턴스 값 알아내는 법**(여기가 남들이 가장 많이 막히는 지점이다).
-#    아래는 감시 계정 이메일 + API 토큰으로 Basic auth 해서 호출한다:
+#    가장 쉬운 길은 이 리포의 조회 명령이다 — base_url·watcher_email·watcher_token_file 만
+#    채운 상태에서 돌리면 **실제로 존재하는 값만** 후보로 뽑아 주고, 지금 설정에 적힌 id·
+#    상태 이름이 이 인스턴스에 실재하는지까지 검증한다:
+#      python -m app.setup discover              # 전부(계정·필드·상태·전이·라벨)
+#      python -m app.setup discover --only custom_fields
+#    직접 REST 를 부르고 싶으면 아래(감시 계정 이메일 + API 토큰으로 Basic auth):
 #      # 커스텀필드 id — 이름으로 찾는다(예: '시작날짜'·'Start date')
 #      curl -u "<email>:<api-token>" "$JIRA/rest/api/3/field" | jq '.[] | {id, name}'
 #      # 완료 전이의 id/이름 — 실제 티켓 하나로 실측한다
@@ -79,8 +84,18 @@ jira:
   project: <PROJECT_KEY>
   poll_interval_sec: 60
   watcher_token_file: service/jira-token   # 중앙이 Jira를 감시하는 토큰(내 것/봇). secrets.base_dir 상대
+  # ⚠️ Basic auth 는 **(이메일, 토큰) 쌍**이다 — 토큰만으로는 인증되지 않는다. 위 토큰을
+  # 발급받은 Atlassian 계정의 이메일을 적는다(비우면 env JIRA_WATCHER_EMAIL 폴백).
+  watcher_email: ""
   # 트리거/역-트리거 — **이 워크플로우의 상태 이름 그대로** 적는다(언어·명명이 조직마다 다르다).
   # (레거시 이름 match.statuses / match.cancel_statuses / match.optout_labels 도 계속 읽음)
+  #
+  # ⚠️ 이름을 손으로 옮겨 적지 말 것. 화면 표시명과 API 의 name 이 어긋날 수 있고, 어긋나면
+  #    폴러는 **에러 없이 아무 티켓도 못 찾는다**(가장 알아채기 어려운 실패). 실측:
+  #      python -m app.setup discover --only statuses
+  #    id 를 함께 적어 두는 형태도 받는다(권장 — discover 가 그 형태로 뱉는다):
+  #      trigger_statuses: [{"id": "10000", "name": "해야 할 일"}]
+  #    문자열 목록도 그대로 읽는다(하위호환). 어느 쪽이든 런타임은 이름으로 JQL 을 건다.
   trigger_statuses: ["해야 할 일"]     # 신규 착수(트리거) 상태 화이트리스트
   cancel_statuses: ["취소됨"]          # 이 상태로 오면 추적 잡을 즉시 취소(폴러·워처·웹훅 공유)
   optout_labels: ["자동화_추적_해제"]   # 이 라벨이 붙으면 신규 착수 안 함 + 추적 중이면 취소로 수렴
@@ -99,6 +114,9 @@ jira:
   # 후보 → (4) 설정을 아예 안 준 레거시 배포만 모듈 상수 폴백 → 그래도 못 정하면 **가능한
   # 전이 목록을 담은 에러**(조용한 실패 금지). id 는 인스턴스마다 다르니 모르면 비워 두고
   # 이름만 자기 워크플로우에 맞춰도 된다(실측: GET /rest/api/2/issue/{key}/transitions).
+  # (실측 한 방: python -m app.setup discover --only transitions — id·이름·목표 상태를 함께 뱉는다.
+  #  done_transition_names 에 [{"id": "41", "name": "완료"}] 형태로 적으면 id 를 따로 관리하지
+  #  않아도 된다 — done_transition_id 가 비어 있고 id 가 하나뿐이면 그것을 쓴다.)
   done_transition_id: ""                    # 예: "41" — 위 실측 목록의 id
   done_transition_names: ["완료", "Done"]   # 이 워크플로우의 완료 전이(또는 목표 상태) 이름
 
@@ -109,7 +127,10 @@ jira:
 #   - 페이로드: {"issueKey":"PROJ-1"}(커스텀 Automation) 또는 {"issue":{"key":"PROJ-1"}}(표준)
 # ⚠️ 토큰은 "값"이 아니라 참조(secrets.base_dir 상대 파일)만 둔다 — 그 파일에 토큰을 0600으로
 #    저장. secret_ref 파일이 없으면 엔드포인트는 503으로 거부한다(무인증 자율 실행 금지 — RCE 표면).
-webhook: { enabled: true, secret_ref: service/jira-webhook }
+webhook:
+  enabled: true
+  secret_ref: service/jira-webhook   # 토큰 "값"이 아니라 secrets.base_dir 상대 파일 참조
+                                     # (값은 아무 고엔트로피 문자열: openssl rand -hex 32)
 
 resume: { work_hours: "08:00-18:00", timezone: Asia/Seoul, nightly_drain: "01:00-05:00", reset_buffer_sec: 120 }
 

@@ -23,8 +23,10 @@ GOOD_ANSWERS = {
     "forge": {"kind": "gitlab", "token_ref": "service/forge-token"},
     "jira": {"base_url": "https://acme.atlassian.net", "project": "ACME",
              "trigger_statuses": ["To Do"],
-             "watcher_token_file": "service/jira-token"},
+             "watcher_token_file": "service/jira-token",
+             "watcher_email": "bot@acme.example"},
     "notifier": {"provider": "none"},
+    "webhook": {"enabled": True, "secret_ref": "service/jira-webhook"},
 }
 
 NO_CONSENT = {**GOOD_ANSWERS, "consent": {"full_permissions": False}}
@@ -252,3 +254,58 @@ def test_help_lists_every_doctor_check():
     doctor_help = sub_action.choices["doctor"].format_help()
     for name in setup_doctor.CHECK_ORDER:
         assert name in doctor_help
+
+
+# --- discover -----------------------------------------------------------------
+
+
+def test_discover_skips_gracefully_without_credentials(tmp_path, capsys):
+    """토큰·이메일이 없으면 조회할 수 없다 — 실패가 아니라 건너뜀(종료코드 0)."""
+    path = _rendered_config(tmp_path, capsys)
+    code = CLI.main(["discover", "--config", path, "--project-dir", str(tmp_path)])
+    assert code == CLI.EXIT_OK
+    out = capsys.readouterr().out
+    assert "[SKIP] account" in out
+    assert "확정할 수 있는 값이 없었습니다" in out
+
+
+def test_discover_json_output_is_machine_readable(tmp_path, capsys):
+    path = _rendered_config(tmp_path, capsys)
+    CLI.main(["discover", "--config", path, "--project-dir", str(tmp_path),
+              "--only", "labels", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert [s["name"] for s in payload["sections"]] == ["labels"]
+    assert set(payload) == {"ok", "sections", "suggested_answers"}
+
+
+def test_discover_unknown_section_is_usage_error(tmp_path, capsys):
+    path = _rendered_config(tmp_path, capsys)
+    with pytest.raises(SystemExit) as exc:
+        CLI.main(["discover", "--config", path, "--only", "없는조회"])
+    assert exc.value.code == CLI.EXIT_USAGE
+    assert "알 수 없는 조회 항목" in capsys.readouterr().err
+
+
+def test_discover_missing_config_is_usage_error(capsys):
+    with pytest.raises(SystemExit) as exc:
+        CLI.main(["discover", "--config", "없는설정.yaml"])
+    assert exc.value.code == CLI.EXIT_USAGE
+    assert "로드할 수 없습니다" in capsys.readouterr().err
+
+
+def test_discover_reports_non_zero_when_a_lookup_fails(tmp_path, capsys, monkeypatch):
+    """조회 실패는 게이트 실패다 — 그대로 두면 설정을 추측으로 채우게 된다."""
+    from app.jira_client import JiraError
+
+    path = _rendered_config(tmp_path, capsys)
+
+    class Boom:
+        def myself(self):
+            raise JiraError("nope", status_code=401)
+
+    # ⚠️ 네트워크에 닿지 않는다 — 클라이언트 생성 지점만 대역으로 바꾼다.
+    monkeypatch.setattr("app.setup_doctor._jira_client", lambda cfg, pd: (Boom(), ""))
+    code = CLI.main(["discover", "--config", path, "--project-dir", str(tmp_path),
+                     "--only", "account"])
+    assert code == CLI.EXIT_GATE_FAILED
+    assert "[FAIL] account" in capsys.readouterr().out

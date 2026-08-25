@@ -168,6 +168,7 @@ config·시크릿 마운트 source 는 반드시 **호스트 경로**여야 한�
 
 | 서브커맨드 | 하는 일 | 입력 → 출력 |
 |---|---|---|
+| `discover` | **이 Jira 인스턴스에 실제로 있는 값**을 조회(커스텀필드 후보·프로젝트 상태·전이 id/name·라벨·`accountId`). 설정에 적힌 id·상태 이름이 **이 인스턴스에 실재하는지**까지 검증한다 | `config.yaml`(base_url·watcher_email·토큰만 있으면 됨) → 후보 목록 + 붙여넣을 `jira:` 블록 / `--json` |
 | `validate` | 수집한 답변을 `app/setup_schema.py` 선언에 대고 검증(누락·조건부 필수·허용값·타입·시크릿 값 혼입을 **전부 모아서** 보고) | 답변 JSON(파일 또는 stdin) → 사람용 출력 / `--json` |
 | `render` | 검증을 통과한 답변으로 `config.yaml` 생성. **`config/config.example.yaml` 을 템플릿으로 써서 주석(=이 안내)을 그대로 물려준다** | 답변 JSON → `config/config.yaml`(`-o` 로 변경, 기존 파일은 `--force` + 자동 `.bak-*` 백업) |
 | `doctor` | 그 설정으로 **실제로 붙는지** 실측: Jira 자격·JQL 경로, forge 토큰 권한, dlc-meta 원격 도달성, docker 접속, 알림 웹훅 참조, `host_deploy_dir` 함정 | `config/config.yaml` → 검사별 PASS/FAIL/WARN/SKIP + 고치는 법 |
@@ -183,14 +184,54 @@ cat > answers.json <<'JSON'
               "trigger_statuses": ["해야 할 일"],
               "watcher_token_file": "service/jira-token",
               "watcher_email": "bot@your-org.example"},
-  "notifier": {"provider": "none"}
+  "notifier": {"provider": "none"},
+  "webhook": {"enabled": true, "secret_ref": "service/jira-webhook"}
 }
 JSON
 
 python -m app.setup validate answers.json          # 통과 못 하면 non-zero
 python -m app.setup render   answers.json          # → config/config.yaml (주석 보존)
+python -m app.setup discover                       # 인스턴스 조회(아래 참조)
 python -m app.setup doctor                         # 실측 진단
 ```
+
+#### `discover` — 값을 **손으로 옮겨 적지 않기** 위한 조회
+
+여기가 남들이 가장 많이 막히고, 우리도 반복해서 밟은 자리다. Jira 는 화면에 보이는
+**표시명**과 API 가 쓰는 **id/name** 이 어긋날 수 있고, JQL 은 name 으로 거는데 전이는
+id 로 건다. 커스텀필드 id·전이 id 는 **인스턴스마다 완전히 다르다** — `customfield_10015`
+는 이 코드가 처음 운영된 인스턴스의 값일 뿐이다. 그런데 `render` 결과에는 그 예시 id 가
+**형식상 유효한 모양 그대로** 남아 눈으로 넘어간다. 그 결과가 조용한 오작동이다:
+
+- 상태 이름이 어긋나면 폴러는 **에러 없이 아무 티켓도 못 찾는다**(가장 알아채기 어렵다).
+- 이 인스턴스에 없는 커스텀필드를 보내면 Jira 가 400 → 착수·완료가 통째로 막힌다.
+
+`discover` 는 `jira.base_url` · `jira.watcher_email` · `jira.watcher_token_file` 만 채운
+`config.yaml` 로도 돌아간다(나머지를 채우기 **전에** 쓰라고 만든 것이다).
+
+```bash
+python -m app.setup discover                      # 전부
+python -m app.setup discover --only custom_fields # 필드 후보만
+python -m app.setup discover --issue PROJ-12      # 이 티켓으로 전이 실측(생략 시 최근 티켓)
+python -m app.setup discover --json > jira.json   # 기계용(후속 온보딩·웹 UI가 소비)
+```
+
+- **자동 선택은 아낀다.** 커스텀필드는 이름이 *정확히* 일치하는 필드가 **유일할 때만**
+  고른다. 비슷한 이름이 여럿이거나 부분 일치뿐이면 고르지 않고 **후보만** 보여준다 —
+  잘못 고른 필드 id 는 검증도 진단도 통과한 뒤 운영에서 400 으로 터진다.
+- **id 와 name 을 함께** 적어 준다. 출력 맨 아래의 `jira:` 블록을 그대로 붙여넣으면 된다:
+  ```yaml
+  jira:
+    trigger_statuses: [{"id": "10000", "name": "해야 할 일"}]
+    done_transition_names: [{"id": "41", "name": "완료"}]
+  ```
+  런타임 소비처는 예전처럼 **이름만** 보고, id 는 곁에 남아 진단이 짝을 검증한다.
+  문자열 목록(`["해야 할 일"]`)도 계속 읽는다 — 기존 `config.yaml` 은 그대로 둬도 된다.
+- **라벨은 조회보다 안내가 중요하다.** Jira 라벨은 미리 만들 필요가 없다(티켓에 입력하는
+  순간 생성된다). 목록에 없어도 정상이며, 팀에 *"이 라벨을 붙이면 자동화가 손대지
+  않는다"* 를 알리는 쪽이 훨씬 중요하다.
+- `accountId` 도 함께 알려 준다 — 사용자 온보딩(레지스트리)에 필요한데 Jira UI 에서
+  찾기가 은근히 어렵다.
 
 - `render` 는 **답한 항목만** 쓴다 — 답하지 않은 값은 예시 파일의 값과 `deploy.profile`
   파생에 맡긴다(§2.2). 대신 "답하지 않아 예시 값이 남은 항목"과 아직 남은 `<...>`
@@ -201,14 +242,19 @@ python -m app.setup doctor                         # 실측 진단
   `--send-test-notification`(팀 채널에 메시지가 남는다).
 - 일부만 돌리려면 `--only`: `config, secrets, host_deploy_dir, jira_auth, jira_search,
   forge_token, dlc_meta, docker, notifier`.
+- ⚠️ **`forge_token` 검사는 갈 곳을 모르면 요청 자체를 하지 않는다(SKIP).** `forge.base_url`
+  이 비어 있으면 설정된 레포 URL(`run.dlc_meta_repo_url` · `run.docs_repo_url`)의 호스트에서
+  유도하고, 유도조차 못 하면 SaaS(gitlab.com)로 떨어지는 대신 건너뛴다 — 사내 PAT 가
+  외부로 전송되는 것보다 검사를 못 하는 편이 낫다. SKIP 이 뜨면 `forge.base_url` 을
+  적어 주면 된다(SaaS 를 쓴다면 `https://gitlab.com` 을 그대로 적어도 된다).
 - ⚠️ **호스트에서 돌릴 때와 컨테이너 안에서 돌릴 때 보이는 것이 다르다.** `/run/secrets`
   나 `tcp://socket-proxy:2375` 는 컨테이너 관점이라, 호스트에서는 해당 검사가 `SKIP` 으로
   나오고 안내가 붙는다. 기동 후에는 안에서 한 번 더 돌린다:
   ```bash
   docker compose exec central python -m app.setup doctor
   ```
-- 이 CLI 는 **얇은 껍데기**다 — 검증·렌더·진단 로직은 `app/setup_validate.py` ·
-  `app/setup_render.py` · `app/setup_doctor.py` 에 있고, 후속 웹 온보딩·대화형 에이전트가
+- 이 CLI 는 **얇은 껍데기**다 — 조회·검증·렌더·진단 로직은 `app/setup_discover.py` ·
+  `app/setup_validate.py` · `app/setup_render.py` · `app/setup_doctor.py` 에 있고, 후속 웹 온보딩·대화형 에이전트가
   **같은 함수**를 재사용한다(게이트가 두 벌이 되면 반드시 갈라진다).
 
 ---
