@@ -33,7 +33,7 @@ _FULL = {
     "jira_account_id": "test-account-id",
     "jira_email": "yh@x",
     "jira_token": "JIRA-TOK-VAL",
-    "gitlab_token": "GL-TOK-VAL",
+    "forge_token": "GL-TOK-VAL",
     "claude_setup_token": "CLAUDE-TOK-VAL",
     "git_name": "Test User",
     "git_email": "yh@x",
@@ -64,7 +64,9 @@ def test_onboard_success_stores_refs_not_values(tmp_path, isolated_state):
     assert rec.scope.projects == ["PROJ", "PORTAL"]
     # secrets_ref는 값이 아니라 참조 경로.
     assert rec.secrets_ref.jira_token == "testuser/jira-token"
-    assert rec.secrets_ref.gitlab_token == "testuser/gitlab-token"
+    # forge 중립 파일명(forge-token). 레거시 이름 필드에도 같은 참조가 미러된다.
+    assert rec.secrets_ref.forge_token == "testuser/forge-token"
+    assert rec.secrets_ref.gitlab_token == "testuser/forge-token"
     assert rec.secrets_ref.claude_oauth_token == "testuser/claude-oauth-token"
     assert "JIRA-TOK-VAL" not in json.dumps(rec.to_dict())
 
@@ -91,14 +93,15 @@ def test_onboard_duplicate_409(tmp_path, isolated_state):
     assert res.status_code == 409
 
 
-def test_onboard_optional_gitlab_omitted(tmp_path, isolated_state):
+def test_onboard_optional_forge_token_omitted(tmp_path, isolated_state):
     client, reg, base = _wire(tmp_path)
     data = dict(_FULL)
-    del data["gitlab_token"]
+    del data["forge_token"]
     assert client.post("/onboard", json=data).status_code == 201
     rec = reg.get("testuser")
+    assert rec.secrets_ref.forge_token == ""
     assert rec.secrets_ref.gitlab_token == ""
-    assert not os.path.exists(os.path.join(base, "testuser", "gitlab-token"))
+    assert not os.path.exists(os.path.join(base, "testuser", "forge-token"))
 
 
 def test_enable_triggers_spawn(tmp_path, isolated_state):
@@ -185,3 +188,31 @@ def test_onboard_error_returns_json_not_html(tmp_path, isolated_state):
     assert "JIRA-TOK-VAL" not in raw
     assert "GL-TOK-VAL" not in raw
     assert "CLAUDE-TOK-VAL" not in raw
+
+
+def test_onboard_accepts_legacy_gitlab_token_form_field(tmp_path, isolated_state):
+    """옛 관리 UI/스크립트가 보내는 gitlab_token 필드도 계속 받는다(하위호환).
+
+    저장 파일명·레지스트리 키는 forge 중립 이름으로 수렴한다.
+    """
+    client, reg, base = _wire(tmp_path)
+    data = dict(_FULL)
+    data.pop("forge_token", None)
+    data["gitlab_token"] = "LEGACY-GL-VAL"
+    assert client.post("/onboard", json=data).status_code == 201
+
+    rec = reg.get("testuser")
+    assert rec.secrets_ref.forge_token == "testuser/forge-token"
+    assert rec.secrets_ref.gitlab_token == "testuser/forge-token"
+    with open(os.path.join(base, "testuser", "forge-token"), encoding="utf-8") as fh:
+        assert fh.read() == "LEGACY-GL-VAL"
+
+
+def test_onboard_prefers_new_forge_token_field(tmp_path, isolated_state):
+    client, reg, base = _wire(tmp_path)
+    data = dict(_FULL)
+    data["forge_token"] = "NEW-VAL"
+    data["gitlab_token"] = "OLD-VAL"
+    assert client.post("/onboard", json=data).status_code == 201
+    with open(os.path.join(base, "testuser", "forge-token"), encoding="utf-8") as fh:
+        assert fh.read() == "NEW-VAL"

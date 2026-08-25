@@ -21,7 +21,8 @@
         WORKER_SHARED_SECRET=<주입>              # dispatch HTTP 인증(X-Worker-Secret)
         CLAUDE_CODE_OAUTH_TOKEN=<주입>            # setup-token(값은 시크릿 참조에서)
         SECRETS_DIR=/run/secrets                  # 컨테이너 내부 시크릿 마운트 루트
-        JIRA_TOKEN_FILE / GITLAB_TOKEN_FILE       # per-user 토큰 "파일경로"(값 아님)
+        JIRA_TOKEN_FILE / FORGE_TOKEN_FILE        # per-user 토큰 "파일경로"(값 아님)
+                                                  # (GITLAB_TOKEN_FILE 도 같은 값으로 방출)
         JIRA_EMAIL                                # Jira actor 이메일
     volumes:
         jad-<username>:/home/app/.claude (rw)          # 사용자 ~/.claude 영속(인증/세션)
@@ -43,7 +44,7 @@
     권한과 동치다(특권 상승 표면). 완화책:
       - docker-socket-proxy(tecnativa 등)를 앞단에 두어 CONTAINERS/POST만 최소
         허용하고 central은 프록시 TCP 엔드포인트로만 접근(sock 직결 금지).
-      - central 자체를 비-root 사용자로 실행, 사내망 한정.
+      - central 자체를 비-root 사용자로 실행, 신뢰 네트워크 한정.
     docker_host는 config.spawn.docker_host(로컬=unix:///var/run/docker.sock,
     프록시 사용 시 tcp://socket-proxy:2375)로 주입한다.
 
@@ -74,8 +75,29 @@ SECRETS_MOUNT = "/run/secrets"
 # /app 이라 DEFAULT_CONFIG_PATH(config/config.yaml)가 /app/config/config.yaml 로 해석된다.
 CONFIG_DIR_IN_CONTAINER = "/app/config"
 
+# 공유 워크스페이스 named 볼륨의 컨테이너 내부 bind 경로 폴백(run.workspace_dir 미설정 시).
+# central compose(jad-workspace → /app/workspace)와 정합.
+DEFAULT_WORKSPACE_DIR = "/app/workspace"
+DEFAULT_WORKSPACE_VOLUME = "jad-workspace"
+
 # 사전 인가 기본 레벨.
 DEFAULT_PERMISSION_LEVEL = "bypass"
+
+
+def _is_image_not_found(exc: Exception) -> bool:
+    """예외가 docker ImageNotFound(404)인지 판정(수정 3).
+
+    rebuild로 워커 컨테이너의 옛 이미지 ID가 사라지면 docker SDK가 컨테이너 이미지를
+    inspect할 때 ``docker.errors.ImageNotFound``(HTTP 404)를 던진다. docker 미설치·
+    테스트 대역 예외까지 포용하도록 **클래스 이름**(ImageNotFound/NotFound) 또는
+    **status_code==404**(예외 자체 또는 .response)로 느슨하게 판정한다.
+    """
+    if type(exc).__name__ in ("ImageNotFound", "NotFound"):
+        return True
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status == 404
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +166,10 @@ class Spawner:
         self.config = config
         self.registry = registry
         self._client = client
+        # 이미지 stale이지만 활성 잡이 있어 **드레인 대기** 중인 사용자(즉시 죽이지
+        # 않고 그 잡이 terminal로 끝난 뒤 재생성한다 — reconcile_pending). 배포가
+        # in-flight 잡을 죽이지 않게 한다(작업 C).
+        self._pending_recreate: set = set()
 
     # -- docker 클라이언트(지연 생성) --
 
@@ -204,14 +230,22 @@ class Spawner:
         한다(per-user attribution의 실제 배선). from_env 계약:
             DISPATCH_GIT_NAME / DISPATCH_GIT_EMAIL   git author 정체성
             DISPATCH_JIRA_EMAIL                       Jira Basic actor 이메일
-            JIRA_TOKEN_REF / GITLAB_TOKEN_REF         secrets.base_dir 상대 참조
+            JIRA_TOKEN_REF / FORGE_TOKEN_REF          secrets.base_dir 상대 참조
             CLAUDE_OAUTH_TOKEN_REF                     (선택) 참조
             CLAUDE_CODE_OAUTH_TOKEN                    (폴백) 값 직접
+            DISPATCH_NOTIFY_USER_ID                    (선택) 완료 알림 @멘션 id
         이 ``*_REF``(상대 참조)가 빠지면 worker의 ``ensure_repos`` 가 토큰을 못
         찾아 레포 프로비저닝을 skip → orchestrator_repo 부재로 잡이 실패한다.
 
+        ⚠️ **forge/알림 중립 이름 + 레거시 동시 방출**: 이 시스템은 GitLab 전용이 아니다
+        (``config.forge.kind`` = gitlab|github). 그래서 정본 이름은 ``FORGE_TOKEN_*``·
+        ``DISPATCH_NOTIFY_USER_ID`` 이고, 옛 이름(``GITLAB_TOKEN_*``·
+        ``DISPATCH_GOOGLE_CHAT_USER_ID``)도 **같은 값으로 함께 방출**한다. 컨테이너 안에서
+        옛 이름을 읽는 것들(기존 에이전트 지시문·사용자 스크립트·이전 이미지)이 그대로
+        동작해야 하기 때문이다 — 옛 이름 제거는 별도 사이클의 몫이다.
+
         시크릿 값(CLAUDE_CODE_OAUTH_TOKEN·WORKER_SHARED_SECRET)은 read_secret/config로만
-        읽고, Jira/GitLab 토큰은 값이 아니라 **참조**(상대 ref)와 **파일경로**(마운트
+        읽고, Jira/forge 토큰은 값이 아니라 **참조**(상대 ref)와 **파일경로**(마운트
         경로) 포인터로만 넘긴다. 이 dict는 절대 로깅하지 않는다(identity 이름·이메일은
         시크릿 값이 아니라 로깅해도 무해하나, dict 통째 로깅은 여전히 금지).
         """
@@ -224,7 +258,20 @@ class Spawner:
             "SECRETS_DIR": SECRETS_MOUNT,
         }
 
-        # dispatch HTTP 인증 공유 시크릿(값). 미설정이면 생략(사내망 신뢰).
+        # worker 동시 실행 **안전 상한**(runaway 방지 백스톱 — 정책 cap 아님). worker는
+        # central이 dispatch한 잡을 모두 동시에 굴린다(진짜 스로틀은 central의 서버 자원
+        # 어드미션). 여기서는 그 안전 상한만 env WORKER_CONCURRENCY로 주입한다.
+        # 값: run.worker_max_concurrency(>0). 미설정(구 config)이면 생략 → worker가 기본 64로 파생.
+        run_cfg = getattr(cfg, "run", None)
+        wc = 0
+        try:
+            wc = int(getattr(run_cfg, "worker_max_concurrency", 0) or 0)
+        except (TypeError, ValueError):
+            wc = 0
+        if wc > 0:
+            env["WORKER_CONCURRENCY"] = str(wc)
+
+        # dispatch HTTP 인증 공유 시크릿(값). 미설정이면 생략(신뢰 네트워크 전제).
         if getattr(cfg, "worker_shared_secret", ""):
             env["WORKER_SHARED_SECRET"] = cfg.worker_shared_secret
 
@@ -248,21 +295,38 @@ class Spawner:
             if val:
                 env["CLAUDE_CODE_OAUTH_TOKEN"] = val
 
-        # Jira/GitLab 토큰: 값이 아니라 **상대 참조(*_REF)** + 파일경로(*_FILE) 포인터.
+        # Jira/forge 토큰: 값이 아니라 **상대 참조(*_REF)** + 파일경로(*_FILE) 포인터.
         # ⚠️ from_env가 읽는 것은 *_REF 다(*_FILE은 하위호환/보조). *_REF 누락 = 프로비저닝 skip.
         jira_ref = getattr(secrets_ref, "jira_token", "") if secrets_ref else ""
         if jira_ref:
             env["JIRA_TOKEN_REF"] = jira_ref
             env["JIRA_TOKEN_FILE"] = self._in_container_secret(jira_ref)
-        gitlab_ref = getattr(secrets_ref, "gitlab_token", "") if secrets_ref else ""
-        if gitlab_ref:
-            env["GITLAB_TOKEN_REF"] = gitlab_ref
-            env["GITLAB_TOKEN_FILE"] = self._in_container_secret(gitlab_ref)
+        # forge 토큰 참조: 정본 forge_token, 없으면 레거시 gitlab_token(옛 registry.json).
+        forge_ref = ""
+        if secrets_ref:
+            forge_ref = (getattr(secrets_ref, "forge_token", "")
+                         or getattr(secrets_ref, "gitlab_token", ""))
+        if forge_ref:
+            forge_path = self._in_container_secret(forge_ref)
+            env["FORGE_TOKEN_REF"] = forge_ref
+            env["FORGE_TOKEN_FILE"] = forge_path
+            # 레거시 미러(같은 값) — 옛 이름을 읽는 컨테이너 내부 소비자 하위호환.
+            env["GITLAB_TOKEN_REF"] = forge_ref
+            env["GITLAB_TOKEN_FILE"] = forge_path
 
         # Jira actor 이메일: from_env는 DISPATCH_JIRA_EMAIL 우선, JIRA_EMAIL 폴백.
         if getattr(user, "jira_email", ""):
             env["DISPATCH_JIRA_EMAIL"] = user.jira_email
             env["JIRA_EMAIL"] = user.jira_email
+
+        # (선택) 완료 알림 @멘션용 **알림 채널 사용자 id**(값이지만 시크릿 아님).
+        # 정본은 provider 중립 이름이고 옛 이름도 같은 값으로 함께 방출한다.
+        # 없으면 둘 다 방출 생략(알림은 display_name 폴백으로 degrade).
+        notify_uid = (getattr(user, "notify_user_id", "")
+                      or getattr(user, "google_chat_user_id", "") or "")
+        if notify_uid:
+            env["DISPATCH_NOTIFY_USER_ID"] = notify_uid
+            env["DISPATCH_GOOGLE_CHAT_USER_ID"] = notify_uid
 
         return env
 
@@ -284,6 +348,10 @@ class Spawner:
           이 디렉토리에 ``claude-settings.json`` 이 이미 포함돼 컨테이너 내부에서는
           ``/run/secrets/<user>/claude-settings.json`` 로 접근 가능하다.
         - ``jad-<user>`` 명명 볼륨 → ``/home/app/.claude`` (rw). 볼륨명은 호스트경로 무관.
+        - (선택) ``<host_deploy_dir>/secrets/<webhook_ref>`` → ``/run/secrets/<webhook_ref>``
+          (ro). notify가 설정된 경우에만, worker의 :mod:`app.notify` 가 팀 Google Chat
+          웹훅을 읽도록 그 **파일 하나만** 바인드한다(service 디렉토리 전체 금지 —
+          최소권한). host_deploy_dir 미설정(로컬 폴백) 시엔 생략.
 
         ⚠️ 사전 인가 ``settings.json`` 은 **파일 바인드하지 않는다**(두 번째 spawn 버그
         픽스). 명명 볼륨(``jad-<user>``)이 이미 ``/home/app/.claude`` 를 덮어쓰므로 그
@@ -322,6 +390,16 @@ class Spawner:
             config_src = os.path.abspath("config")
             user_secret_src = os.path.join(base_dir, username)
 
+        # 공유 워크스페이스 named 볼륨(central·모든 워커가 공유하는 단일 클론 지점,
+        # 설계 §4). named 볼륨이라 **볼륨명으로** docker가 해석 → host_deploy_dir 무관
+        # (호스트 경로 매핑 불필요). central compose가 같은 이름(jad-workspace)으로
+        # 선언하므로 central·워커가 레포 한 벌을 공유한다(N중 클론·N번 pull 제거).
+        # bind 경로는 run.workspace_dir(=config 파생 orchestrator/dlc-meta/… 상위).
+        workspace_volume = getattr(getattr(cfg, "spawn", None), "workspace_volume", "") \
+            or DEFAULT_WORKSPACE_VOLUME
+        workspace_dir = getattr(getattr(cfg, "run", None), "workspace_dir", "") \
+            or DEFAULT_WORKSPACE_DIR
+
         volumes: dict = {
             # config (ro) — 항상 포함(크래시 픽스: worker가 /app/config/config.yaml 을 읽음).
             config_src: {"bind": CONFIG_DIR_IN_CONTAINER, "mode": "ro"},
@@ -330,7 +408,26 @@ class Spawner:
             # per-user 시크릿 디렉토리(값 + claude-settings.json) read-only.
             # 다른 사용자 시크릿은 안 보인다.
             user_secret_src: {"bind": posixpath.join(SECRETS_MOUNT, username), "mode": "ro"},
+            # 공유 워크스페이스(rw) — 레포 단일 클론 공유. 볼륨명으로 마운트(named).
+            workspace_volume: {"bind": workspace_dir, "mode": "rw"},
         }
+
+        # 완료 알림(notify)이 설정돼 있으면 팀 Google Chat 웹훅 시크릿 파일 "하나만"
+        # worker에 read-only로 바인드한다. worker의 :mod:`app.notify` 가 이 웹훅을
+        # base_dir(=/run/secrets) 기준 ``webhook_ref`` 경로로 읽어야 하는데(예:
+        # /run/secrets/service/google-chat-webhook), per-user 시크릿만 마운트하면
+        # 못 읽어 알림이 조용히 스킵된다.
+        # ⚠️ service/ 디렉토리 **전체**를 바인드하지 않는다 — 거기엔 central watcher의
+        #    jira-token 도 있어 worker에 노출하면 최소권한 위반. 웹훅 파일 단 하나만.
+        # 가드: host_deploy_dir(호스트 경로 해석 필수)·notify.enabled·webhook_ref가
+        #    모두 있을 때만 추가(로컬 폴백/미설정 시 생략).
+        notify_cfg = getattr(cfg, "notify", None)
+        webhook_ref = getattr(notify_cfg, "webhook_ref", "") if notify_cfg else ""
+        if host_deploy_dir and getattr(notify_cfg, "enabled", False) and webhook_ref:
+            rel = webhook_ref.replace("\\", "/").lstrip("/")
+            webhook_src = posixpath.join(host_deploy_dir, "secrets", rel)
+            volumes[webhook_src] = {"bind": self._in_container_secret(webhook_ref), "mode": "ro"}
+
         return volumes
 
     def build_spec(self, user, settings_path: Optional[str] = None) -> dict:
@@ -353,6 +450,17 @@ class Spawner:
             "mem_limit": cfg.spawn.mem_limit,
             "user": run_as,
             "detach": True,
+            # ⚠️ 좀비 프로세스(zombie/defunct) 방지 — **결정적 픽스**.
+            # 워커 컨테이너의 PID 1 은 `python -m app.main`(ENTRYPOINT)이다. 파이썬은
+            # 임의로 reparent된 손자 프로세스를 reap하지 않으므로, worker가 spawn한
+            # `claude` 가 git/esbuild/gradle 손자를 남긴 채 죽으면 그 손자들이 PID 1
+            # (python)로 reparent → **영구 좀비**로 쌓인다(컨테이너/데몬 재시작 전엔 안
+            # 없어짐, 실측 136개). Docker의 init(tini)을 PID 1 로 주입하면 tini가
+            # 고아를 reap한다. docker-py ``containers.run(init=True)`` →
+            # HostConfig.Init=true → dockerd가 tini를 PID 1 로 실행(우리 ENTRYPOINT는
+            # 그 자식). docker-py는 3.1.0+ 에서 이 kwarg를 지원한다(리포 requirements의
+            # unpinned ``docker`` = 7.x → 지원).
+            "init": True,
         }
 
     # -- 컨테이너 조회/상태 헬퍼 --
@@ -447,6 +555,136 @@ class Spawner:
             norm = raw or "stopped"
         self._safe_set_status(username, self.container_name(username), norm)
         return norm
+
+    # -- 배포 시 워커 이미지 reconcile(작업 C) --
+
+    def worker_image_id(self, image: Optional[str] = None) -> Optional[str]:
+        """현재 ``config.spawn.image`` 태그가 가리키는 **이미지 ID**(조회 실패 시 None).
+
+        배포가 이미지(jira-auto-dispatcher:latest)를 재빌드하면 같은 태그가 새 ID를
+        가리킨다. 실행 중인 워커 컨테이너의 이미지 ID와 이 값을 비교해 stale을 판정한다.
+        """
+        img = image or getattr(getattr(self.config, "spawn", None), "image", "")
+        if not img:
+            return None
+        try:
+            obj = self.client().images.get(img)
+        except Exception:  # noqa: BLE001 — 미존재/조회 실패 = 판정 불가(None)
+            return None
+        return getattr(obj, "id", None)
+
+    @staticmethod
+    def _container_image_id(container) -> Optional[str]:
+        """컨테이너가 실제로 실행 중인 이미지의 ID(조회 실패 시 None)."""
+        return getattr(getattr(container, "image", None), "id", None)
+
+    def _recreate_worker(self, user) -> str:
+        """워커 컨테이너를 제거 후 현재 이미지로 재spawn(이미지 갱신 반영)."""
+        username = getattr(user, "username", "") or str(user)
+        self.remove_worker(username)
+        cid = self.ensure_worker(user)
+        log.info("worker 재생성(이미지 갱신): %s", self.container_name(username))
+        return cid
+
+    def reconcile_workers(self, users, has_active_job: Callable[[str], bool],
+                          *, image_id: Optional[str] = None) -> dict:
+        """등록 enabled 사용자들의 워커 이미지를 현재 이미지 ID와 대조 → stale 조정.
+
+        배포가 central만 recreate하면 기존 워커는 **stale 이미지**로 남는다(워커측
+        변경 미반영). 이 메서드가 부팅 시 각 워커의 실행 이미지 ID를 현재
+        ``config.spawn.image`` ID와 비교해:
+            - **동일** → no-op(최신). 혹시 대기 중이던 pending에서 제거.
+            - **stale + 유휴**(활성 잡 없음) → 즉시 remove+재spawn.
+            - **stale + 활성 잡**(running/cancelling) → **드레인**: 지금 죽이지 않고
+              pending에 표시만 해뒀다가, 그 잡이 terminal로 끝난 뒤 재생성한다
+              (:meth:`reconcile_pending`, tick에서 호출). in-flight 잡 보호.
+
+        모두 **best-effort·예외격리**(한 사용자 실패가 다른 사용자/부팅을 막지 않음).
+        시크릿은 로깅하지 않는다(username은 시크릿 아님).
+
+        Args:
+            users: 재생성 스펙 조립에 필요한 **user 레코드** 이터러블(enabled만 넘길 것).
+            has_active_job: ``username -> bool`` — 그 사용자에게 활성 잡이 있는지.
+            image_id: 현재 이미지 ID 주입(없으면 :meth:`worker_image_id` 조회).
+
+        Returns:
+            ``{"recreated": [...], "deferred": [...], "skipped": [...], "errors": [...]}``.
+        """
+        summary: dict = {"recreated": [], "deferred": [], "skipped": [], "errors": []}
+        current = image_id if image_id is not None else self.worker_image_id()
+        if not current:
+            log.warning("현재 워커 이미지 ID 확인 불가 — reconcile 생략(best-effort)")
+            return summary
+
+        for user in users:
+            username = getattr(user, "username", "") or str(user)
+            try:
+                container = self._get_container(self.container_name(username))
+                if container is None:
+                    # enabled인데 컨테이너 부재 = 이미지 stale 조정 대상 아님(별도
+                    # 라이프사이클: ensure_worker가 최초 기동). 여기선 건너뛴다.
+                    summary["skipped"].append(username)
+                    continue
+                # ⚠️ 이미지 ID inspect는 rebuild로 옛 ID가 사라지면 ImageNotFound(404)를
+                # 던진다(실측). 예외로 죽어 재생성이 스킵되면 stale 워커가 방치되므로,
+                # inspect 실패(ImageNotFound/404)를 **확실한 stale**로 취급한다(수정 3).
+                try:
+                    cur = self._container_image_id(container)
+                    up_to_date = cur is not None and cur == current
+                except Exception as exc:  # noqa: BLE001 — 아래에서 404만 stale로 흡수
+                    if not _is_image_not_found(exc):
+                        raise  # 비-404 예외는 상위 per-user 격리(errors)로.
+                    log.info(
+                        "worker 이미지 inspect ImageNotFound(404) → stale 판정: %s",
+                        self.container_name(username),
+                    )
+                    up_to_date = False
+                if up_to_date:
+                    self._pending_recreate.discard(username)  # 최신 → 대기 해제
+                    summary["skipped"].append(username)
+                    continue
+                # stale(다르거나 판정 불가/404) → 유휴면 즉시, 활성이면 드레인.
+                if has_active_job(username):
+                    self._pending_recreate.add(username)
+                    summary["deferred"].append(username)
+                    log.info("worker 이미지 stale이나 활성 잡 있음 → 드레인 대기: %s",
+                             self.container_name(username))
+                else:
+                    self._recreate_worker(user)
+                    self._pending_recreate.discard(username)
+                    summary["recreated"].append(username)
+            except Exception:  # noqa: BLE001 — 사용자별 격리(부팅/타 사용자 보호)
+                log.exception("worker reconcile 실패(격리): %s", username)
+                summary["errors"].append(username)
+        return summary
+
+    def reconcile_pending(self, has_active_job: Callable[[str], bool]) -> dict:
+        """드레인 대기 중이던 워커를, 활성 잡이 끝났으면 재생성한다(tick에서 주기 호출).
+
+        :meth:`reconcile_workers` 가 stale+활성으로 미뤄둔 사용자들을 재검사해, 이제
+        유휴면(활성 잡 없음) remove+재spawn한다. 아직 활성이면 다음 tick으로 미룬다.
+        best-effort·예외격리. user 레코드는 registry에서 조회한다.
+
+        Returns:
+            ``{"recreated": [...], "still_active": [...], "errors": [...]}``.
+        """
+        summary: dict = {"recreated": [], "still_active": [], "errors": []}
+        for username in list(self._pending_recreate):
+            try:
+                if has_active_job(username):
+                    summary["still_active"].append(username)
+                    continue
+                rec = self.registry.get(username) if self.registry is not None else None
+                if rec is None:
+                    self._pending_recreate.discard(username)  # 사라진 사용자 → 정리
+                    continue
+                self._recreate_worker(rec)
+                self._pending_recreate.discard(username)
+                summary["recreated"].append(username)
+            except Exception:  # noqa: BLE001 — 사용자별 격리
+                log.exception("pending worker 재생성 실패(격리): %s", username)
+                summary["errors"].append(username)
+        return summary
 
     # -- 하위호환 별칭(기존 스텁 시그니처) --
 

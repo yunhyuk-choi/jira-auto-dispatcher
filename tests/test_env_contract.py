@@ -36,11 +36,12 @@ def _cfg(base_dir: str):
     )
 
 
-def _user():
+def _user(google_chat_user_id=""):
     return UserRecord(
         username="testuser",
         jira_account_id="acc",
         jira_email="yh@x.com",
+        google_chat_user_id=google_chat_user_id,
         permission_level="bypass",
         identity=Identity(git_name="Test User", git_email="you@example.com"),
         secrets_ref=SecretsRef(
@@ -94,6 +95,63 @@ def test_build_env_emits_from_env_contract_keys(tmp_path):
     assert env["JIRA_TOKEN_REF"] == "testuser/jira-token"
     assert env["GITLAB_TOKEN_REF"] == "testuser/gitlab-token"
     assert env["CLAUDE_OAUTH_TOKEN_REF"] == "testuser/claude-oauth-token"
+
+
+def test_build_env_emits_neutral_forge_names_alongside_legacy(tmp_path):
+    """forge 중립 이름이 정본이고, 옛 이름도 **같은 값**으로 함께 나간다(하위호환)."""
+    base = str(tmp_path / "secrets")
+    env = Spawner(_cfg(base)).build_env(_user())
+    assert env["FORGE_TOKEN_REF"] == env["GITLAB_TOKEN_REF"] == "testuser/gitlab-token"
+    assert env["FORGE_TOKEN_FILE"] == env["GITLAB_TOKEN_FILE"]
+    # 중립 이름만 읽어도 worker 가 그대로 조립된다.
+    creds = UserCreds.from_env("testuser",
+                               env={k: v for k, v in env.items()
+                                    if not k.startswith("GITLAB_")})
+    assert creds.forge_token_ref == "testuser/gitlab-token"
+
+
+def test_build_env_reads_new_registry_key_name(tmp_path):
+    """레지스트리가 신규 secrets_ref.forge_token 만 가진 경우도 방출된다."""
+    base = str(tmp_path / "secrets")
+    user = _user()
+    user.secrets_ref = SecretsRef(jira_token="testuser/jira-token",
+                                  forge_token="testuser/forge-token",
+                                  claude_oauth_token="testuser/claude-oauth-token")
+    env = Spawner(_cfg(base)).build_env(user)
+    assert env["FORGE_TOKEN_REF"] == "testuser/forge-token"
+    assert env["GITLAB_TOKEN_REF"] == "testuser/forge-token"
+
+
+def test_build_env_roundtrips_notify_user_id_under_both_names(tmp_path):
+    base = str(tmp_path / "secrets")
+    user = _user(google_chat_user_id="123456789")
+    env = Spawner(_cfg(base)).build_env(user)
+    assert env["DISPATCH_NOTIFY_USER_ID"] == "123456789"
+    assert env["DISPATCH_GOOGLE_CHAT_USER_ID"] == "123456789"
+    # 중립 이름만 남겨도 수신된다.
+    creds = UserCreds.from_env("testuser",
+                               env={k: v for k, v in env.items()
+                                    if k != "DISPATCH_GOOGLE_CHAT_USER_ID"})
+    assert creds.notify_user_id == "123456789"
+
+
+def test_build_env_roundtrips_google_chat_user_id_when_present(tmp_path):
+    """google_chat_user_id가 있으면 spawner가 방출하고 from_env가 멘션용으로 수신."""
+    base = str(tmp_path / "secrets")
+    user = _user(google_chat_user_id="123456789")
+    env = Spawner(_cfg(base)).build_env(user)
+    assert env["DISPATCH_GOOGLE_CHAT_USER_ID"] == "123456789"
+    creds = UserCreds.from_env(user.username, env=env)
+    assert creds.google_chat_user_id == "123456789"
+
+
+def test_build_env_omits_google_chat_user_id_when_absent(tmp_path):
+    """없으면 방출 생략 → from_env는 빈 값(display_name 폴백)."""
+    base = str(tmp_path / "secrets")
+    env = Spawner(_cfg(base)).build_env(_user())  # google_chat_user_id=""
+    assert "DISPATCH_GOOGLE_CHAT_USER_ID" not in env
+    creds = UserCreds.from_env("testuser", env=env)
+    assert creds.google_chat_user_id == ""
 
 
 def test_build_env_does_not_leak_token_values(tmp_path):

@@ -14,9 +14,18 @@ __pycache__/
 *.pyc
 
 # --- 런타임에 clone 되는 연동 레포 (앱이 소유하지 않음) ---
-orchestrator/
-dlc-meta/
-dataspace_docs/
+# 현행 배치는 공유 워크스페이스(`run.workspace_dir`) 하위 단일 클론이라 위의 `workspace/`
+# 한 줄이 이미 전부 덮는다. 아래는 workspace_dir 를 안 쓰던 옛 배포가 리포 루트에 바로
+# 클론해 둔 잔재용 — 그래서 **루트 앵커(`/`)** 로 정확히 리포 루트만 겨냥한다.
+#
+# ⚠️ 설계 문서 레포의 파생 디렉토리명이 `dataspace_docs` → 범용 `docs` 로 바뀌었지만,
+#    여기에 `docs/` 를 (앵커 없이) 추가하면 **추적 중인 `docs/DESIGN-*.md` 가 통째로
+#    무시된다.** 런타임 클론이 앉는 곳은 `<workspace_dir>/docs` 뿐이므로 워크스페이스
+#    경로로만 명시한다(위 `workspace/` 와 중복이지만 의도를 문서로 남긴다).
+/orchestrator/
+/dlc-meta/
+/dataspace_docs/
+/workspace/docs/
 
 # --- 로컬 Claude 세션/인증 (볼륨으로 영속) ---
 .claude/

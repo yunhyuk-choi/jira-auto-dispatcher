@@ -84,11 +84,14 @@ def test_rollback_skips_when_branch_absent():
     assert not any(a[:2] == ["branch", "-D"] for a in calls)
 
 
-def test_rollback_deletes_branch_and_closes_mr():
+def test_rollback_deletes_branch_and_closes_mr(tmp_path):
     seen = []
 
     def git_run(args, cwd=None):
         seen.append(list(args))
+        if args[:2] == ["remote", "get-url"]:
+            return SimpleNamespace(returncode=0,
+                                   stdout="http://server.example/g/p.git", stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     closed = {}
@@ -97,16 +100,27 @@ def test_rollback_deletes_branch_and_closes_mr():
         closed["url"] = mr_url
         return True
 
+    # per-user 토큰 준비(#6): 원격 삭제-push 는 per-user 토큰 URL 로 나가야 한다.
+    (tmp_path / "u1").mkdir()
+    (tmp_path / "u1" / "gitlab-token").write_text("TKN123", encoding="utf-8")
+    cfg = SimpleNamespace(run=SimpleNamespace(workspace_dir="/ws"),
+                          secrets=SimpleNamespace(base_dir=str(tmp_path)))
+    creds = ar.UserCreds(user="u1", gitlab_token_ref="u1/gitlab-token")
+
     job = {"ticket": "PROJ-1", "branch": "auto/PROJ-1", "target_repos": ["repoA"],
            "mr_url": "https://gitlab.example.com/g/p/-/merge_requests/3"}
-    rb = w.rollback_job(job, ar.UserCreds(user="u1"), _rb_cfg(),
-                        git_run=git_run, mr_closer=mr_closer)
+    rb = w.rollback_job(job, creds, cfg, git_run=git_run, mr_closer=mr_closer)
     assert rb["rolledback"] is True
     assert rb["branch_deleted"] is True
     assert rb["mr_closed"] is True
     assert closed["url"].endswith("merge_requests/3")
     assert ["branch", "-D", "auto/PROJ-1"] in seen           # 로컬 삭제
-    assert ["push", "origin", "--delete", "auto/PROJ-1"] in seen  # 원격 삭제
+    # #6: ambient `push origin --delete` 금지 — per-user 토큰 URL 로 원격 삭제.
+    assert not any(a[:2] == ["push", "origin"] for a in seen)
+    del_push = [a for a in seen if a[:1] == ["push"] and "--delete" in a]
+    assert del_push, "원격 삭제-push 가 있어야 한다"
+    assert "oauth2:TKN123@" in del_push[0][1]                 # 명시 토큰 URL
+    assert del_push[0][-1] == "auto/PROJ-1"
 
 
 # --- worker 루프: 실행 중 취소 → 롤백 + cancelled 회신 -----------------------

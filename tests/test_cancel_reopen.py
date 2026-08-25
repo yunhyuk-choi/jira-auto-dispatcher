@@ -143,9 +143,10 @@ def _wire_disp(worker_secret=""):
 def test_control_reports_cancel_flag(isolated_state):
     _, _, sch, disp = _wire_disp()
     disp.enqueue("u1", Job(ticket="PROJ-1", target_repos=["repoA"]))
-    assert disp.control("u1", "PROJ-1") == {"cancel": False}
+    # 제어 채널은 cancel 불리언(하위호환) + action 문자열을 함께 준다.
+    assert disp.control("u1", "PROJ-1") == {"cancel": False, "action": "none"}
     sch.cancel_job("PROJ-1")                       # running → cancelling + flag
-    assert disp.control("u1", "PROJ-1") == {"cancel": True}
+    assert disp.control("u1", "PROJ-1") == {"cancel": True, "action": "cancel"}
     with pytest.raises(PermissionError):
         disp.control("other", "PROJ-1")
     with pytest.raises(KeyError):
@@ -168,11 +169,11 @@ def test_http_control_route(isolated_state):
 
     assert client.get("/dispatch/u1/PROJ-1/control").status_code == 401  # 인증 없음
     r = client.get("/dispatch/u1/PROJ-1/control", headers={"X-Worker-Secret": "secret"})
-    assert r.status_code == 200 and r.get_json() == {"cancel": False}
+    assert r.status_code == 200 and r.get_json() == {"cancel": False, "action": "none"}
 
     sch.cancel_job("PROJ-1")
     r = client.get("/dispatch/u1/PROJ-1/control", headers={"X-Worker-Secret": "secret"})
-    assert r.get_json() == {"cancel": True}
+    assert r.get_json() == {"cancel": True, "action": "cancel"}
 
     r = client.get("/dispatch/u1/NOPE/control", headers={"X-Worker-Secret": "secret"})
     assert r.status_code == 404

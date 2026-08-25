@@ -32,11 +32,28 @@ log = logging.getLogger("jad.onboarding")
 # 온보딩 필수 자격증명 필드.
 _REQUIRED = ("username", "jira_account_id", "jira_email", "jira_token", "claude_setup_token")
 
-# 시크릿 파일명(secrets.base_dir/<user>/ 하위). secrets_ref는 "<user>/<파일명>".
+# 온보딩 폼 필드 → (시크릿 파일명, 레지스트리 secrets_ref 키).
+# 파일은 secrets.base_dir/<user>/ 아래 0600 으로 쓰이고 secrets_ref 에는 "<user>/<파일명>"
+# 참조만 남는다.
+#
+# ⚠️ forge 중립화: 개인 코드호스팅 토큰의 이름을 ``gitlab_token``/``gitlab-token`` 에서
+# ``forge_token``/``forge-token`` 으로 일반화했다(GitHub 도 쓰는 시스템이다). 하위호환:
+#   - **읽기**: 옛 폼 필드 이름(``gitlab_token``)으로 오는 요청을 계속 받는다
+#     (:data:`_LEGACY_SECRET_FIELDS`).
+#   - **기존 배포**: 이미 등록된 사용자의 참조는 레지스트리에 그대로 남아 있고
+#     (``<user>/gitlab-token``) 아무도 그 파일을 옮기지 않는다 — 계속 동작한다.
+#     새 이름은 **이번 등록부터** 적용된다.
+#   - **방출**: 레지스트리는 ``forge_token``·``gitlab_token`` 양쪽에 같은 참조를 싣는다
+#     (:class:`app.registry.SecretsRef`).
 _SECRET_FILES = {
-    "jira_token": "jira-token",
-    "gitlab_token": "gitlab-token",
-    "claude_setup_token": "claude-oauth-token",
+    "jira_token": ("jira-token", "jira_token"),
+    "forge_token": ("forge-token", "forge_token"),
+    "claude_setup_token": ("claude-oauth-token", "claude_oauth_token"),
+}
+
+#: 폼 필드의 레거시 별칭(옛 관리 UI·스크립트가 보내는 이름) — 신규 이름이 비면 폴백.
+_LEGACY_SECRET_FIELDS = {
+    "forge_token": ("gitlab_token",),
 }
 
 
@@ -126,13 +143,18 @@ def register_onboarding_api(app, comps: dict) -> None:
             return jsonify({"error": "secrets.base_dir 미설정(서버 구성 오류)"}), 500
 
         # 3) 시크릿 값을 파일로 저장(0600) → 참조만 레지스트리에.
+        #    신규 필드 이름이 비면 레거시 별칭(_LEGACY_SECRET_FIELDS)도 본다 — 옛 관리
+        #    UI·스크립트가 보내는 요청을 계속 받기 위해서다(하위호환).
         secrets_ref = {}
-        for field, filename in _SECRET_FILES.items():
-            value = str(data.get(field, "")).strip()
+        for field, (filename, ref_key) in _SECRET_FILES.items():
+            value = str(data.get(field, "") or "").strip()
+            if not value:
+                for alias in _LEGACY_SECRET_FIELDS.get(field, ()):
+                    value = str(data.get(alias, "") or "").strip()
+                    if value:
+                        break
             if value:
-                ref = _write_secret(base_dir, username, filename, value)
-                key = "claude_oauth_token" if field == "claude_setup_token" else field
-                secrets_ref[key] = ref
+                secrets_ref[ref_key] = _write_secret(base_dir, username, filename, value)
 
         # 4) 레코드 조립(enabled=false 안전 기본). 토큰 값은 담지 않는다.
         record = UserRecord.from_dict(
@@ -141,6 +163,12 @@ def register_onboarding_api(app, comps: dict) -> None:
                 "display_name": str(data.get("display_name", "")).strip() or username,
                 "jira_account_id": str(data.get("jira_account_id", "")).strip(),
                 "jira_email": str(data.get("jira_email", "")).strip(),
+                # (선택) 완료 알림 @멘션용 **알림 채널 사용자 id**(provider 중립 — Google
+                # Chat=숫자 userId / Slack=U…). 없으면 이름만 표시. 옛 폼 필드 이름
+                # (google_chat_user_id)으로 오는 요청도 계속 받는다(하위호환).
+                "notify_user_id": str(
+                    data.get("notify_user_id", "") or data.get("google_chat_user_id", "")
+                ).strip(),
                 "enabled": False,  # 안전 기본 — 운영자가 검토 후 활성화
                 "autonomy_mode": str(data.get("autonomy_mode", "B")).strip().upper() or "B",
                 "permission_level": str(data.get("permission_level", "bypass")).strip().lower()

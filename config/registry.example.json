@@ -1,11 +1,12 @@
 {
-  "_comment": "레지스트리 예시. 실운영본은 state/registry.json(gitignore)에 온보딩 UI(POST /onboard)로 채워진다. 이 파일은 스키마 참고용이며 시크릿 '값'은 담지 않는다(secrets_ref는 secrets.base_dir 상대 참조/시크릿키만).",
+  "_comment": "레지스트리 예시. 실운영본은 state/registry.json(gitignore)에 온보딩 UI(POST /onboard)로 채워진다. 이 파일은 스키마 참고용이며 시크릿 '값'은 담지 않는다(secrets_ref는 secrets.base_dir 상대 참조/시크릿키만). forge_token 은 개인 코드호스팅 토큰 참조의 정본이며 옛 키 gitlab_token 도 계속 읽고 같은 값으로 미러한다.",
   "users": [
     {
       "username": "<username>",
       "display_name": "<username>",
       "jira_account_id": "<JIRA_ACCOUNT_ID>",
       "jira_email": "you@example.com",
+      "notify_user_id": "<알림 채널 사용자 id (선택, 완료 알림 @멘션). Google Chat=숫자 userId / Slack=U…. 옛 키 google_chat_user_id 도 계속 읽는다>",
       "enabled": true,
       "autonomy_mode": "B",
       "permission_level": "bypass",
@@ -27,7 +28,7 @@
       },
       "secrets_ref": {
         "jira_token": "<username>/jira-token",
-        "gitlab_token": "<username>/gitlab-token",
+        "forge_token": "<username>/forge-token",
         "claude_oauth_token": "<username>/claude-oauth-token"
       }
     }

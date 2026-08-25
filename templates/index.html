@@ -113,6 +113,97 @@
         display: block;
         margin-top: 2px;
       }
+      h4 {
+        color: #9cdcfe;
+        margin: 6px 0 4px;
+        font-size: 0.95em;
+      }
+      /* 진행 중 패널 — 상단에서 running 잡만 바로 보이게. */
+      #running-panel {
+        background-color: #14261f;
+        border: 1px solid #2d5a45;
+        border-radius: 6px;
+        padding: 10px 12px;
+        margin-bottom: 14px;
+      }
+      /* 필터/검색 바 — 사용자 드롭다운 + 부분일치 검색. */
+      #jobs-controls {
+        align-items: flex-end;
+        margin: 4px 0 10px;
+      }
+      #jobs-controls .filter-user {
+        min-width: 160px;
+      }
+      #jobs-controls .filter-search {
+        flex: 1;
+      }
+      /* 전체 목록 스크롤 컨테이너 — 페이지 전체가 길어지지 않게 내부 스크롤. */
+      #jobs-scroll {
+        max-height: 60vh;
+        overflow-y: auto;
+        border: 1px solid #3c3c3c;
+        border-radius: 4px;
+      }
+      #jobs-scroll table {
+        margin-top: 0;
+      }
+      /* 스크롤해도 헤더 고정. */
+      #jobs-scroll thead th {
+        position: sticky;
+        top: 0;
+        background-color: #252526;
+        z-index: 1;
+      }
+      /* 진행중 행 하이라이트 — 스크롤 중 직관적으로 구분. */
+      tr.running-row > td {
+        background-color: #17352a;
+      }
+      /* 전체 잡 테이블 — 7컬럼이 컨테이너 폭 안에 들어오도록 고정 레이아웃 + 줄바꿈.
+         가로 스크롤 방지: 폭 합 100%, 긴 문자열(reset_at ISO 등)은 강제 줄바꿈. */
+      #jobs-table {
+        table-layout: fixed;
+      }
+      #jobs-table th,
+      #jobs-table td {
+        word-break: break-word;
+        overflow-wrap: anywhere;
+      }
+      #jobs-table th:nth-child(1), #jobs-table td:nth-child(1) { width: 13%; } /* ticket */
+      #jobs-table th:nth-child(2), #jobs-table td:nth-child(2) { width: 13%; } /* user */
+      #jobs-table th:nth-child(3), #jobs-table td:nth-child(3) { width: 11%; } /* status */
+      #jobs-table th:nth-child(4), #jobs-table td:nth-child(4) { width: 11%; } /* 취소 사유(대개 —) */
+      #jobs-table th:nth-child(5), #jobs-table td:nth-child(5) { width: 12%; } /* reset_at(대개 —) */
+      #jobs-table th:nth-child(6), #jobs-table td:nth-child(6) { width: 22%; } /* 갱신시각(KST) */
+      #jobs-table th:nth-child(7), #jobs-table td:nth-child(7) { width: 18%; } /* 동작 */
+      /* 취소 사유 배지. */
+      .badge {
+        display: inline-block;
+        padding: 1px 8px;
+        border-radius: 10px;
+        font-size: 0.75em;
+        font-weight: bold;
+        white-space: nowrap;
+      }
+      .badge-cancelled {
+        background-color: #5a1d1d;
+        color: #f4a6a6;
+      }
+      .badge-optout {
+        background-color: #4a3a0a;
+        color: #e6c66a;
+      }
+      .badge-reassigned {
+        background-color: #263a5a;
+        color: #8fbaf0;
+      }
+      .badge-manual {
+        background-color: #3a3a3a;
+        color: #cccccc;
+      }
+      .badge-other {
+        background-color: #333333;
+        color: #aaaaaa;
+      }
     </style>
   </head>
   <body>
@@ -193,16 +284,18 @@
             >
           </div>
           <div>
-            <label>gitlab_token</label>
+            <label>forge_token</label>
             <input
               type="password"
-              name="gitlab_token"
-              placeholder="GitLab PAT"
-              title="팀 GitLab 개인 액세스 토큰(scope: api). 발급: GitLab → 우측상단 아바타 → Edit profile → Access Tokens."
+              name="forge_token"
+              placeholder="GitLab PAT / GitHub PAT"
+              title="개인 코드호스팅 액세스 토큰. GitLab: 아바타 → Edit profile → Access Tokens(scope: api) / GitHub: Settings → Developer settings → Personal access tokens(scope: repo)."
             />
             <span class="hint"
-              >팀 GitLab 개인 액세스 토큰(scope <code>api</code>). 발급: GitLab →
-              우측상단 아바타 → Edit profile → Access Tokens.</span
+              >개인 코드호스팅(forge) 액세스 토큰 — 브랜치 push·MR/PR 작성자 귀속에
+              쓰인다. GitLab: 아바타 → Edit profile → Access Tokens(scope
+              <code>api</code>) / GitHub: Settings → Developer settings → Personal
+              access tokens(scope <code>repo</code>).</span
             >
           </div>
           <div>
@@ -308,20 +401,58 @@
     <!-- 3. 잡 현황 -->
     <section id="jobs-section">
       <h3>잡 현황 (전 사용자)</h3>
-      <table id="jobs-table">
-        <thead>
-          <tr>
-            <th>ticket</th>
-            <th>user</th>
-            <th>status</th>
-            <th>reset_at</th>
-            <th>재개</th>
-          </tr>
-        </thead>
-        <tbody id="jobs-tbody">
-          <tr><td colspan="5">불러오는 중…</td></tr>
-        </tbody>
-      </table>
+
+      <!-- 3a. 진행 중 패널 — running 잡만 상단에 별도로 -->
+      <div id="running-panel">
+        <h4>🟢 진행 중 (running)</h4>
+        <table id="running-table">
+          <thead>
+            <tr>
+              <th>ticket</th>
+              <th>user</th>
+              <th>repos</th>
+              <th>요약</th>
+            </tr>
+          </thead>
+          <tbody id="running-tbody">
+            <tr><td colspan="4">불러오는 중…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- 3b. 필터/검색 — 두 목록에 모두 적용 -->
+      <div class="flex-form" id="jobs-controls">
+        <div class="filter-user">
+          <label>사용자 필터</label>
+          <select id="jobs-user-filter">
+            <option value="">전체</option>
+          </select>
+        </div>
+        <div class="filter-search">
+          <label>검색 (티켓 · 요약 · user 부분일치)</label>
+          <input type="text" id="jobs-search" placeholder="검색어 입력" />
+        </div>
+      </div>
+
+      <!-- 3c. 전체 목록(모든 상태) — 내부 스크롤 -->
+      <div id="jobs-scroll">
+        <table id="jobs-table">
+          <thead>
+            <tr>
+              <th>ticket</th>
+              <th>user</th>
+              <th>status</th>
+              <th>취소 사유</th>
+              <th>reset_at</th>
+              <th>갱신시각</th>
+              <th>동작</th>
+            </tr>
+          </thead>
+          <tbody id="jobs-tbody">
+            <tr><td colspan="7">불러오는 중…</td></tr>
+          </tbody>
+        </table>
+      </div>
     </section>
 
     <!-- 4. Claude 인증(폴백) — 브라우저 로그인 (Phase 0 — 동작) -->
@@ -543,43 +674,203 @@
       });
 
       // --- [잡 현황/재개] (Phase 6) ---
+      // /api/jobs 스냅샷 캐시 — 필터/검색은 재fetch 없이 이 캐시로 재렌더한다.
+      let _jobsCache = [];
+
+      // 최신순 폴백: updated_at 이 둘 다 없을 때만 ticket 키를 숫자 인식 내림차순
+      // 정렬(PROJ-42 > PROJ-7). 일반적으론 updated_at(활동시각)이 정렬 기준이다.
+      function ticketCmp(a, b) {
+        return String(b || "").localeCompare(String(a || ""), undefined, {
+          numeric: true,
+        });
+      }
+
+      // 전체 목록 정렬 비교자: running 잡을 최상단으로, 그다음 updated_at(활동시각)
+      // 내림차순(최근 먼저). updated_at 없는 잡은 항상 맨 아래(가장 오래된 취급).
+      // updated_at 은 ISO-8601 UTC 문자열(동일 포맷·오프셋)이라 문자열 비교로 시각순 정렬.
+      function jobCmp(a, b) {
+        const ar = a.status === "running" ? 0 : 1;
+        const br = b.status === "running" ? 0 : 1;
+        if (ar !== br) return ar - br;
+        const at = a.updated_at || "";
+        const bt = b.updated_at || "";
+        if (at && bt) return at < bt ? 1 : at > bt ? -1 : 0; // 내림차순
+        if (at) return -1; // b 미보유 → a(최근값 보유)가 위로
+        if (bt) return 1; // a 미보유 → b가 위로
+        return ticketCmp(a.ticket, b.ticket); // 둘 다 없음 → 티켓순 폴백
+      }
+
+      // updated_at(ISO-8601 UTC) → KST(UTC+9) "YYYY년 M월 D일 H시 M분"(24h, 초·TZ 없음).
+      // 뷰어 로컬 TZ 에 의존하지 않도록 UTC 파싱 후 +9h 하고 getUTC* 로 벽시계값을 읽는다.
+      function fmtKst(iso) {
+        if (!iso) return "—";
+        const d = new Date(iso);
+        if (isNaN(d.getTime())) return "—";
+        const k = new Date(d.getTime() + 9 * 3600 * 1000);
+        return (
+          k.getUTCFullYear() + "년 " +
+          (k.getUTCMonth() + 1) + "월 " +
+          k.getUTCDate() + "일 " +
+          k.getUTCHours() + "시 " +
+          k.getUTCMinutes() + "분"
+        );
+      }
+
+      // cancel_reason → 배지(라벨·클래스). 취소됨(상태)/추적해제(라벨)/재배정/수동 구별.
+      const CANCEL_BADGE = {
+        status_cancelled: ["취소됨", "badge-cancelled"],
+        untracked_optout: ["추적해제", "badge-optout"],
+        reassigned: ["재배정", "badge-reassigned"],
+        manual: ["수동", "badge-manual"],
+        other: ["기타", "badge-other"],
+      };
+
+      function cancelBadgeHtml(j) {
+        // cancelled/cancelling 잡에만 사유 배지를 붙인다.
+        if (j.status !== "cancelled" && j.status !== "cancelling") return "";
+        const m = CANCEL_BADGE[j.cancel_reason];
+        if (!m) return '<span class="badge badge-other">취소</span>';
+        return '<span class="badge ' + m[1] + '">' + m[0] + "</span>";
+      }
+
+      // 현재 필터/검색을 적용해 정렬된 잡 배열을 만든다(두 목록 공용).
+      function filteredJobs() {
+        const fu = document.getElementById("jobs-user-filter").value;
+        const term = document
+          .getElementById("jobs-search")
+          .value.trim()
+          .toLowerCase();
+        let jobs = _jobsCache.slice();
+        if (fu) jobs = jobs.filter((j) => j.user === fu);
+        if (term)
+          jobs = jobs.filter((j) =>
+            [j.ticket, j.log_summary, j.user].some((f) =>
+              String(f == null ? "" : f)
+                .toLowerCase()
+                .includes(term)
+            )
+          );
+        jobs.sort(jobCmp);
+        return jobs;
+      }
+
+      // 사용자 필터 드롭다운 옵션 갱신(현재 선택 보존).
+      function syncUserFilter() {
+        const sel = document.getElementById("jobs-user-filter");
+        const cur = sel.value;
+        const users = Array.from(
+          new Set(_jobsCache.map((j) => j.user).filter(Boolean))
+        ).sort();
+        sel.innerHTML =
+          '<option value="">전체</option>' +
+          users
+            .map((u) => '<option value="' + esc(u) + '">' + esc(u) + "</option>")
+            .join("");
+        // 선택값이 여전히 유효하면 유지.
+        sel.value = users.includes(cur) ? cur : "";
+      }
+
+      function renderJobs() {
+        const jobs = filteredJobs();
+        const tbody = document.getElementById("jobs-tbody");
+        const rtbody = document.getElementById("running-tbody");
+
+        // 3a. 진행 중 패널 — running 잡만(같은 필터/검색 적용).
+        const running = jobs.filter((j) => j.status === "running");
+        rtbody.innerHTML = running.length
+          ? running
+              .map(
+                (j) =>
+                  "<tr>" +
+                  "<td>" + esc(j.ticket) + "</td>" +
+                  "<td>" + esc(j.user) + "</td>" +
+                  "<td>" + esc((j.target_repos || []).join(", ")) + "</td>" +
+                  "<td>" + esc(j.log_summary || "") + "</td>" +
+                  "</tr>"
+              )
+              .join("")
+          : '<tr><td colspan="4">(진행 중 잡 없음)</td></tr>';
+
+        // 3c. 전체 목록(모든 상태).
+        if (!jobs.length) {
+          tbody.innerHTML = '<tr><td colspan="7">(잡 없음)</td></tr>';
+          return;
+        }
+        tbody.innerHTML = jobs
+          .map((j) => {
+            // 재개: interrupted 전용(reset_at 도래분 수동 tick).
+            // 재실행: **failed(실패) 잡만** 노출 — 사람이 수동 재-dispatch.
+            //   done/cancelled엔 노출 안 함(완료된 작업의 의도치 않은 재작업 방지),
+            //   interrupted는 위 '재개'로 처리하므로 재실행 버튼 불필요.
+            const canRerun = j.status === "failed";
+            const actions =
+              (j.status === "interrupted"
+                ? '<button data-act="resume">재개</button> '
+                : "") +
+              (canRerun
+                ? '<button data-act="rerun" data-ticket="' +
+                  esc(j.ticket) +
+                  '">재실행</button>'
+                : "");
+            const rowCls = j.status === "running" ? ' class="running-row"' : "";
+            return (
+              "<tr" + rowCls + ">" +
+              "<td>" + esc(j.ticket) + "</td>" +
+              "<td>" + esc(j.user) + "</td>" +
+              "<td>" + esc(j.status) + "</td>" +
+              "<td>" + (cancelBadgeHtml(j) || "—") + "</td>" +
+              "<td>" + esc(j.reset_at || "") + "</td>" +
+              "<td>" + esc(fmtKst(j.updated_at)) + "</td>" +
+              "<td>" + (actions || "—") + "</td>" +
+              "</tr>"
+            );
+          })
+          .join("");
+      }
+
       async function loadJobs() {
         const tbody = document.getElementById("jobs-tbody");
         try {
           const res = await fetch("/api/jobs");
-          const jobs = await res.json();
-          if (!jobs.length) {
-            tbody.innerHTML = '<tr><td colspan="5">(잡 없음)</td></tr>';
-            return;
-          }
-          tbody.innerHTML = jobs
-            .map(
-              (j) =>
-                "<tr>" +
-                "<td>" + esc(j.ticket) + "</td>" +
-                "<td>" + esc(j.user) + "</td>" +
-                "<td>" + esc(j.status) + "</td>" +
-                "<td>" + esc(j.reset_at || "") + "</td>" +
-                "<td>" +
-                (j.status === "interrupted"
-                  ? '<button data-act="resume">재개</button>'
-                  : "—") +
-                "</td>" +
-                "</tr>"
-            )
-            .join("");
+          _jobsCache = await res.json();
+          syncUserFilter();
+          renderJobs();
         } catch (e) {
-          tbody.innerHTML = '<tr><td colspan="5">불러오기 실패: ' + esc(e) + "</td></tr>";
+          tbody.innerHTML =
+            '<tr><td colspan="7">불러오기 실패: ' + esc(e) + "</td></tr>";
         }
       }
 
+      // 필터/검색 입력 시 재fetch 없이 즉시 재렌더.
+      document
+        .getElementById("jobs-user-filter")
+        .addEventListener("change", renderJobs);
+      document
+        .getElementById("jobs-search")
+        .addEventListener("input", renderJobs);
+
       document.getElementById("jobs-tbody").addEventListener("click", async (ev) => {
-        const btn = ev.target.closest('button[data-act="resume"]');
-        if (!btn) return;
-        btn.disabled = true;
-        // reset_at 도래분 즉시 재적격(수동 tick).
-        await post("/api/resume", {});
-        loadJobs();
+        const resumeBtn = ev.target.closest('button[data-act="resume"]');
+        if (resumeBtn) {
+          resumeBtn.disabled = true;
+          // reset_at 도래분 즉시 재적격(수동 tick).
+          await post("/api/resume", {});
+          loadJobs();
+          return;
+        }
+        const rerunBtn = ev.target.closest('button[data-act="rerun"]');
+        if (rerunBtn) {
+          rerunBtn.disabled = true;
+          // 종결/중단 잡을 queued로 되돌려 재-dispatch(수동 재실행).
+          const ticket = rerunBtn.dataset.ticket;
+          const r = await post(
+            "/api/jobs/" + encodeURIComponent(ticket) + "/rerun",
+            {}
+          );
+          if (!r.ok)
+            alert("재실행 실패(" + r.status + "): " + (r.data.error || ""));
+          loadJobs();
+        }
       });
 
       // 초기 로드 + 주기 폴링.

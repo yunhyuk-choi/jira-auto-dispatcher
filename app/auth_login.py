@@ -4,7 +4,7 @@
     터미널 없이 웹에서 `claude auth login`을 완료한다. 개발서버 컨테이너에서
     최초 세션 인증/재인증 시 사용한다(`~/.claude` 볼륨에 영속).
 
-이식 출처: C:/workspace/claude-hacker/app.py 의 /start-login·/complete-login.
+이식 출처: `claude-hacker` 프로젝트의 /start-login·/complete-login.
 이 모듈은 스텁이 아니라 **동작하는** 이식본이다.
 
 흐름:

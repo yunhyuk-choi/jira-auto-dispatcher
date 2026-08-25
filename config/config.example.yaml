@@ -4,52 +4,254 @@
 #
 # 사용자별 트리거 목록은 여기가 아니라 레지스트리(state/registry.json)가
 # 소유한다(관리 UI 온보딩으로 채워짐). 예시는 config/registry.example.json 참조.
+#
+# "무엇을 물어야 하는가"의 기계가 읽는 정본은 app/setup_schema.py 다 — 이 파일은 그
+# 스키마의 **사람이 읽는 예시**이고, app/config.py 가 같은 키 경로를 런타임에 읽는다.
+# 옛 키 이름(match.* / notify.* / spawn.docker_host / run.dataspace_docs_* 등)도 계속
+# 읽으므로 기존 config.yaml 은 그대로 둬도 동작한다(신규 키가 있으면 신규가 이긴다).
 
 role: central
 server: { host: 0.0.0.0, port: 8787 }
 
-jira:
-  base_url: https://your-org.atlassian.net
-  project: <PROJECT_KEY>
-  poll_interval_sec: 60
-  watcher_token_file: service/jira-token   # 중앙이 Jira를 감시하는 토큰(내 것/봇). secrets.base_dir 상대
+# ⚠️ 풀 퍼미션 실행 동의(필수) — 이 시스템은 **사람의 매 단계 승인 없이** 도구 권한
+# (파일 쓰기·셸·git push)을 가진 코딩 에이전트를 헤드리스로 실행한다. 그 위험을 이해하고
+# 감수한다는 설치자의 명시 동의를 남긴다. 기본은 false(동의 안 함)이며 사람이 직접 켜야
+# 한다. (기존 배포 호환을 위해 지금은 미동의여도 부팅은 되고 경고만 남는다.)
+consent:
+  full_permissions: false
+  accepted_at: ""            # 동의 시각(ISO-8601, 예: 2026-08-25T09:00:00+09:00) — 감사 흔적
 
-match: { statuses: ["해야 할 일"] }
-
-webhook: { enabled: false, path: /jira-webhook, shared_secret_file: service/webhook-secret }
-
-resume: { work_hours: "08:00-18:00", timezone: Asia/Seoul, nightly_drain: "01:00-05:00", reset_buffer_sec: 120 }
-
-spawn:
-  image: jira-auto-dispatcher:latest
-  network: jad-net
-  central_url: http://central:8787
-  mem_limit: 4g
-  docker_host: tcp://socket-proxy:2375       # compose 기본(socket-proxy 경유). 직결 대안: unix:///var/run/docker.sock
-  run_as: "1000:1000"                         # worker 컨테이너 비-root 실행(특권 축소)
+# 어디에 세우는가. profile 하나만 고르면 나머지가 파생된다(app/setup_schema.PROFILE_DEFAULTS):
+#   local         개발자 노트북 — 도커 소켓 직결, 시크릿은 로컬 디렉토리(env SECRETS_DIR)
+#   cloud_vm      클라우드 VM  — compose + socket-proxy 경유, 시크릿 /run/secrets
+#   onprem_server 사내 온프렘  — cloud_vm 과 같은 형태(다른 건 네트워크·정책이지 이 값들이 아니다)
+# 아래 개별 값을 명시하면 프로파일 파생보다 우선한다. 레거시 키(spawn.docker_host·
+# spawn.host_deploy_dir·spawn.workspace_volume·secrets.base_dir)도 계속 읽는다.
+deploy:
+  profile: cloud_vm
   # ⚠️ 호스트 배포 디렉토리의 절대경로(central 컨테이너 내부 경로 아님).
   # central이 socket-proxy 경유로 worker를 띄우면 바인드 source는 호스트 docker
   # 데몬이 해석한다(sibling container) → worker 바인드 source가 호스트 경로여야 한다.
   # 예: /home/<deploy-user>/deploy/jira-auto-dispatcher. env HOST_DEPLOY_DIR 폴백 우선.
   # 비우면(로컬 개발) 직접 경로 폴백. worker의 config/시크릿 마운트에 필수.
   host_deploy_dir: "${HOST_DEPLOY_DIR}"
+  docker_host: tcp://socket-proxy:2375     # 직결 대안: unix:///var/run/docker.sock (특권 확대)
+  # 시크릿 파일들의 루트(값 아님, 경로). 호스트 OS 무관 — 로컬 개발이면 임의의 로컬
+  # 디렉토리(예: ~/.jad/secrets), 컨테이너면 /run/secrets 또는 마운트 볼륨.
+  # env SECRETS_DIR 로 주입하는 것을 권장한다(아래는 그 치환 형태).
+  secrets_base_dir: "${SECRETS_DIR}"
+  # 공유 워크스페이스 named 볼륨 이름(단일 클론·단일 pull 지점, 설계 §4). central
+  # compose가 이 이름으로 선언하고 spawner가 워커에 **같은 named 볼륨**을 run.workspace_dir
+  # 에 마운트 → central·모든 워커가 레포 한 벌 공유. named 볼륨이라 host_deploy_dir 무관.
+  workspace_volume: jad-workspace
 
-git: { branch_prefix: auto/, github_owner: <your-github-owner> }   # github은 central만(배포별로 채움)
+# 브랜치를 push 하고 MR/PR 을 만들 코드 호스팅. ⚠️ 사용자 **개인** forge 토큰은 여기가
+# 아니라 관리 UI 온보딩이 받아 레지스트리에 참조로 둔다 — 아래 token_ref 는 central
+# **서비스 자신**이 쓰는 토큰이다(dlc-meta pull/push·참고 레포 fetch).
+# ⚠️ kind 는 **실제 동작을 바꾼다** — 토큰 URL 의 자격 사용자명(gitlab=oauth2 /
+# github=x-access-token), MR/PR 용어, 변경요청 URL 모양·닫기 API 가 여기서 갈린다.
+# 레포 URL 호스트가 스스로 밝히면(github.com·gitlab.example.com) 그 URL 에 한해 호스트가
+# 우선한다 — 한 배포가 여러 forge 를 섞어 써도(아래 run.*_repo_url 참조) 각각 맞게 붙는다.
+forge:
+  kind: gitlab                    # gitlab | github
+  base_url: ""                    # self-hosted(사내 GitLab·GHE) base URL. 비우면 SaaS 기본
+  token_ref: service/forge-token  # 토큰 "값"이 아니라 secrets.base_dir 상대 파일 참조
+                                  # (레거시: run.repo_resolver_gitlab_token_ref 도 계속 읽음)
 
-secrets: { base_dir: "${SECRETS_DIR}" }   # 로컬=C:/temp, 컨테이너=/run/secrets 또는 볼륨
+# 감시할 Jira + **그 인스턴스에서만 통하는 값들**. 커스텀필드 id·완료 전이 id·상태 이름·
+# 라벨은 인스턴스마다 다르다 — 코드 상수가 아니라 여기서 받는다. 비우면 오늘의 기본값
+# (app/jira_client.py 모듈 상수)을 그대로 쓴다(하위호환).
+#
+# ⚠️ **Jira Cloud 전용** — 폴러의 JQL 검색은 POST /rest/api/3/search/jql 을 쓰는데 이 경로는
+#    Jira Cloud 에만 있다(Server/Data Center 에는 없고, 옛 /rest/api/2/search 는 Cloud 에서
+#    삭제됐다). Server/DC 를 가리키면 "티켓 없음"처럼 조용히 넘어가지 않고 원인을 말하는
+#    에러로 실패한다(app/jira_client.py).
+#
+# 🔎 **자기 인스턴스 값 알아내는 법**(여기가 남들이 가장 많이 막히는 지점이다).
+#    아래는 감시 계정 이메일 + API 토큰으로 Basic auth 해서 호출한다:
+#      # 커스텀필드 id — 이름으로 찾는다(예: '시작날짜'·'Start date')
+#      curl -u "<email>:<api-token>" "$JIRA/rest/api/3/field" | jq '.[] | {id, name}'
+#      # 완료 전이의 id/이름 — 실제 티켓 하나로 실측한다
+#      curl -u "<email>:<api-token>" "$JIRA/rest/api/2/issue/<ISSUE-KEY>/transitions" | jq '.transitions[]|{id,name,to:.to.name}'
+#    (jq 가 없으면 그냥 눈으로 읽어도 된다. $JIRA = 아래 base_url.)
+jira:
+  base_url: https://your-org.atlassian.net   # ⚠️ Jira Cloud 사이트만 지원(Server/DC 미지원)
+  project: <PROJECT_KEY>
+  poll_interval_sec: 60
+  watcher_token_file: service/jira-token   # 중앙이 Jira를 감시하는 토큰(내 것/봇). secrets.base_dir 상대
+  # 트리거/역-트리거 — **이 워크플로우의 상태 이름 그대로** 적는다(언어·명명이 조직마다 다르다).
+  # (레거시 이름 match.statuses / match.cancel_statuses / match.optout_labels 도 계속 읽음)
+  trigger_statuses: ["해야 할 일"]     # 신규 착수(트리거) 상태 화이트리스트
+  cancel_statuses: ["취소됨"]          # 이 상태로 오면 추적 잡을 즉시 취소(폴러·워처·웹훅 공유)
+  optout_labels: ["자동화_추적_해제"]   # 이 라벨이 붙으면 신규 착수 안 함 + 추적 중이면 취소로 수렴
+  # 논리 키 → 이 인스턴스의 커스텀필드 id (실측: GET /rest/api/3/field — 위 🔎 참조).
+  # 세 가지 의미를 구분한다:
+  #   - 키를 **안 쓰면**   → app/jira_client.py 모듈 상수(아래 값)로 폴백(하위호환)
+  #   - 값을 **주면**      → 그 필드 id 로 전송
+  #   - 값을 **비우면("")** → "이 인스턴스엔 그런 필드가 없다" → 그 필드를 **아예 안 보낸다**
+  #     (없는 커스텀필드를 보내면 Jira 가 400 을 낸다. 예: 다른 조직에는 '시작날짜'가 없다.)
+  custom_fields:
+    start_date: customfield_10015    # 착수 시 필수인 '시작날짜'  (없으면 "" 로 두면 미전송)
+    due_date: duedate                # 착수 시 필수인 '마감일'    (duedate 는 표준 필드라 대개 그대로)
+    actual_start: customfield_10187  # 완료 전이 시 필수인 '실제 시작일'
+    actual_end: customfield_10186    # 완료 전이 시 필수인 '실제 종료일'
+  # 완료 전이 식별 — 우선순위: (1) 아래 id → (2) 아래 이름 매칭 → (3) done 카테고리 단일
+  # 후보 → (4) 설정을 아예 안 준 레거시 배포만 모듈 상수 폴백 → 그래도 못 정하면 **가능한
+  # 전이 목록을 담은 에러**(조용한 실패 금지). id 는 인스턴스마다 다르니 모르면 비워 두고
+  # 이름만 자기 워크플로우에 맞춰도 된다(실측: GET /rest/api/2/issue/{key}/transitions).
+  done_transition_id: ""                    # 예: "41" — 위 실측 목록의 id
+  done_transition_names: ["완료", "Done"]   # 이 워크플로우의 완료 전이(또는 목표 상태) 이름
+
+# Jira 웹훅 수신(이벤트 구동) — 신규/담당자-변경 티켓을 폴링 주기(위 poll_interval_sec)를
+# 기다리지 않고 **즉시** 트리거한다. 폴러와 동일한 dedup 게이트/매핑 수렴점을 재사용하며
+# 폴링은 백스톱으로 남는다. 엔드포인트: POST /webhook/jira
+#   - 인증: 헤더 X-Jira-Webhook-Token 또는 쿼리 ?token= (secret_ref 파일값과 상수시간 비교)
+#   - 페이로드: {"issueKey":"PROJ-1"}(커스텀 Automation) 또는 {"issue":{"key":"PROJ-1"}}(표준)
+# ⚠️ 토큰은 "값"이 아니라 참조(secrets.base_dir 상대 파일)만 둔다 — 그 파일에 토큰을 0600으로
+#    저장. secret_ref 파일이 없으면 엔드포인트는 503으로 거부한다(무인증 자율 실행 금지 — RCE 표면).
+webhook: { enabled: true, secret_ref: service/jira-webhook }
+
+resume: { work_hours: "08:00-18:00", timezone: Asia/Seoul, nightly_drain: "01:00-05:00", reset_buffer_sec: 120 }
+
+# worker 컨테이너 기동 파라미터. ⚠️ docker_host·host_deploy_dir·workspace_volume 은
+# 위 deploy 섹션으로 옮겼다(레거시로 여기 둬도 계속 읽지만, 새 설정은 deploy 를 쓴다).
+spawn:
+  image: jira-auto-dispatcher:latest
+  network: jad-net
+  central_url: http://central:8787
+  mem_limit: 4g
+  run_as: "1000:1000"                         # worker 컨테이너 비-root 실행(특권 축소)
+
+# 브랜치 명명 규칙. (예전의 git.github_owner 는 **읽는 곳이 없는 유물**이라 예시에서
+# 뺐다 — 남겨 둬도 무시되므로 기존 config.yaml 은 그대로 둬도 된다. forge 를 가리키는
+# 현역 설정은 위 forge.kind / forge.base_url 이다.)
+git: { branch_prefix: auto/ }
+
+# 완료 알림 — best-effort. 잡 종료 시 팀 채널 웹훅으로 마무리 멘트 + 다음 할 일을 보내고
+# 담당자를 @멘션한다(레지스트리의 notify_user_id, 없으면 이름만). 기본은 **끔**(none) —
+# 알림 없이도 시스템은 완전히 동작한다. ⚠️ 웹훅 URL은 시크릿이므로 값이 아니라
+# 참조(secrets.base_dir 상대 파일 경로)만 둔다. 그 파일에 웹훅 URL을 0600으로 저장.
+# env 폴백(YAML보다 우선) — NOTIFIER_PROVIDER / NOTIFIER_WEBHOOK_REF (중립 이름).
+# 옛 이름 GOOGLE_CHAT_WEBHOOK_REF / NOTIFY_ENABLED 도 계속 받는다(기존 배포 무변경).
+# (레거시 notify.enabled: true 만 있는 설정은 provider=google_chat 으로 해석한다.)
+#
+# provider별 — 웹훅 URL 얻는 법 / 페이로드 / 멘션 문법:
+#   none            아무것도 보내지 않는다(기본).
+#   google_chat     스페이스 메뉴 → "앱 및 통합" → Webhook 관리 → 웹훅 추가 → URL 복사.
+#                   페이로드 {"text": ...}, 멘션 <users/{userId}>(숫자 id).
+#   slack           api.slack.com/apps → 앱 생성 → Incoming Webhooks 켜기 →
+#                   "Add New Webhook to Workspace" → 채널 선택 → URL 복사.
+#                   페이로드 {"text": ...}, 멘션 <@U…>(멤버 id).
+#   generic_webhook 사내 수신기(직접 만든 엔드포인트·프록시 등). 아래 고정 JSON을 POST하니
+#                   그대로 파싱하면 된다(키는 항상 존재하고, 모르는 값은 ""):
+#                     {"source":"jira-auto-dispatcher","event":"job_end|report",
+#                      "ticket":"PROJ-1","status":"done","mention_id":"","text":"...전문..."}
+#                   멘션 문법은 지어내지 않는다 — text엔 사람 이름만, 기계용 id는 mention_id.
+#   ⚠️ 목록에 없는 값을 넣으면 **아무것도 발송하지 않고** 경고만 남긴다(오발송 방지).
+#
+# 담당자 @멘션 id는 여기가 아니라 레지스트리의 사용자별 `notify_user_id` 다 — 값의 모양은
+# provider마다 다르다(config/registry.example.json 참조).
+notifier:
+  provider: none                     # none | google_chat | slack | generic_webhook
+  webhook_ref: service/notifier-webhook  # 웹훅 URL이 담긴 파일(시크릿). 값 아님 — 예시 경로만.
+  notify_interrupted: true           # 토큰 한도(interrupted) 시에도 짧게 알림
+  notify_cancelled: true             # 취소(cancelled) 시 짧게 알림
+
+# central의 **서버 자원 기반** dispatch 어드미션 — 고정 잡 수 cap을 대체한다.
+# central은 "잡 수"가 아니라 **호스트 서버의 실제 자원 상태**(가용 메모리 + CPU 부하)로
+# dispatch 여부를 판단한다: 여유가 있으면 준비된 잡을 dispatch, 압박이면 큐에 대기.
+# 자원이 넉넉하면 한 사용자가 (서로 다른 레포에서) 여러 잡을 동시에 굴릴 수도 있다 —
+# **per-user 잡 수 cap도, 전역 잡 수 cap도 없다.** 스로틀은 오직 자원이다. 정확성(같은 레포
+# 직렬)은 전역 레포락이 별도로 보장한다(잡 수 cap이 아님).
+# 규칙: 메모리(PRIMARY, 즉각) = MemAvailable - in-flight*per_job_mem_reserve_mb ≥ min_free_mem_mb
+#       AND 부하(SECONDARY, 거친 천장) = loadavg_1min / ncpu < max_load_per_core.
+#       in-flight 예약이 loadavg(1/5/15분 지연) 완화 — 부하가 오르기 전 버스트 과다 admit 차단.
+# ⚠️ 토큰/레이트 한도는 central의 관심사가 **아니다** — 각 per-user worker 컨테이너의
+#    오케스트레이터가 자기 계정의 토큰/레이트를 스스로 관리한다(여기서 모델링하지 않음).
+admission:
+  min_free_mem_mb: 1536         # 유효 가용 메모리 하한(MB). 미만이면 큐잉(메모리 압박).
+  per_job_mem_reserve_mb: 1024  # in-flight 잡 1개당 예약 메모리(MB). loadavg 지연 선제 보정.
+  max_load_per_core: 0.9        # CPU 코어당 1분 loadavg 상한(2차 거친 천장). 이상이면 큐잉.
 
 run:
-  # worker가 오케스트레이터로 동작할 3개 레포의 로컬 경로(central↔worker 공유).
-  orchestrator_repo: /app/orchestrator        # 프레임워크(pristine, read-only)
-  dlc_meta_repo: /app/dlc-meta                 # 인스턴스(per-user 학습 — 매 잡 pull)
-  dataspace_docs_repo: /app/dataspace_docs     # 설계 문서
-  # 위 3개 레포의 clone 원본 URL(토큰 없는 형태). worker가 사용자 GitLab 토큰으로
+  # worker가 오케스트레이터로 동작할 레포들의 로컬 경로 — **공유 워크스페이스**
+  # (jad-workspace named 볼륨 → workspace_dir) 하위 단일 클론(설계 §4: 단일 클론·
+  # 단일 pull 지점). 아래를 **비우면** workspace_dir 하위로 자동 파생한다:
+  #   orchestrator_repo ← <workspace_dir>/orchestrator
+  #   dlc_meta_repo     ← <workspace_dir>/dlc-meta
+  #   docs_repo         ← <workspace_dir>/docs
+  # (명시하면 존중. central·모든 워커가 같은 볼륨을 공유하므로 레포는 한 벌만 존재.)
+  orchestrator_repo: /app/workspace/orchestrator     # 프레임워크(pristine, read-only)
+  dlc_meta_repo: /app/workspace/dlc-meta             # 인스턴스(per-user 학습 — 매 잡 pull)
+  docs_repo: /app/workspace/docs                     # 설계 문서(**선택**)
+  # 위 레포들의 clone 원본 URL(토큰 없는 형태). worker가 사용자 forge 토큰으로
   # clone(없으면)/pull(있으면)한다(app/repos.py). 비우면 그 레포 프로비저닝 skip+경고.
   orchestrator_repo_url: https://github.com/yunhyuk-choi/ai-dlc-orchestrator.git   # 필수 공개 프레임워크(리터럴 유지)
   dlc_meta_repo_url: https://gitlab.example.com/<your-group>/dlc-meta.git
-  dataspace_docs_repo_url: https://gitlab.example.com/<your-group>/dataspace-docs.git
+  # 설계 문서 레포는 **완전 선택**이다 — 비우면(또는 키를 지우면) 프로비저닝을 조용히
+  # 건너뛰고 경고만 남긴다(잡은 정상 진행). 레거시 키 dataspace_docs_repo_url 도 계속 읽음.
+  docs_repo_url: ""
   workspace_dir: /app/workspace
   claude_bin: claude
   permission_mode: skip
   output_format: stream-json
-  concurrency_per_worker: 1
+  # worker 동시 실행 **안전 상한**(runaway 방지 백스톱 — 정책 cap 아님). worker는 central이
+  # dispatch한 잡을 **모두** 동시에 굴린다(진짜 스로틀은 위 admission의 서버 자원 어드미션).
+  # 이 값은 버그로 인한 무한 스레드 폭주만 막는 상한이다. 스포너가 env WORKER_CONCURRENCY로
+  # worker에 주입한다(env가 있으면 최우선). 기본 64.
+  worker_max_concurrency: 64
+
+  # --- 프랙탈 P1(컨테이너/워커 계층) 신경로 피처 플래그(기본 OFF) ---
+  # true 면 워커가 **티켓당 프로세스 스폰** 대신 **사용자당 지속 세션 하나**를 유지하며
+  # 티켓을 이어 주입(재사용-if-up)하고 drain 때 종료한다(설계 §3.3·§4·§9 P1). 기본 OFF:
+  # 비우면 워커 경로는 오늘과 byte-for-byte 동일(무동작변경). env FRACTAL_WORKER 우선.
+  # 지속 세션(persistent_session)이 꺼져 있으면 켜도 무시된다.
+  fractal_worker: false
+
+  # --- 프랙탈 P2(센트럴 계층) 신경로 피처 플래그(기본 ON — 승격됨) ---
+  # true 면 central 이 신규/갱신 티켓을 스케줄러 큐 대신 **상주 센트럴 라이브 세션**
+  # (app/central_session.CentralSession)에 이벤트로 주입한다(설계 §3.1·§9 P2). 센트럴
+  # 세션이 사용자별 서브를 스폰해 워커로 위임하고, 리치 완료-리포트를 관찰해 gchat 으로
+  # 상신한다. **기본 ON 으로 승격**(라이브 검증 완료): 예전엔 비영속 env FRACTAL_CENTRAL=1
+  # override 로만 켜져 배포마다 꺼졌으나, 이제 코드/설정 기본이 true 라 override 없이
+  # 배포만으로 fractal ON 이 유지된다. env FRACTAL_CENTRAL 명시 시 그게 여전히 우선(끌 수도
+  # 있음). 지속 세션(persistent_session)+양방향 stream-json 이 꺼져 있으면 켜도 무시된다.
+  fractal_central: true
+
+  # --- central LLM 레포 리졸버(신규 티켓 → target_repos 판단) ---
+  # "llm"(기본): central이 claude로 dlc-meta REPO-MAP + 티켓을 읽어 "이 티켓이
+  #   어느 레포 건가"를 판단해 target_repos를 채운다 → 스케줄러가 서로 다른
+  #   레포는 병렬(global cap), 같은 레포는 직렬. "static": 기존 정적 repo_map 룩업.
+  repo_resolution: llm
+  # central이 REPO-MAP.md를 읽을 **공유 워크스페이스** dlc-meta 클론 경로.
+  # 비우면 <workspace_dir>/dlc-meta 로 파생(설계 §4 단일 공유 클론 = 단일 pull 지점).
+  # 리모트는 위 dlc_meta_repo_url 재사용. central GitLab 토큰으로 clone/pull.
+  repo_map_path: /app/workspace/dlc-meta
+  # central이 dlc-meta를 pull/push할 forge 토큰의 secrets.base_dir 상대 참조(값 아님).
+  # 비우면 pull/push 생략(기존 체크아웃만 읽음). claude 토큰은 env CLAUDE_CODE_OAUTH_TOKEN.
+  # ⚠️ Phase 3a: 이 토큰으로 central이 **사이클로그를 dlc-meta에 커밋·push**한다(단일 라이터).
+  # ⚠️ 레거시 이름이다 — 새 설정은 위 forge.token_ref 를 쓴다(둘 중 하나만 채우면 서로
+  #    자동으로 채워진다. 둘 다 있으면 이 값이 이 자리에서는 그대로 쓰인다).
+  repo_resolver_gitlab_token_ref: ""
+
+  # --- dlc-meta 단일 라이터(Phase 3a) ---
+  # 공유 dlc-meta 클론은 **다중 리더(워커 오케스트레이터가 룰/사용자정보를 읽음)·단일
+  # 라이터(central만 commit/push/pull)**. 잡 완료(채널 F terminal) 시 central이 그 잡의
+  # 사이클로그 경로만(git add <경로> — git add . 아님) 아래 브랜치에 커밋하고, 커밋한
+  # 상대경로를 완료 회신에 실어 워커의 완료 알림이 `사이클로그: <경로>` 를 붙이게 한다.
+  # 워커는 dlc-meta를 절대 commit/reset/pull 하지 않는다(읽기 스냅샷만). 기본 브랜치명.
+  dlc_meta_branch: master
+  # claude 판단 호출 상한(초). 작은 호출이라 짧게.
+  repo_resolver_timeout_sec: 60
+
+  # --- central 자기 토큰 레이트/사용량 한도 쿨다운(축1) ---
+  # central은 *자기* Claude 토큰(env CLAUDE_CODE_OAUTH_TOKEN)으로 신규 티켓의 레포를
+  # 해석한다(claude 호출). 그 토큰이 429/rate limit/usage limit/overloaded/quota에
+  # 걸리면 claude 호출을 잠시 멈추고(쿨다운), 그 사이 도착한 티켓은 **유실 없이**
+  # pending으로 보관했다가(dedup claim 유지·미디스패치) 회복 후 자동 드레인한다.
+  # ⚠️ **워커** 토큰/레이트는 각 per-user worker 컨테이너 오케스트레이터의 몫이다 —
+  #    central은 오직 **자기 것**만 관리한다(여기서 워커 토큰을 모델링하지 않음).
+  # ⚠️ 결정적 작업(이미 해석된 잡 dispatch·자원 어드미션·레포락/완료 관리)은 이
+  #    쿨다운과 **무관하게** 계속 돈다 — 쿨다운은 오직 claude 레포-해석 단계만 막는다.
+  ai_cooldown_default_sec: 120   # 한도 감지 시 기본 쿨다운(초). 응답에 reset/retry-after가 있으면 그걸 우선.
+  ai_cooldown_max_sec: 900       # 연속 한도 시 백오프(배증) 상한(초).

@@ -1,8 +1,11 @@
-# .github/workflows/ci.yml — GitHub(<your-github-owner>/jira-auto-dispatcher) 개인 미러용 CI.
+# .github/workflows/ci.yml — 이 리포의 **유일한 CI**.
 #
-# 배포 없음. pytest 게이트만(126 통과). 실제 배포·이미지 빌드·무중단 교체는
-# 사내 GitLab 파이프라인(.gitlab-ci.yml)이 담당한다. 여기는 개인 리포에서의
-# 최소 회귀 방어용이다.
+# 테스트 게이트만 돈다(pytest). 배포·이미지 빌드·무중단 교체는 CI 가 하지 않는다 —
+# 배포 형태가 설치자마다 다르기 때문이다(로컬 / 클라우드 VM / 온프렘). 배포 절차는
+# INSTALL.md, 온프렘 서버 상세는 DEPLOY.md 를 따라 **사람이** 수행한다.
+#
+# ⚠️ 기대 테스트 "개수"는 여기에 박지 않는다 — 실제 게이트는 pytest 종료코드이고,
+#    수치를 박으면 테스트가 늘 때마다 주석이 낡는다(실제로 낡았다).
 #
 # POLICY-ENCODING: 이 파일 UTF-8(BOM 없음)·LF.
 
@@ -33,5 +36,5 @@ jobs:
           pip install -r requirements.txt
           pip install pytest
 
-      - name: Run tests (expect 126 passed)
+      - name: Run tests
         run: pytest -q

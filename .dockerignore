@@ -14,9 +14,14 @@ workspace/
 secrets/
 
 # --- 런타임에 clone 되는 연동 레포(앱이 소유하지 않음) ---
-orchestrator/
-dlc-meta/
-dataspace_docs/
+# 위 workspace/ 가 현행 공유 워크스페이스 클론을 전부 덮는다. 아래는 옛 배포가 리포
+# 루트에 클론해 둔 잔재용 — 루트 앵커로 컨텍스트 루트만 겨냥한다.
+# ⚠️ `docs/` 를 앵커 없이 넣으면 리포가 추적하는 `docs/DESIGN-*.md` 까지 컨텍스트에서
+#    빠진다. 런타임 클론 위치인 `<workspace_dir>/docs` 만 명시한다.
+/orchestrator/
+/dlc-meta/
+/dataspace_docs/
+/workspace/docs/
 
 # --- 로컬 Claude 세션/인증(볼륨으로 영속) ---
 .claude/

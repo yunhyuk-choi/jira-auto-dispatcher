@@ -9,7 +9,7 @@
 #   central DNS명    central                        (config.spawn.central_url=http://central:8787)
 #                    → 서비스 키가 'central' 이어야 worker가 http://central:8787 로 도달.
 #
-# ⚠️ 보안: 관리 UI/워커는 도구권한 자율 에이전트(RCE 표면). 사내망 한정, 외부 노출 금지.
+# ⚠️ 보안: 관리 UI/워커는 도구권한 자율 에이전트(RCE 표면). 신뢰 네트워크 한정, 인터넷 노출 금지.
 #          docker.sock 직결은 호스트 root 동치 → 기본은 socket-proxy 경유(최소 권한). SECURITY.md.
 
 services:
@@ -26,7 +26,8 @@ services:
       NETWORKS: 1     # jad-net 조회/연결
       VOLUMES: 1      # per-user 볼륨(jad-<username>) 조회/생성
       POST: 1         # 생성/기동 등 쓰기 메서드 허용(위 리소스 한정)
-      # 그 외(EXEC/SERVICES/SWARM/SECRETS/INFO 등)는 기본 0(비노출).
+      EXEC: 1         # 프랙탈 PUSH 경로: central→worker `docker exec`(per-user sub가 워커에서 claude --resume). SECURITY.md §4 참조.
+      # 그 외(SERVICES/SWARM/SECRETS/INFO 등)는 기본 0(비노출). EXEC은 위와 같이 프랙탈 푸시용으로 명시 허용.
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
@@ -37,6 +38,11 @@ services:
     image: jira-auto-dispatcher:latest   # spawner가 worker를 이 이미지로 띄운다
     container_name: jad-central
     restart: unless-stopped
+    # ⚠️ 좀비 프로세스 방지: central 의 PID 1 도 `python -m app.main`(ENTRYPOINT)이다.
+    #    central 은 레포-리졸버 등에서 claude 를 spawn할 수 있어 워커와 동일한 고아
+    #    reparent 문제를 겪는다. init: true 로 tini 를 PID 1 에 주입해 고아를 reap한다
+    #    (compose는 HostConfig.Init=true 로 번역 — 워커의 spawner init=True 와 동일 기전).
+    init: true
     depends_on:
       - socket-proxy
     environment:
@@ -48,15 +54,22 @@ services:
       # 호스트 docker 데몬 기준으로 해석되므로 필수(sibling container). .env나 셸 env로 주입.
       # 예: HOST_DEPLOY_DIR=/home/<deploy-user>/deploy/jira-auto-dispatcher
       HOST_DEPLOY_DIR: ${HOST_DEPLOY_DIR:-}
+      # central 레포-리졸버(run.repo_resolution: llm)가 신규 티켓의 target_repos를
+      # claude로 판단할 때 쓰는 central 자신의 인증 토큰(.env로 주입, 워커 per-user와 별개).
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      # 프랙탈 PUSH: central의 docker CLI가 socket-proxy를 타깃하도록 지정.
+      # ⚠️ 정합 필수: config.yaml 의 spawn.docker_host 와 동일 값이어야 한다.
+      DOCKER_HOST: tcp://socket-proxy:2375
     ports:
-      - "8787:8787"                          # 관리 UI — ⚠️ 사내망 한정(외부 노출 금지)
+      - "8787:8787"                          # 관리 UI — ⚠️ 인터넷 노출 금지.
+      #                                        공개 호스트면 "127.0.0.1:8787:8787" 로 바꾸고 SSH 터널로 접근하라(INSTALL.md §4).
     networks:
       - jad-net
     volumes:
       - jad-state:/app/state                 # jobs/watermark/dedup/registry 영속(명명 볼륨)
       - jad-workspace:/app/workspace         # 오케스트레이터 작업 공간(명명 볼륨)
       - ./config:/app/config:ro              # config.yaml(시크릿 값 아님, 파일 참조만)
-      - ./secrets:/run/secrets:ro            # 시크릿 파일(값). 이미지에 굽지 말 것(ro)
+      - ./secrets:/run/secrets               # 시크릿 파일(값). central은 온보딩으로 per-user 시크릿을 여기 쓴다(rw 필수). 이미지엔 굽지 말 것. worker는 spawner가 자기 것만 ro로 마운트.
       # --- worker 동적 spawn을 위한 docker 접근 ---
       # (기본) 위 socket-proxy 경유 — central은 docker.sock을 직접 보지 않는다.
       #        ⚠️ 정합 필수: config.yaml 의 spawn.docker_host: tcp://socket-proxy:2375
@@ -78,5 +91,10 @@ networks:
 
 volumes:
   jad-state:             # central 영속 상태
-  jad-workspace:         # 오케스트레이터 작업 공간
+  jad-workspace:         # 오케스트레이터 작업 공간(공유 워크스페이스 — 단일 클론)
+    name: jad-workspace  # ⚠️ 명시 이름 필수: spawner가 워커에 **같은 named 볼륨**을
+    #                      이 이름으로 마운트한다(config.spawn.workspace_volume, 기본
+    #                      jad-workspace) → central·모든 워커가 레포 한 벌 공유(설계 §4).
+    #                      compose 프로젝트 프리픽스가 붙으면 워커 마운트명과 어긋나므로
+    #                      name을 고정한다(jad-net과 동일 패턴).
   # 참고: worker per-user 볼륨(jad-<username>)은 spawner가 런타임에 생성한다(여기 선언 안 함).
