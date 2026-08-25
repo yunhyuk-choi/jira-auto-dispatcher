@@ -50,5 +50,34 @@ def test_secrets_ref_only_holds_references(isolated_state):
     r.upsert({"username": "a", "jira_account_id": "acc",
               "secrets_ref": {"jira_token": "path/ref", "leaked_value": "REALTOKEN"}})
     d = r.get("a").to_dict()
-    assert d["secrets_ref"] == {"jira_token": "path/ref", "gitlab_token": "", "claude_oauth_token": ""}
+    # forge_token 이 정본이고 gitlab_token 은 같은 값의 레거시 미러다(둘 다 존재).
+    assert d["secrets_ref"] == {"jira_token": "path/ref", "forge_token": "",
+                                "gitlab_token": "", "claude_oauth_token": ""}
     assert "leaked_value" not in d["secrets_ref"]
+
+
+def test_secrets_ref_forge_token_mirrors_legacy_name(isolated_state):
+    """forge_token 이 정본이고 gitlab_token 은 같은 값의 레거시 미러다(양방향)."""
+    from app.registry import SecretsRef, UserRecord
+
+    # 옛 registry.json(gitlab_token 만) → 신규 이름으로도 읽힌다.
+    old = UserRecord.from_dict({"username": "a",
+                                "secrets_ref": {"gitlab_token": "a/gitlab-token"}})
+    assert old.secrets_ref.forge_token == "a/gitlab-token"
+    assert old.secrets_ref.gitlab_token == "a/gitlab-token"
+
+    # 신규 키만 → 옛 이름을 읽는 코드도 그대로 동작한다.
+    new = UserRecord.from_dict({"username": "a",
+                                "secrets_ref": {"forge_token": "a/forge-token"}})
+    assert new.secrets_ref.gitlab_token == "a/forge-token"
+
+    # 직접 생성 경로(테스트 대역·옛 코드)도 수렴한다.
+    assert SecretsRef(gitlab_token="x/gl").forge_token == "x/gl"
+    assert SecretsRef(forge_token="x/f").gitlab_token == "x/f"
+
+
+def test_user_record_notify_user_id_mirrors_legacy_name(isolated_state):
+    from app.registry import UserRecord
+
+    assert UserRecord(username="a", google_chat_user_id="G1").notify_user_id == "G1"
+    assert UserRecord(username="a", notify_user_id="U1").google_chat_user_id == "U1"

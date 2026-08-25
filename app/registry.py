@@ -24,7 +24,9 @@
     identity            {git_name, git_email} — worker git 커밋 author
     scope               {projects: [...]} — 이 사용자가 받을 Jira 프로젝트
     container           {name, status} — 스포너가 갱신하는 worker 컨테이너 상태
-    secrets_ref         {jira_token, gitlab_token, claude_oauth_token}
+    secrets_ref         {jira_token, forge_token, claude_oauth_token}
+                        (``forge_token`` 이 정본. 옛 이름 ``gitlab_token`` 은 같은 값으로
+                        미러돼 기존 registry.json·옛 리더가 그대로 동작한다.)
                         ⚠️ 시크릿 "값"이 아니라 "참조"만 담는다(파일경로/시크릿키/
                         볼륨 경로 등). 실토큰은 레지스트리에 절대 넣지 않는다.
 
@@ -43,7 +45,9 @@ from typing import Optional, Union
 from app import state
 
 # secrets_ref 안에 실토큰이 섞여 들어오는 것을 막기 위한 참조 키 화이트리스트.
-_SECRETS_REF_KEYS = ("jira_token", "gitlab_token", "claude_oauth_token")
+# ``forge_token`` 이 정본이고 ``gitlab_token`` 은 레거시 미러 — 둘 다 허용해야 옛
+# registry.json 과 새 온보딩이 함께 통과한다.
+_SECRETS_REF_KEYS = ("jira_token", "forge_token", "gitlab_token", "claude_oauth_token")
 
 
 @dataclass
@@ -71,11 +75,30 @@ class Container:
 
 @dataclass
 class SecretsRef:
-    """시크릿 참조(값이 아님) — 파일경로/시크릿키/볼륨 경로."""
+    """시크릿 참조(값이 아님) — 파일경로/시크릿키/볼륨 경로.
 
+    ``forge_token`` 은 사용자가 브랜치를 push 하고 MR/PR 을 만들 때 쓰는 **개인 forge
+    토큰**의 참조다(GitLab PAT / GitHub PAT — forge 는 ``config.forge.kind`` 가 정한다).
+
+    ⚠️ ``gitlab_token`` 은 그 필드의 **레거시 이름**이며 정본(``forge_token``)과 항상
+    같은 값으로 유지된다(:meth:`UserRecord.from_dict` 가 둘 중 채워진 쪽을 읽어 양쪽에
+    싣는다). 덕분에 기존 ``state/registry.json`` 과 옛 이름을 읽는 코드가 그대로 동작한다.
+    """
+
+    forge_token: str = ""
     jira_token: str = ""
     gitlab_token: str = ""
     claude_oauth_token: str = ""
+
+    def __post_init__(self) -> None:
+        """forge ↔ gitlab 참조를 같은 값으로 수렴(직접 생성 경로 포함).
+
+        :meth:`UserRecord.from_dict` 뿐 아니라 ``SecretsRef(gitlab_token=...)`` 처럼
+        **직접 생성**하는 경로(옛 코드·테스트 대역)에서도 두 이름이 갈라지지 않게 한다.
+        """
+        ref = self.forge_token or self.gitlab_token
+        self.forge_token = ref
+        self.gitlab_token = ref
 
 
 @dataclass
@@ -86,6 +109,13 @@ class UserRecord:
     display_name: str = ""
     jira_account_id: str = ""
     jira_email: str = ""
+    # (선택) **알림 채널의 사용자 id** — 완료 알림 @멘션용. 없으면 display_name 폴백.
+    # 값의 모양은 provider 마다 다르다(Google Chat=숫자 userId / Slack=U…). 시크릿 아님.
+    notify_user_id: str = ""
+    # ⚠️ 레거시 미러(Google Chat 전용 시절 이름). **정본은 위 notify_user_id** 이며 여기엔
+    # 같은 값이 복사된다 — 옛 키를 읽는 코드·기존 registry.json 이 그대로 동작한다
+    # (:meth:`from_dict` 가 둘 중 채워진 쪽을 읽어 양쪽에 싣는다).
+    google_chat_user_id: str = ""
     enabled: bool = True
     autonomy_mode: str = "B"
     permission_level: str = "bypass"
@@ -95,6 +125,12 @@ class UserRecord:
     scope: Scope = field(default_factory=Scope)
     container: Container = field(default_factory=Container)
     secrets_ref: SecretsRef = field(default_factory=SecretsRef)
+
+    def __post_init__(self) -> None:
+        """알림 사용자 id 의 신규/레거시 이름을 같은 값으로 수렴(직접 생성 경로 포함)."""
+        uid = self.notify_user_id or self.google_chat_user_id
+        self.notify_user_id = uid
+        self.google_chat_user_id = uid
 
     # -- 직렬화 --
 
@@ -108,11 +144,19 @@ class UserRecord:
         scope = d.get("scope") or {}
         container = d.get("container") or {}
         secrets_ref = d.get("secrets_ref") or {}
+        # 알림 사용자 id: 신규 키 우선, 없으면 레거시 키(Google Chat 전용 시절)를 읽고
+        # 양쪽 필드에 같은 값을 싣는다(옛 키를 읽는 코드도 그대로 동작 — 하위호환).
+        notify_uid = str(d.get("notify_user_id", "") or d.get("google_chat_user_id", ""))
+        # forge 토큰 참조도 같은 규율: 신규 forge_token 우선, 레거시 gitlab_token 폴백.
+        forge_ref = str(secrets_ref.get("forge_token", "")
+                        or secrets_ref.get("gitlab_token", ""))
         return UserRecord(
             username=str(d.get("username", "")),
             display_name=str(d.get("display_name", "")),
             jira_account_id=str(d.get("jira_account_id", "")),
             jira_email=str(d.get("jira_email", "")),
+            notify_user_id=notify_uid,
+            google_chat_user_id=notify_uid,
             enabled=bool(d.get("enabled", True)),
             autonomy_mode=str(d.get("autonomy_mode", "B")),
             permission_level=str(d.get("permission_level", "bypass") or "bypass"),
@@ -129,7 +173,10 @@ class UserRecord:
             ),
             secrets_ref=SecretsRef(
                 jira_token=str(secrets_ref.get("jira_token", "")),
-                gitlab_token=str(secrets_ref.get("gitlab_token", "")),
+                # forge 토큰 참조: 신규 키 우선, 없으면 레거시 키를 읽고 **양쪽에** 같은
+                # 값을 싣는다(옛 이름을 읽는 코드·기존 registry.json 하위호환).
+                forge_token=forge_ref,
+                gitlab_token=forge_ref,
                 claude_oauth_token=str(secrets_ref.get("claude_oauth_token", "")),
             ),
         )

@@ -81,12 +81,33 @@ class StatusWatcher:
     # ------------------------------------------------------------------
 
     def poll_once(self) -> dict:
-        """1회 감시 — 취소·외부완료·재오픈을 순서대로 처리. 처리 건수 dict 반환."""
-        result = {"cancelled": 0, "done": 0, "reopened": 0}
+        """1회 감시 — 취소·추적제외·외부완료·재오픈을 순서대로 처리. 처리 건수 dict 반환."""
+        result = {"cancelled": 0, "optout": 0, "done": 0, "reopened": 0}
         self._detect_cancellations(result)
+        self._detect_optout(result)
         self._detect_external_done(result)
         self._detect_reopens(result)
         return result
+
+    # ------------------------------------------------------------------
+    # 역-트리거 공통(취소 상태 / opt-out 라벨) — 폴러와 동일 config 원천
+    # ------------------------------------------------------------------
+
+    def _cancel_statuses(self) -> list:
+        """config.match.cancel_statuses(기본 ['취소됨']). 하드코딩 대체(폴러 공유)."""
+        return list(getattr(self.config.match, "cancel_statuses", [self.CANCELLED_STATUS]) or [])
+
+    def _optout_labels(self) -> list:
+        """config.match.optout_labels(기본 ['자동화_추적_해제']). 추적 해제 라벨."""
+        return list(getattr(self.config.match, "optout_labels", ["자동화_추적_해제"]) or [])
+
+    @staticmethod
+    def _is_tracking_disabled(fields: dict, optout_labels) -> bool:
+        """이슈 라벨 ∩ optout_labels ≠ ∅ 이면 True(추적 해제 라벨이 붙음)."""
+        if not optout_labels:
+            return False
+        labels = set((fields or {}).get("labels", []) or [])
+        return bool(labels & set(optout_labels))
 
     # ------------------------------------------------------------------
     # 취소 감지
@@ -97,8 +118,12 @@ class StatusWatcher:
         return f"project = {project} AND " if project else ""
 
     def _detect_cancellations(self, result: dict) -> None:
-        """`취소됨` + updated 워터마크 JQL → 추적 중인 잡을 cancel_job."""
-        clauses = f'{self._project_clause()}status = "{self.CANCELLED_STATUS}"'
+        """`취소 상태`(config) + updated 워터마크 JQL → 추적 중인 잡을 cancel_job."""
+        cancels = self._cancel_statuses()
+        if not cancels:
+            return  # 취소 감지 비활성(config가 명시 빈 리스트)
+        st = ", ".join(f'"{s}"' for s in cancels)
+        clauses = f'{self._project_clause()}status in ({st})'
         if self.cancel_watermark:
             clauses += f' AND updated >= "{_jql_time(self.cancel_watermark)}"'
         jql = clauses + " ORDER BY updated ASC"
@@ -118,7 +143,7 @@ class StatusWatcher:
             if job is None or job.status not in self._CANCELABLE:
                 continue  # 추적 안 하거나 이미 취소중/종결 → 스킵(멱등)
             try:
-                self.scheduler.cancel_job(key)
+                self.scheduler.cancel_job(key, reason=q.CANCEL_STATUS_CANCELLED)
                 result["cancelled"] += 1
                 log.info("취소 감지 → abort: %s (상태=%s)", key, job.status)
             except KeyError:
@@ -127,6 +152,44 @@ class StatusWatcher:
         if max_updated and max_updated != self.cancel_watermark:
             self.cancel_watermark = max_updated
             self._state.save_cancel_watermark(self.cancel_watermark)
+
+    # ------------------------------------------------------------------
+    # opt-out 라벨 감지(추적 제외 백스톱 — 웹훅 놓쳤을 때 대비)
+    # ------------------------------------------------------------------
+
+    def _detect_optout(self, result: dict) -> None:
+        """추적 중인 잡의 티켓에 opt-out 라벨이 붙었으면 cancel_job(백스톱).
+
+        1차 경로는 웹훅(reconcile → cancel_job)이고, 이것은 웹훅을 놓쳤을 때를 위한
+        폴링 백스톱이다. ``_detect_cancellations`` 패턴을 준용하되, 워터마크 대신
+        **추적 중(cancelable)인 잡의 키**로 대상을 좁혀 그 티켓의 현재 라벨을 확인한다.
+        """
+        optout = self._optout_labels()
+        if not optout:
+            return
+        tracked = [j for j in self.scheduler.jobs.list_jobs()
+                   if j.status in self._CANCELABLE]
+        if not tracked:
+            return
+        keys = [j.ticket for j in tracked]
+        ids = ", ".join(f'"{k}"' for k in keys)
+        labels_in = ", ".join(f'"{l}"' for l in optout)
+        jql = f'key in ({ids}) AND labels in ({labels_in})'
+
+        res = self.jira.search_jql(jql, fields=self._WATCH_FIELDS)
+        for issue in res.get("issues", []) or []:
+            key = issue.get("key")
+            if not key:
+                continue
+            job = self.scheduler.jobs.get(key)
+            if job is None or job.status not in self._CANCELABLE:
+                continue  # 추적 안 하거나 이미 취소중/종결 → 스킵(멱등)
+            try:
+                self.scheduler.cancel_job(key, reason=q.CANCEL_UNTRACKED_OPTOUT)
+                result["optout"] += 1
+                log.info("opt-out 라벨 감지 → abort: %s (상태=%s)", key, job.status)
+            except KeyError:
+                pass
 
     # ------------------------------------------------------------------
     # 외부 완료 감지(롤백 없음)
@@ -187,6 +250,15 @@ class StatusWatcher:
             updated = ((issue.get("fields") or {}).get("updated")) or ""
             if updated and (max_updated is None or updated > max_updated):
                 max_updated = updated
+
+            # opt-out 재개 백스톱: 라벨이 **아직** 붙어 있으면 재-enqueue하지 않는다.
+            # 라벨이 제거되면(updated 전진) 이 게이트를 통과해 재-enqueue된다 — 즉,
+            # 라벨 제거→재개의 폴링 백스톱이 이 재오픈 경로로 수렴한다(REOPEN_STATUS
+            # = match 상태일 때). 웹훅이 1차, 이 폴링이 2차.
+            fields = (issue or {}).get("fields", {}) or {}
+            if self._is_tracking_disabled(fields, self._optout_labels()):
+                log.info("재오픈 skip(opt-out 라벨 잔존): %s", key)
+                continue
 
             user = self._resolve_user(issue)
             if user is None:

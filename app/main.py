@@ -22,11 +22,12 @@
     ROLE=worker   python -m app.main      # 사용자 worker(무 UI, 폴링 루프)
 
 ⚠️ 보안: worker는 도구권한 자율 에이전트를 실행하는 RCE 표면이다.
-    사내망·신뢰 환경 한정. 외부 노출 금지. 자세한 내용은 README/CLAUDE.md.
+    신뢰 네트워크 한정. 인터넷 노출 금지. 자세한 내용은 README/SECURITY.md.
 """
 
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 import shutil
@@ -65,8 +66,9 @@ def build_central_components(config_path: str = "config/config.yaml") -> dict:
     반환 dict를 _components에 보관하고, app.config 배선/백그라운드 기동에서 쓴다.
     """
     from app import state
-    from app.config import load_config, read_secret
+    from app.config import central_forge_token_ref, load_config, read_secret
     from app.dispatch import Dispatcher
+    from app.dlc_meta_writer import DlcMetaWriter
     from app.gate import DedupGate
     from app.jira_client import JiraClient
     from app.poller import Poller
@@ -81,18 +83,62 @@ def build_central_components(config_path: str = "config/config.yaml") -> dict:
 
     token = read_secret(cfg.secrets.base_dir, cfg.jira.watcher_token_file) or ""
     email = cfg.jira.watcher_email or os.environ.get("JIRA_WATCHER_EMAIL", "")
-    jira = JiraClient(cfg.jira.base_url, email, token)
+    # 인스턴스별 값(커스텀필드 id·완료 전이)은 설정에서 주입한다 — 미설정 항목은
+    # jira_client 모듈 상수로 폴백한다(하위호환). from_config 가 그 규칙의 단일 원천.
+    jira = JiraClient.from_config(cfg, email, token)
 
     registry = Registry()
     job_queue = JobQueue()
     gate = DedupGate()
+
+    # dispatch 후 훅: 미락(un-locked) 참고 레포를 기계적으로 최신화(app.freshen).
+    # 잡의 작업 대상 레포는 프로비저닝이 최신화하지만, 단지 참고하는 레포는 아무도
+    # pull하지 않아 stale로 읽혔다(이미 머지된 티켓 오판). dispatch 순간 활성 잡이 없는
+    # 레포를 원격 기본 브랜치로 강제 정합해, 뒤이어 잡을 집는 워커가 최신 참고 레포를
+    # 본다(공유 볼륨 = central 최신화가 워커에 반영). **백그라운드 스레드**로 돌려
+    # 스케줄러 tick(취소/완료 회신 경로 포함)을 느린 git I/O로 블로킹하지 않는다.
+    def _freshen_after_dispatch(locked_repos) -> None:
+        from app import freshen
+
+        def _run() -> None:
+            try:
+                forge_token = None
+                # forge 중립 접근자 — 신규 forge.token_ref / 중립 별칭 / 레거시
+                # run.repo_resolver_gitlab_token_ref 중 채워진 것을 고른다.
+                ref = central_forge_token_ref(cfg)
+                if ref:
+                    forge_token = read_secret(cfg.secrets.base_dir, ref)
+                freshen.freshen_unlocked_repos(cfg, locked_repos, forge_token)
+            except Exception:  # noqa: BLE001 — 백그라운드 최신화 실패가 프로세스를 죽이지 않게 격리
+                log.warning("dispatch 후 미락 레포 최신화 실패(격리)")
+
+        threading.Thread(target=_run, name="jad-freshen", daemon=True).start()
+
     # 스케줄러에 gate 주입 — 취소/재오픈 시 dedup 해제(RECURSIVE-DISPATCH §10.4).
-    scheduler = Scheduler(cfg, job_queue, gate=gate)
-    dispatcher = Dispatcher(registry, scheduler, worker_secret=cfg.worker_shared_secret)
-    poller = Poller(cfg, jira, gate, registry, dispatcher)
+    scheduler = Scheduler(cfg, job_queue, gate=gate, on_dispatch=_freshen_after_dispatch)
+    # dlc-meta 단일 라이터(central 전용): 잡 완료 시 공유 클론의 사이클로그를 커밋·push.
+    dlc_meta_writer = DlcMetaWriter(cfg)
+    dispatcher = Dispatcher(registry, scheduler, worker_secret=cfg.worker_shared_secret,
+                            dlc_meta_writer=dlc_meta_writer)
+
+    # 프랙탈 P2(센트럴 계층) 신경로 — run.fractal_central ON 일 때만 상주 센트럴 라이브
+    # 세션을 조립해 poller 에 주입한다(설계 §3.1·§9 P2). OFF(기본)면 central_session 은
+    # 아예 인스턴스화되지 않고 poller 는 dispatcher.enqueue 로 오늘과 byte-for-byte 동일
+    # 하게 방출한다(무동작변경). 세션 프로세스 자체는 첫 이벤트 주입 때 lazy 스폰된다.
+    central_session = None
+    from app.central_session import CentralSession, central_fractal_enabled
+
+    if central_fractal_enabled(cfg):
+        central_session = CentralSession(cfg)
+        log.info("프랙탈 P2 센트럴 신경로 ON — 상주 CentralSession 조립(라이브 이벤트 주입 seam)")
+
+    # job_queue 를 프랙탈 경로에 넘긴다(관측성 뼈대 A.1) — 프랙탈 잡을 같은 JobQueue store 에
+    # queued 로 기록해 대시보드에 뜨게 한다(meta.fractal 표식 → 구 경로 스케줄러는 제외).
+    poller = Poller(cfg, jira, gate, registry, dispatcher,
+                    central_sink=central_session, job_queue=job_queue)
     # 상태 감시축(취소/외부완료/재오픈) — 전진축 폴러와 별개 루프(§10.2).
     status_watcher = StatusWatcher(cfg, jira, gate, registry, dispatcher)
-    # 스포너: docker 클라이언트는 지연 생성(최초 컨테이너 조작 시). 사내망 전제.
+    # 스포너: docker 클라이언트는 지연 생성(최초 컨테이너 조작 시). 신뢰 네트워크 전제.
     spawner = Spawner(cfg, registry)
 
     components = {
@@ -103,10 +149,27 @@ def build_central_components(config_path: str = "config/config.yaml") -> dict:
         "gate": gate,
         "scheduler": scheduler,
         "dispatcher": dispatcher,
+        "dlc_meta_writer": dlc_meta_writer,
         "poller": poller,
         "status_watcher": status_watcher,
         "spawner": spawner,
     }
+    # 프랙탈 P2: 센트럴 세션 핸들(ON 일 때만 존재). 배경 기동/종료(drain)에서 참조.
+    if central_session is not None:
+        components["central_session"] = central_session
+    # Phase 3b-2 파일럿 Tier-2(피처 플래그). run.tier2_pilot_user 가 비어 있으면(기본)
+    # build_pilot_tier2가 None을 돌려 아무 것도 배선하지 않는다 → 디스패치 동작 무변경.
+    # 값이 있으면 그 사용자에 바인딩된 자원툴+러너를 **조립만** 한다(자동 실행 없음 —
+    # SDK 배선/기동은 오너 확정 후 후속). 조립 실패가 central 부팅을 막지 않게 격리한다.
+    try:
+        from app.tier2 import build_pilot_tier2
+
+        tier2 = build_pilot_tier2(components)
+        if tier2 is not None:
+            components["tier2_pilot"] = tier2
+    except Exception:  # noqa: BLE001 — 파일럿 조립 실패가 운영 경로를 죽이지 않게 격리
+        log.warning("Tier-2 파일럿 조립 실패(격리) — 순수 파이썬 디스패치 유지")
+
     _components.clear()
     _components.update(components)
     return components
@@ -134,13 +197,15 @@ def create_central_app(config_path: str = "config/config.yaml") -> Flask:
     comps = build_central_components(config_path)
 
     from app.dispatch import DISPATCHER_KEY, dispatch_bp
-    from app.webhook import register_webhook
 
     app.config[DISPATCHER_KEY] = comps["dispatcher"]
     app.register_blueprint(dispatch_bp)
-    register_webhook(
-        app, comps["config"], comps["jira"], comps["gate"], comps["registry"], comps["dispatcher"]
-    )
+
+    # Jira 웹훅 수신(이벤트 구동) — 신규/담당자-변경 티켓을 폴링 주기를 기다리지 않고
+    # 즉시 트리거한다. 폴러와 동일 게이트/매핑 수렴점(poller.trigger_ticket)을 재사용
+    # 하며 폴링은 백스톱으로 남는다. webhook.enabled(기본 True)일 때만 배선한다.
+    if getattr(comps["config"].webhook, "enabled", True):
+        register_jira_webhook(app, comps["poller"], comps["config"])
 
     _register_admin_api(app, comps)
 
@@ -149,6 +214,70 @@ def create_central_app(config_path: str = "config/config.yaml") -> Flask:
 
     register_onboarding_api(app, comps)
     return app
+
+
+def _safe_trigger(poller, key: str, event: str = None) -> None:
+    """데몬 스레드 진입점 — poller.trigger_ticket을 예외 격리로 호출.
+
+    trigger_ticket은 claude(레포 리졸버)를 호출할 수 있어 수십 초가 걸릴 수 있다.
+    웹훅 응답을 여기에 블로킹하지 않도록 별도 스레드에서 돈다(예외는 로그만).
+    ``event`` 는 판단에 쓰지 않고 로그로만 남긴다(웹훅=즉시 트리거, 판단=현재 상태 재조회).
+    """
+    try:
+        poller.trigger_ticket(key, event=event)
+    except Exception:  # noqa: BLE001 — 백그라운드 트리거 실패가 프로세스를 죽이지 않게 격리
+        log.exception("webhook trigger_ticket 실패: %s", key)
+
+
+def register_jira_webhook(app: Flask, poller, config) -> None:
+    """POST /webhook/jira 배선(central 전용, 이벤트 구동 단일 티켓 트리거).
+
+    - 토큰: config.webhook.secret_ref(secrets.base_dir 상대)를 읽어 상수시간 비교
+      (헤더 ``X-Jira-Webhook-Token`` 전용 — 쿼리 ``?token=``은 프록시/서버 access
+      로그에 평문 노출되는 유출 표면이라 수용하지 않는다). 시크릿 미설정/조회불가
+      → 503(무인증 실행 거부 — RCE 표면). 불일치/부재 → 401.
+    - 페이로드: ``{"issueKey": ...}``(커스텀 Automation) 또는 표준 Jira 웹훅의
+      ``{"issue": {"key": ...}}`` 에서 이슈 키를 뽑는다. 둘 다 없으면 400.
+    - 디스패치는 데몬 스레드에서 비동기로 돌리고(응답 블로킹 금지) 즉시 202.
+    """
+    from app.config import read_secret
+
+    @app.route("/webhook/jira", methods=["POST"])
+    def jira_webhook():  # noqa: ANN202 — Flask view
+        wh = getattr(config, "webhook", None)
+        secret_ref = getattr(wh, "secret_ref", "") if wh else ""
+        base_dir = getattr(getattr(config, "secrets", None), "base_dir", "") or ""
+        secret = read_secret(base_dir, secret_ref) if secret_ref else None
+        if not secret:
+            # 무인증 자율 실행 거부(시크릿 값은 절대 로깅하지 않는다).
+            log.warning("jira webhook 거부 — 시크릿 미설정(secret_ref=%s)", secret_ref)
+            return jsonify({"error": "webhook secret not configured"}), 503
+
+        provided = request.headers.get("X-Jira-Webhook-Token") or ""
+        if not provided or not hmac.compare_digest(str(provided), str(secret)):
+            return jsonify({"error": "unauthorized"}), 401
+
+        body = request.get_json(silent=True) or {}
+        key = None
+        if isinstance(body, dict):
+            key = body.get("issueKey")
+            if not key:
+                issue = body.get("issue")
+                if isinstance(issue, dict):
+                    key = issue.get("key")
+        if not key:
+            return jsonify({"error": "no issue key"}), 400
+        key = str(key)
+
+        # 이벤트 문자열은 **판단에 쓰지 않고**(현재 상태 재조회가 진실) 로그로만 남긴다.
+        event = None
+        if isinstance(body, dict):
+            event = body.get("webhookEvent") or body.get("event")
+
+        log.info("jira webhook received: %s (event=%s)", key, event)
+        # 디스패치(trigger_ticket)는 claude 호출로 느릴 수 있어 응답을 블로킹하지 않는다.
+        threading.Thread(target=_safe_trigger, args=(poller, key, event), daemon=True).start()
+        return jsonify({"accepted": True, "ticket": key}), 202
 
 
 def _register_admin_api(app: Flask, comps: dict) -> None:
@@ -179,6 +308,24 @@ def _register_admin_api(app: Flask, comps: dict) -> None:
         # reset_at 도래분을 즉시 재적격 처리(수동 tick).
         return jsonify({"dispatched": scheduler.tick()})
 
+    @app.route("/api/jobs/<ticket>/rerun", methods=["POST"])
+    def api_rerun(ticket):
+        # 종결(failed/interrupted/done/cancelled) 잡을 사람이 수동 재실행 —
+        # queued로 리셋 후 재-dispatch(세션/중단 잔재 초기화).
+        try:
+            dispatched = scheduler.rerun(ticket)
+        except KeyError:
+            return jsonify({"error": "unknown job", "job": ticket}), 404
+        return jsonify({"ok": True, "dispatched": dispatched})
+
+    @app.route("/scheduler/state", methods=["GET"])
+    def scheduler_state():
+        # Phase 3b-0 — 현재 스케줄링 상태의 **읽기 전용** 스냅샷(대시보드/에이전트/디버그
+        # 가시성). 부작용 0: 잡 상태·락·큐를 일절 바꾸지 않고 READ만 한다(GET). 1차 소비자는
+        # 인프로세스 SDK 에이전트가 scheduler.state_snapshot()를 직접 호출하는 경로이고,
+        # 이 엔드포인트는 가시성용이다.
+        return jsonify(scheduler.state_snapshot())
+
 
 def start_central_background(tick_interval_sec: int = 30) -> None:
     """central 백그라운드 — poller 스레드 + 스케줄러 tick 루프(데몬).
@@ -194,6 +341,15 @@ def start_central_background(tick_interval_sec: int = 30) -> None:
     poller = _components["poller"]
     scheduler = _components["scheduler"]
     status_watcher = _components["status_watcher"]
+    spawner = _components.get("spawner")
+
+    # 프랙탈 P2 센트럴 신경로 게이트(worker 의 _fractal_enabled 게이트와 대칭) — ON 일 때만
+    # 상주 센트럴 세션 경로가 활성이다. 세션 프로세스는 첫 Jira 이벤트 주입 때 lazy 스폰되며
+    # (유휴=프로세스 없음, 설계 §4), 방출 seam(poller._emit)이 enqueue 대신 주입으로 라우팅
+    # 한다. 여기선 경로 활성만 로그로 남긴다(부팅을 막지 않는다). OFF면 이 블록은 no-op.
+    central_session = _components.get("central_session")
+    if central_session is not None:
+        log.info("프랙탈 P2 센트럴 라이브 세션 경로 활성 — 이벤트 주입 대기(첫 이벤트에 lazy 스폰)")
 
     t_poll = threading.Thread(target=poller.run_forever, name="jad-poller", daemon=True)
     t_poll.start()
@@ -203,6 +359,14 @@ def start_central_background(tick_interval_sec: int = 30) -> None:
     )
     t_watch.start()
 
+    # 배포 시 워커 이미지 reconcile(작업 C): central 부팅에서 1회, stale 워커를
+    # 조정한다(유휴 즉시 재생성 / 활성 잡은 드레인). docker 조회가 느릴 수 있으니
+    # 별도 데몬 스레드로 돌려 부팅을 막지 않는다(best-effort·예외격리).
+    t_recon = threading.Thread(
+        target=reconcile_worker_images, name="jad-worker-reconcile", daemon=True
+    )
+    t_recon.start()
+
     stop = threading.Event()
 
     def _tick_loop():
@@ -211,6 +375,12 @@ def start_central_background(tick_interval_sec: int = 30) -> None:
                 scheduler.tick()
             except Exception:  # noqa: BLE001
                 log.exception("scheduler tick 실패")
+            # 드레인 대기(stale+활성이던) 워커를, 잡이 끝났으면 이제 재생성(작업 C).
+            if spawner is not None:
+                try:
+                    spawner.reconcile_pending(_has_active_job_predicate(_components))
+                except Exception:  # noqa: BLE001 — 재생성 실패가 tick을 막지 않게 격리
+                    log.exception("pending worker 재생성 실패(격리)")
             stop.wait(tick_interval_sec)
 
     t_tick = threading.Thread(target=_tick_loop, name="jad-scheduler-tick", daemon=True)
@@ -218,7 +388,52 @@ def start_central_background(tick_interval_sec: int = 30) -> None:
 
     _components["_threads"] = {
         "poller": t_poll, "status_watcher": t_watch, "tick": t_tick, "tick_stop": stop,
+        "reconcile": t_recon,
     }
+
+
+def _has_active_job_predicate(components: dict):
+    """``username -> bool`` 활성 잡 판정자(reconcile 드레인 판단). 큐 상태 기준.
+
+    ⚠️ 불확실(예외)하면 **보수적으로 활성(True)** 으로 본다 — in-flight 잡을 배포가
+    죽이지 않도록(작업 C 안전 기본).
+    """
+    from app import queue as q
+
+    job_queue = components.get("queue")
+
+    def has_active(username: str) -> bool:
+        if job_queue is None:
+            return True
+        try:
+            return any(
+                getattr(j, "user", None) == username
+                and getattr(j, "status", None) in q.ACTIVE_STATUSES
+                for j in job_queue.list_jobs()
+            )
+        except Exception:  # noqa: BLE001 — 판정 불가 → 보수적으로 활성(드레인)
+            return True
+
+    return has_active
+
+
+def reconcile_worker_images(components: Optional[dict] = None) -> Optional[dict]:
+    """등록 enabled 사용자들의 워커 이미지를 현재 이미지 ID와 대조·조정(작업 C).
+
+    central 부팅 1회 호출용. best-effort·예외격리(실패가 부팅을 막지 않음). 시크릿
+    로깅 금지. 컴포넌트가 없으면 조용히 no-op.
+    """
+    comps = components if components is not None else _components
+    spawner = comps.get("spawner")
+    registry = comps.get("registry")
+    if spawner is None or registry is None:
+        return None
+    try:
+        enabled = [u for u in registry.list_users() if getattr(u, "enabled", False)]
+        return spawner.reconcile_workers(enabled, _has_active_job_predicate(comps))
+    except Exception:  # noqa: BLE001 — reconcile 실패가 central 기동을 막지 않게 격리
+        log.exception("worker 이미지 reconcile 실패(격리)")
+        return None
 
 
 # =========================================================================
@@ -373,7 +588,7 @@ def main() -> None:
     # central(기본)
     app = create_central_app()
     start_central_background()
-    # 사내망 한정. 외부 노출 금지(README 보안 항목 참조).
+    # 신뢰 네트워크 한정. 인터넷 노출 금지(SECURITY.md 참조).
     cfg = _components.get("config")
     host = cfg.server.host if cfg else "0.0.0.0"
     port = cfg.server.port if cfg else 8787

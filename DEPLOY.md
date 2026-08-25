@@ -1,22 +1,29 @@
-# DEPLOY.md — jira-auto-dispatcher 개발서버 배포 절차
+# DEPLOY.md — 온프렘 서버 배포 상세 런북
 
-> 운영자가 **순서대로 따라 실행**하는 배포 런북이다. 대상은 사내 개발서버이며,
-> 이 시스템은 도구 권한을 가진 자율 에이전트(RCE 표면)를 헤드리스로 돌린다 —
-> **반드시 사내망 한정**, 외부 노출 금지. 보안 인가·통제의 정본은
-> [SECURITY.md](SECURITY.md) 다(배포 전 필독).
+> **범위.** 이 문서는 [INSTALL.md](INSTALL.md) 의 **갈래 C(온프렘 서버)** 본문이다 —
+> 사설망의 리눅스 서버에 SSH 로 들어가 운영자가 **순서대로 따라 실행**하는 런북.
+> 개인 노트북 평가(갈래 A)나 클라우드 VM(갈래 B)이면 INSTALL.md 를 먼저 읽어라.
+> 어느 갈래든 공통인 준비물(토큰·`config.yaml`)과 프로파일별 값 차이는 INSTALL.md 가 정본이다.
+>
+> ⚠️ 이 시스템은 도구 권한을 가진 자율 에이전트(RCE 표면)를 헤드리스로 돌린다 —
+> **신뢰 네트워크 한정**, 인터넷 노출 금지. 무엇에 동의하는지와 보안 통제의 정본은
+> [SECURITY.md](SECURITY.md) 다(**배포 전 필독**).
 
 ---
 
 ## 0. 대상·전제
 
+아래 `<서버>`·`<deploy-user>` 는 당신의 환경 값으로 바꿔 읽는다. 이 런북 예시는
+배포 경로로 `/opt/jira-auto-dispatcher` 를 쓴다(다른 경로를 쓰면 그에 맞춰 바꾼다).
+
 | 항목 | 값 |
 |---|---|
-| 개발서버 | **<DEV_SERVER_HOST>** |
-| SSH 계정 | `<deploy-user>` |
+| 대상 서버 | `<서버>` — 이 시스템 **전용 호스트** 권장(SECURITY.md §4) |
+| SSH 계정 | `<deploy-user>` (docker 실행 권한 필요) |
 | 필요 런타임 | Docker Engine + Docker Compose v2 (`docker compose`) |
 | 이미지 | `jira-auto-dispatcher:latest` (central·worker 공용 단일 이미지) |
 | 네트워크 | `jad-net` (compose가 생성; 동적 worker가 이름으로 합류) |
-| 관리 UI 포트 | `8787` (⚠️ 사내망 한정) |
+| 관리 UI 포트 | `8787` (⚠️ 신뢰 네트워크 한정 — 인터넷 노출 금지) |
 
 계약 정합(이 3개는 `Dockerfile`·`docker-compose.yml`·`config/config.yaml`·`app/spawner.py`가
 모두 동일해야 한다):
@@ -38,11 +45,11 @@
 rsync -az --delete \
   --exclude '.git' --exclude 'state/' --exclude 'secrets/' --exclude 'workspace/' \
   --exclude 'orchestrator/' --exclude 'dlc-meta/' --exclude 'dataspace_docs/' \
-  --exclude 'config/config.yaml' \
-  ./ <deploy-user>@<DEV_SERVER_HOST>:/opt/jira-auto-dispatcher/
+  --exclude 'config/config.yaml' --exclude '.env' \
+  ./ <deploy-user>@<서버>:/opt/jira-auto-dispatcher/
 
 # 서버에서 빌드
-ssh <deploy-user>@<DEV_SERVER_HOST>
+ssh <deploy-user>@<서버>
 cd /opt/jira-auto-dispatcher
 docker build -t jira-auto-dispatcher:latest .
 docker run --rm --entrypoint claude jira-auto-dispatcher:latest --version   # 레이어 검증
@@ -53,12 +60,25 @@ docker run --rm --entrypoint claude jira-auto-dispatcher:latest --version   # �
 ```bash
 docker build -t jira-auto-dispatcher:latest .
 docker save jira-auto-dispatcher:latest | gzip > jad.tar.gz
-scp jad.tar.gz <deploy-user>@<DEV_SERVER_HOST>:/opt/jira-auto-dispatcher/
-ssh <deploy-user>@<DEV_SERVER_HOST> 'gunzip -c /opt/jira-auto-dispatcher/jad.tar.gz | docker load'
+scp jad.tar.gz <deploy-user>@<서버>:/opt/jira-auto-dispatcher/
+ssh <deploy-user>@<서버> 'gunzip -c /opt/jira-auto-dispatcher/jad.tar.gz | docker load'
 ```
 
-> ⚠️ `docker push`/레지스트리 사용은 이 런북 범위 밖(사내 정책 따름). 여기서는
+> `workspace/` 를 제외하는 이유: 런타임 클론(오케스트레이터·dlc-meta·docs 레포)은
+> **공유 워크스페이스 named 볼륨**이 소유한다(5단계) — 소스 동기화로 덮으면 안 된다.
+> 옛 배포가 리포 루트에 남긴 `orchestrator/`·`dlc-meta/`·`dataspace_docs/` 잔재도 함께 제외한다.
+>
+> ⚠️ `docker push`/레지스트리 사용은 이 런북 범위 밖(각자 정책 따름). 여기서는
 > 로컬 빌드/전송만 다룬다.
+>
+> **재배포(2회차 이후)**: 위 rsync 로 소스를 갱신한 뒤 `deploy/redeploy-central.sh` 를
+> 서버에서 실행하면 이미지 재빌드 → central 만 recreate → `/healthz` 폴링 → 실패 시
+> 롤백까지 한 번에 한다. worker 컨테이너(`jad-worker-<user>`)는 건드리지 않는다.
+>
+> ```bash
+> ssh <deploy-user>@<서버> \
+>   "bash /opt/jira-auto-dispatcher/deploy/redeploy-central.sh /opt/jira-auto-dispatcher"
+> ```
 
 ---
 
@@ -72,16 +92,27 @@ cd /opt/jira-auto-dispatcher
 cp config/config.example.yaml config/config.yaml
 ```
 
-**socket-proxy를 쓰는 기본 구성이면 반드시** `spawn.docker_host` 를 프록시로 맞춘다:
+온프렘은 `deploy.profile: onprem_server` 다. **socket-proxy를 쓰는 기본 구성이면 반드시**
+`deploy.docker_host` 를 프록시로 맞추고, `deploy.host_deploy_dir` 를 **호스트 절대경로**로
+채운다(central 컨테이너 내부 경로가 아니다 — 이 값이 틀리면 worker 마운트가 조용히 깨진다):
 
 ```yaml
+deploy:
+  profile: onprem_server
+  host_deploy_dir: /opt/jira-auto-dispatcher   # ← 이 서버의 실제 배포 경로
+  docker_host: tcp://socket-proxy:2375         # ← socket-proxy 기본 구성. (직결 시 unix:///var/run/docker.sock)
+  secrets_base_dir: /run/secrets
+  workspace_volume: jad-workspace
+
 spawn:
   image: jira-auto-dispatcher:latest
   network: jad-net
   central_url: http://central:8787
-  docker_host: tcp://socket-proxy:2375   # ← socket-proxy 기본 구성. (직결 시 unix:///var/run/docker.sock)
   run_as: "1000:1000"
 ```
+
+> 레거시 키(`spawn.docker_host`·`spawn.host_deploy_dir`·`spawn.workspace_volume`·
+> `secrets.base_dir`)도 계속 읽으므로 기존 `config.yaml` 은 그대로 둬도 동작한다.
 
 `config/config.yaml`은 compose가 `/app/config:ro` 로 마운트한다(gitignore·이미지 미포함).
 
@@ -89,8 +120,12 @@ spawn:
 
 ## 3. 시크릿 배치 (`secrets.base_dir`)
 
-컨테이너는 `SECRETS_DIR=/run/secrets` 로 주입되고, 호스트 `./secrets/` 를 read-only로
-마운트한다. 여기에 **service 시크릿**(central 공용)과 **per-user 시크릿**을 파일로 둔다.
+컨테이너는 `SECRETS_DIR=/run/secrets` 로 주입되고, 호스트 `./secrets/` 를 마운트한다.
+여기에 **service 시크릿**(central 공용)과 **per-user 시크릿**을 파일로 둔다.
+⚠️ **central은 rw로 마운트한다** — 온보딩 UI가 새 사용자 시크릿을 `secrets.base_dir/<user>/`
+에 직접 쓰기 때문(`:ro`면 온보딩이 `Read-only file system` 500으로 실패). worker는
+spawner가 **자기 per-user 시크릿만 ro**로 마운트하므로 워커측 격리는 유지된다.
+호스트 `./secrets/` 소유는 컨테이너 uid(1000:1000)에 맞춘다.
 
 ```bash
 cd /opt/jira-auto-dispatcher
@@ -99,8 +134,12 @@ mkdir -p secrets/service
 # (a) central Jira watcher 토큰 (config.jira.watcher_token_file = service/jira-token)
 printf '%s' 'ATLASSIAN_API_TOKEN_값' > secrets/service/jira-token
 
-# (b) 웹훅을 쓸 때만 — 웹훅 공유 시크릿 (config.webhook.shared_secret_file)
+# (b) 웹훅을 쓸 때만 — 웹훅 공유 시크릿 (config.webhook.secret_ref)
 # printf '%s' '웹훅시크릿' > secrets/service/webhook-secret
+
+# (c) 알림을 쓸 때만 — 웹훅 URL (config.notifier.webhook_ref).
+#     provider별 URL 획득법은 config/config.example.yaml 의 notifier: 절 주석이 정본.
+# printf '%s' 'https://...' > secrets/service/notifier-webhook
 
 # 권한 하드닝 — 시크릿은 소유자만.
 chmod -R go-rwx secrets
@@ -116,23 +155,49 @@ find secrets -type f -exec chmod 600 {} \;
   chmod 600 .env
   ```
 
-- **per-user 시크릿**(각자 Jira/GitLab 토큰·claude setup-token)은 여기서 손으로 만들지
+- **per-user 시크릿**(각자 Jira/forge 토큰·claude setup-token)은 여기서 손으로 만들지
   않는다 — **온보딩(5단계)**에서 관리 UI가 `secrets/<username>/` 하위에 0600으로 기록한다.
+
+- **central LLM 레포 리졸버(`run.repo_resolution: llm`)**: central이 새 티켓의
+  `target_repos` 를 dlc-meta `REPO-MAP.md` + 티켓 내용으로 `claude` 에게 판단시켜 채운다
+  (→ 스케줄러가 서로 다른 레포는 병렬, 같은 레포는 직렬). 이를 위해 central 컨테이너에
+  **두 가지**를 셋업한다:
+  1. **central claude 인증** — central 컨테이너 env `CLAUDE_CODE_OAUTH_TOKEN` 에
+     `claude setup-token` 값을 주입한다(워커의 per-user 토큰과 별개인 central 자신의
+     판단용 토큰). `.env` 에 두거나(compose 자동 로드) compose의 central 서비스
+     `environment:` 로 넘긴다. 작은 판단 호출이라 사용량 부담은 낮다.
+     ```bash
+     # /opt/jira-auto-dispatcher/.env  (0600)
+     echo "CLAUDE_CODE_OAUTH_TOKEN=$(cat /path/to/central-claude-token)" >> .env
+     ```
+  2. **central dlc-meta 접근** — central이 최신 `REPO-MAP.md` 를 읽도록, dlc-meta를
+     **공유 워크스페이스 볼륨**(`jad-workspace` → `/app/workspace`) 안 단일 클론
+     (`run.repo_map_path`, 기본 `/app/workspace/dlc-meta`)으로 두고 리졸브 전에 pull한다.
+     pull에 쓸 **central forge 토큰**(GitLab PAT / GitHub PAT)은 `secrets/service/forge-token`
+     파일(0600)에 두고 `forge.token_ref: service/forge-token` 로 참조만 건다(값 아님).
+     레거시 키 `run.repo_resolver_gitlab_token_ref` 도 계속 읽으므로 기존 배포는 그대로 둬도 된다.
+     ```bash
+     printf '%s' 'FORGE_READ_TOKEN_값' > secrets/service/forge-token
+     chmod 600 secrets/service/forge-token
+     ```
+     토큰이 없으면 pull을 생략하고 기존(stale) 체크아웃만 읽으며, `REPO-MAP.md` 자체가
+     없으면 조용히 정적 `repo_map`(config) 폴백으로 동작한다(best-effort — 폴러 무중단).
+     `repo_resolution: static` 으로 두면 이 기능을 끄고 기존 정적 룩업만 쓴다.
 
 ---
 
 ## 4. 인바운드 포트 (웹훅 쓸 때만)
 
-- **폴링만** 쓰면(`webhook.enabled: false`, 기본) central이 Jira로 **아웃바운드**만 하므로
-  인바운드 개방 **불필요**. 관리 UI(8787)는 사내망에서만 접근한다(SSH 터널 권장).
+- **폴링만** 쓰면(`webhook.enabled: false`) central이 Jira로 **아웃바운드**만 하므로
+  인바운드 개방 **불필요**. 관리 UI(8787)는 신뢰 네트워크에서만 접근한다(SSH 터널 권장).
 - **웹훅**을 켜면(`webhook.enabled: true`) Jira → central 로의 인바운드가 필요하다.
-  사내 리버스 프록시(TLS)를 앞단에 두고 `webhook.path` 만 노출, 나머지(8787 관리 UI)는
+  리버스 프록시(TLS)를 앞단에 두고 `webhook.path` **하나만** 노출, 나머지(8787 관리 UI)는
   절대 외부 노출하지 않는다. 방화벽에서 출처를 Jira IP로 제한한다.
 
 관리 UI 접근은 포트를 여는 대신 SSH 터널을 권장:
 
 ```bash
-ssh -L 8787:localhost:8787 <deploy-user>@<DEV_SERVER_HOST>   # 로컬 http://localhost:8787
+ssh -L 8787:localhost:8787 <deploy-user>@<서버>   # 로컬 http://localhost:8787
 ```
 
 ---
@@ -151,6 +216,35 @@ docker compose logs -f central    # 부팅 로그(설정 로드·poller 스레�
 - 직결 대안(비권장)은 `docker-compose.yml` 주석 참조(socket-proxy 제거 + docker.sock 직접
   마운트 + `docker_host: unix:///var/run/docker.sock`).
 
+### 공유 워크스페이스 (단일 클론·단일 pull·락)
+
+central·모든 worker는 **하나의 named 볼륨**(`jad-workspace` → `/app/workspace`,
+`run.workspace_dir`)을 공유하고, 오케스트레이터 레포(`orchestrator`/`dlc-meta`/
+`docs`)와 타겟 레포를 그 하위에 **한 벌만** 클론한다(설계 §4 "공유 워크스페이스
+하나 = 단일 클론·단일 pull 지점"). 예전처럼 워커마다 자기 컨테이너에 N중 클론·N번 pull
+하지 않는다.
+
+- **볼륨 공유**: compose가 `jad-workspace` 를 `name: jad-workspace` 로 고정 선언하고,
+  spawner가 워커에 **같은 이름의 named 볼륨**을 `run.workspace_dir` 로 마운트한다
+  (`config.deploy.workspace_volume`, 기본 `jad-workspace`). named 볼륨이라 `host_deploy_dir`
+  와 무관하게 볼륨명으로 docker가 해석한다.
+- **경로 파생**: `run.orchestrator_repo`/`dlc_meta_repo`/`docs_repo` 를 비우면
+  `<workspace_dir>/orchestrator|dlc-meta|docs` 로 자동 파생한다(명시하면 존중).
+  ⚠️ 파생 디렉토리명이 옛 `dataspace_docs` → 범용 `docs` 로 바뀌었다. 경로를 **명시한**
+  기존 배포는 그 값을 그대로 존중하므로 영향이 없고, 비워 둔 배포만 새 디렉토리에 다시
+  clone 한다(읽기 전용 참고 레포라 안전).
+- **pull 락**: 여러 워커가 공유 클론을 per-job pull하므로 clone/pull을 레포별 파일락
+  (`<repo>.lock`, 공유 볼륨 위 → 컨테이너 간 `flock`)으로 감싸 **직렬화**한다
+  (clone-if-absent+pull-if-present 가 락 안에서 원자적). 서로 다른 레포는 병렬.
+- **동일 타겟레포 쓰기 안전**: central 스케줄러의 레포락이 같은 타겟레포 동시 잡을 이미
+  직렬화하므로, 공유 타겟레포 클론이라도 한 번에 한 job만 만진다(브랜치 `auto/<ticket>` 로
+  per-job 격리).
+
+> ⚠️ **기존 배포에서 이관**: 공유 워크스페이스로 바꾸면 central·워커 모두 recreate 해야
+> 새 볼륨 마운트가 반영된다. 워커는 배포가 자동 reconcile(6단계 참고)하거나 UI stop→start
+> 로 재생성한다. 예전 per-user 클론(`jad-<user>` 볼륨 안이 아니라 각 워커 사설 경로)은
+> 더는 쓰지 않으며, 최초 잡에서 공유 워크스페이스에 다시 클론된다.
+
 ---
 
 ## 6. 사용자 온보딩 → worker 동적 spawn
@@ -168,7 +262,7 @@ docker compose logs -f central    # 부팅 로그(설정 로드·poller 스레�
 | `jira_email` | Jira actor 이메일(Basic auth) |
 | `jira_token` | 사용자 Jira API 토큰 → `secrets/<user>/jira-token` |
 | `claude_setup_token` | `claude setup-token` 발급 값 → `secrets/<user>/claude-oauth-token` |
-| (선택) `gitlab_token` | MR 생성용 → `secrets/<user>/gitlab-token` |
+| (선택) `forge_token` | 브랜치 push·MR/PR 생성용 → `secrets/<user>/forge-token` (옛 폼 필드 이름 `gitlab_token` 도 계속 받는다) |
 | (선택) `git_name`/`git_email` | 커밋 author 귀속 |
 
 활성화(worker 기동): UI의 enable 버튼 = `POST /users/<username>/enable` →
@@ -210,26 +304,29 @@ docker exec jad-worker-<user> curl -fsS http://localhost:8787/healthz
 
 **엔드투엔드 (테스트 티켓)**:
 
-1. Jira(<PROJECT_KEY>)에서 테스트 티켓을 만들어 온보딩된 사용자에게 할당하고 매칭 상태
-   (`config.match.statuses`, 예: `해야 할 일`)로 둔다.
+1. 감시 대상 Jira 프로젝트(`config.jira.project`)에서 테스트 티켓을 만들어 온보딩된
+   사용자에게 할당하고 트리거 상태(`config.jira.trigger_statuses`)로 둔다.
 2. central 로그에서 감지→claim→dispatch, 해당 worker 로그에서 잡 수신→`claude -p` 실행 확인.
-3. 산출물 검증: 사용자 정체성의 브랜치(`auto/<TICKET>`) + MR 생성(사용자 GitLab 토큰).
+3. 산출물 검증: 사용자 정체성의 브랜치(`auto/<TICKET>`) + MR/PR 생성(사용자 forge 토큰).
 4. 티켓/잡 상태가 `done`(또는 한도 시 `interrupted`+`reset_at`)로 회신되는지 확인.
+
+전 플로우를 단계별 기대결과와 함께 검증하는 상세 런북은 [E2E.md](E2E.md) 다.
 
 ---
 
 ## 8. 보안 (요약 — 정본은 SECURITY.md)
 
-- **사내망 한정**: 관리 UI(8787)·worker는 외부 노출 금지. UI 접근은 SSH 터널 권장.
+- **신뢰 네트워크 한정**: 관리 UI(8787)·worker는 인터넷 노출 금지. UI 접근은 SSH 터널 권장.
 - **socket-proxy 권장**: central은 docker.sock 직결 대신 프록시로 최소 권한
   (CONTAINERS/IMAGES/NETWORKS/VOLUMES + POST)만 사용. 직결은 호스트 root 동치.
 - **비-root**: 이미지는 uid 1000(app)으로 실행하고 worker도 `run_as: 1000:1000`.
 - **시크릿**: 값은 `secrets/` 에 0600, read-only 마운트. 이미지에 굽지 않는다(.dockerignore).
-  Jira/GitLab 토큰은 worker에 **파일 경로**로만 넘긴다(값은 claude setup-token만 env 주입).
-- **가역성/폭주 방지**: dedup 게이트 + `concurrency_per_worker: 1` + 결정적 브랜치
+  Jira/forge 토큰은 worker에 **파일 경로**로만 넘긴다(값은 claude setup-token만 env 주입).
+- **가역성/폭주 방지**: dedup 게이트 + central **서버 자원 어드미션**(메모리+부하로 dispatch
+  조절, 잡 수 cap 아님) + worker 안전 상한(`worker_max_concurrency`, 기본 64) + 결정적 브랜치
   (`auto/<TICKET>`) + MR 게이트(사람 리뷰).
 
-전체 위협 모델·자율 실행 인가 근거는 **[SECURITY.md](SECURITY.md)** 참조.
+전체 위협 모델과 "실행 = 풀 퍼미션 동의" 선언은 **[SECURITY.md](SECURITY.md)** 참조.
 
 ---
 

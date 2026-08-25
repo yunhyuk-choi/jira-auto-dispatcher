@@ -23,11 +23,26 @@ ENV PYTHONUNBUFFERED=1 \
 # --- 시스템 의존성 ---
 #   git            worker의 per-user 커밋/브랜치/MR·런타임 레포 clone에 필수
 #   ca-certificates HTTPS(Jira/GitLab/claude 설치·인증)
-#   curl           claude 독립 실행 설치 스크립트 + HEALTHCHECK 프로브
-# (docker CLI는 불필요 — spawner가 Docker SDK로 접근한다.)
+#   curl           claude 독립 실행 설치 스크립트 + HEALTHCHECK 프로브 + docker CLI 정적 바이너리 취득
+# (spawner의 라이프사이클 관리는 Docker SDK로 하지만, 프랙탈 PUSH 경로의 central→worker
+#  `docker exec`는 아래 docker CLI(클라이언트 전용)를 쓴다 — 데몬은 설치하지 않는다.)
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates curl bash \
     && rm -rf /var/lib/apt/lists/*
+
+# --- docker CLI(클라이언트 전용, 데몬 미설치) ---
+# 프랙탈 PUSH 경로: central 역할의 per-user sub가 `docker exec jad-worker-<user> claude -p --resume ...`를
+# 실행한다. central은 원격 socket-proxy(DOCKER_HOST=tcp://socket-proxy:2375)를 타깃하므로 로컬 데몬은
+# 불필요 — 공식 정적 배포에서 클라이언트 바이너리 1개(docker/docker)만 뽑아 /usr/local/bin에 둔다.
+# /usr/local/bin은 비-root(uid 1000) PATH에도 있으므로 claude가 호출할 수 있다. worker 역할은 이
+# 바이너리를 쓰지 않는다(공유 이미지 — 무해). 버전은 재현성을 위해 핀한다.
+ARG DOCKER_CLI_VERSION=27.5.1
+RUN curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz" \
+        -o /tmp/docker.tgz \
+    && tar -xzf /tmp/docker.tgz -C /usr/local/bin --strip-components=1 docker/docker \
+    && rm /tmp/docker.tgz \
+    && docker --version
+# ↑ `docker --version` 은 빌드 중 검증 라인(클라이언트 단독으로 동작 — 데몬 불요). 실패 시 빌드 실패.
 
 # --- 비-root 유저(uid 1000) + 런타임 디렉토리 소유/권한 ---
 # HOME은 Docker가 USER로 자동 설정하지 않으므로 명시한다(claude·설치 스크립트가 $HOME 사용).
