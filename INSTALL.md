@@ -5,9 +5,11 @@
 > 코딩 에이전트를 헤드리스로 돌린다. 관리 UI(8787)와 worker 는 **RCE 표면**이므로
 > **인터넷에 노출하면 안 된다.** 무엇에 동의하는지의 정본은 [SECURITY.md](SECURITY.md).
 >
-> **⚠️ 이 문서는 "지금 실제로 동작하는 수동 절차"만 기술한다.** 대화형 온보딩 마법사나
-> 설정 검증 CLI 는 **아직 없다** — `config.example.yaml` 을 복사해 손으로 채우는 것이
-> 현재 유일한 방법이다.
+> **⚠️ 이 문서는 "지금 실제로 동작하는 수동 절차"만 기술한다.** `config.example.yaml` 을
+> 복사해 손으로 채우는 절차는 그대로 유효하며, 그 위에 **설정 관문 CLI**
+> (`python -m app.setup` — 검증 / 생성 / 실측 진단, [§2.5](#25-설정-관문-cli--python--m-appsetup))가 있다.
+> **대화형 온보딩 마법사는 아직 없다** — 값을 캐묻는 대화형 진행은 후속이고, 그때도
+> 판정(검증·산출·진단)은 이 CLI 가 한다.
 
 ---
 
@@ -158,6 +160,57 @@ config·시크릿 마운트 source 는 반드시 **호스트 경로**여야 한�
   (모양은 provider 마다 다르다 — `config/registry.example.json` 참조).
 - 목록에 없는 provider 이름을 넣으면 **아무것도 발송하지 않고 경고만** 남긴다(오발송 방지).
 
+### 2.5 설정 관문 CLI — `python -m app.setup`
+
+손으로 채운 `config.yaml` 은 **아무도 검사해 주지 않는다** — 필수 항목을 빠뜨려도, 풀
+퍼미션 동의를 켜지 않아도 부팅은 된다(경고만 남는다). 그 자리를 이 명령이 메운다.
+종료코드가 곧 게이트다: **0 통과 / 1 게이트 실패 / 2 사용 오류.**
+
+| 서브커맨드 | 하는 일 | 입력 → 출력 |
+|---|---|---|
+| `validate` | 수집한 답변을 `app/setup_schema.py` 선언에 대고 검증(누락·조건부 필수·허용값·타입·시크릿 값 혼입을 **전부 모아서** 보고) | 답변 JSON(파일 또는 stdin) → 사람용 출력 / `--json` |
+| `render` | 검증을 통과한 답변으로 `config.yaml` 생성. **`config/config.example.yaml` 을 템플릿으로 써서 주석(=이 안내)을 그대로 물려준다** | 답변 JSON → `config/config.yaml`(`-o` 로 변경, 기존 파일은 `--force` + 자동 `.bak-*` 백업) |
+| `doctor` | 그 설정으로 **실제로 붙는지** 실측: Jira 자격·JQL 경로, forge 토큰 권한, dlc-meta 원격 도달성, docker 접속, 알림 웹훅 참조, `host_deploy_dir` 함정 | `config/config.yaml` → 검사별 PASS/FAIL/WARN/SKIP + 고치는 법 |
+
+```bash
+cat > answers.json <<'JSON'
+{
+  "consent": {"full_permissions": true, "accepted_at": "2026-01-01T09:00:00+09:00"},
+  "deploy":  {"profile": "cloud_vm", "host_deploy_dir": "/home/you/jira-auto-dispatcher",
+              "secrets_base_dir": "/run/secrets"},
+  "forge":   {"kind": "gitlab", "token_ref": "service/forge-token"},
+  "jira":    {"base_url": "https://your-org.atlassian.net", "project": "PROJ",
+              "trigger_statuses": ["해야 할 일"],
+              "watcher_token_file": "service/jira-token",
+              "watcher_email": "bot@your-org.example"},
+  "notifier": {"provider": "none"}
+}
+JSON
+
+python -m app.setup validate answers.json          # 통과 못 하면 non-zero
+python -m app.setup render   answers.json          # → config/config.yaml (주석 보존)
+python -m app.setup doctor                         # 실측 진단
+```
+
+- `render` 는 **답한 항목만** 쓴다 — 답하지 않은 값은 예시 파일의 값과 `deploy.profile`
+  파생에 맡긴다(§2.2). 대신 "답하지 않아 예시 값이 남은 항목"과 아직 남은 `<...>`
+  자리표시자를 출력에 나열하므로, 그 목록은 눈으로 확인한다.
+- 시크릿은 **값이 아니라 참조**다. 참조 자리에 토큰·웹훅 URL 을 넣으면 `validate` 가
+  막는다(그 값을 출력에 싣지 않는다).
+- `doctor` 는 기본적으로 **알림을 발송하지 않는다.** 실제 발송까지 시험하려면
+  `--send-test-notification`(팀 채널에 메시지가 남는다).
+- 일부만 돌리려면 `--only`: `config, secrets, host_deploy_dir, jira_auth, jira_search,
+  forge_token, dlc_meta, docker, notifier`.
+- ⚠️ **호스트에서 돌릴 때와 컨테이너 안에서 돌릴 때 보이는 것이 다르다.** `/run/secrets`
+  나 `tcp://socket-proxy:2375` 는 컨테이너 관점이라, 호스트에서는 해당 검사가 `SKIP` 으로
+  나오고 안내가 붙는다. 기동 후에는 안에서 한 번 더 돌린다:
+  ```bash
+  docker compose exec central python -m app.setup doctor
+  ```
+- 이 CLI 는 **얇은 껍데기**다 — 검증·렌더·진단 로직은 `app/setup_validate.py` ·
+  `app/setup_render.py` · `app/setup_doctor.py` 에 있고, 후속 웹 온보딩·대화형 에이전트가
+  **같은 함수**를 재사용한다(게이트가 두 벌이 되면 반드시 갈라진다).
+
 ---
 
 ## 3. 갈래 A — 로컬 (개인/평가용)
@@ -261,6 +314,9 @@ docker compose up -d
 ## 6. 첫 기동 검증 (공통)
 
 ```bash
+# (0) 기동 **전**: 설정 실측 진단(§2.5). 여기서 잡히는 것이 로그를 뒤지는 것보다 싸다
+python -m app.setup doctor
+
 # (1) 헬스 — {"status":"ok","role":"central"}
 curl -fsS http://localhost:8787/healthz
 
@@ -278,7 +334,15 @@ docker inspect jad-central --format '{{json .Mounts}}'
 `jad-socket-proxy`)이 Up. worker 는 아직 없다 — 온보딩 후에 생긴다.
 
 **부팅 로그에 `consent.full_permissions 가 설정되지 않았습니다` 경고가 보이면**
-§2.1 의 동의 값을 아직 안 켠 것이다. 부팅은 되지만 그대로 운영하지 말라.
+§2.1 의 동의 값을 아직 안 켠 것이다. 부팅은 되지만 그대로 운영하지 말라
+(`python -m app.setup doctor --only config` 가 같은 것을 실패로 잡는다).
+
+기동 뒤에는 **컨테이너 안에서** 한 번 더 진단한다 — `/run/secrets`·`socket-proxy` 처럼
+컨테이너 관점의 값들은 호스트에서 판정할 수 없어 그때만 `SKIP` 이 아닌 진짜 결과가 나온다:
+
+```bash
+docker compose exec central python -m app.setup doctor
+```
 
 ### 6.1 사용자 온보딩 → worker 뜨기
 
@@ -299,12 +363,18 @@ docker inspect jad-central --format '{{json .Mounts}}'
 
 ## 7. 자주 틀리는 것
 
-| 증상 | 원인 |
-|---|---|
-| worker 가 뜨는데 설정/토큰을 못 읽음 | `deploy.host_deploy_dir` 이 비었거나 **컨테이너 내부 경로**로 적혔다(§2.2) |
-| 온보딩이 `Read-only file system` 500 | central 의 `./secrets` 마운트를 `:ro` 로 바꿨다 — central 은 **rw** 여야 한다 |
-| 티켓이 감지되지 않음 | `jira.project`·`jira.trigger_statuses`(상태 **이름**)·assignee accountId 매핑 중 하나. 폴링 주기(기본 60s)도 기다렸는지 |
-| "티켓 없음"처럼 조용히 넘어감 대신 에러 | Jira **Server/DC** 를 가리켰다 — Cloud 전용이다 |
-| 잡이 running 으로 안 넘어감 | 자원 어드미션이 큐잉 중일 수 있다(`admission.min_free_mem_mb`·`max_load_per_core`) |
-| MR 작성자가 엉뚱한 사용자 | worker 가 앰비언트 자격증명으로 push 했다 — per-user forge 토큰 경로를 확인 |
-| 알림이 안 감 | `notifier.provider` 가 `none` 이거나 목록 밖 값(경고만 남기고 미발송) |
+> 아래 대부분은 `python -m app.setup doctor`(§2.5)가 **증상이 나기 전에** 잡는다 —
+> 로그를 뒤지기 전에 먼저 돌려 본다.
+
+| 증상 | 원인 | 잡는 검사 |
+|---|---|---|
+| worker 가 뜨는데 설정/토큰을 못 읽음 | `deploy.host_deploy_dir` 이 비었거나 **컨테이너 내부 경로**로 적혔다(§2.2) | `--only host_deploy_dir` |
+| dlc-meta pull/push 가 안 됨 | 사설 GitLab 을 이 호스트에서 열 수 없거나 토큰 권한 부족 | `--only dlc_meta` |
+| 시크릿 파일을 못 읽음 | 참조 경로 오타 · 파일 부재 · 값을 config 에 직접 적음 | `--only secrets` (+ `validate`) |
+| 온보딩이 `Read-only file system` 500 | central 의 `./secrets` 마운트를 `:ro` 로 바꿨다 — central 은 **rw** 여야 한다 | — |
+| 티켓이 감지되지 않음 | `jira.project`·`jira.trigger_statuses`(상태 **이름**)·assignee accountId 매핑 중 하나. 폴링 주기(기본 60s)도 기다렸는지 | `--only jira_search` (프로젝트 키까지) |
+| "티켓 없음"처럼 조용히 넘어감 대신 에러 | Jira **Server/DC** 를 가리켰다 — Cloud 전용이다 | `--only jira_auth,jira_search` |
+| 잡이 running 으로 안 넘어감 | 자원 어드미션이 큐잉 중일 수 있다(`admission.min_free_mem_mb`·`max_load_per_core`) | — |
+| MR 작성자가 엉뚱한 사용자 | worker 가 앰비언트 자격증명으로 push 했다 — per-user forge 토큰 경로를 확인 | — |
+| 알림이 안 감 | `notifier.provider` 가 `none` 이거나 목록 밖 값(경고만 남기고 미발송) | `--only notifier` |
+| worker 를 못 띄움 | docker 엔드포인트 접속 실패(소켓 권한 · socket-proxy 미기동) | `--only docker` |

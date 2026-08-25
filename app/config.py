@@ -137,8 +137,9 @@ class ConsentConfig:
     에이전트를 헤드리스로 돌린다. 설치자가 그 위험을 이해하고 감수했다는 흔적을 남긴다.
 
     ⚠️ 로드 단계에서 **강제(fail-fast)하지 않는다** — 동의 키가 없는 기존 배포를 깨지
-    않기 위해서다. 미동의면 경고만 남기고(:func:`_validate`), 강제는 후속 온보딩
-    검증기의 몫이다.
+    않기 위해서다. 미동의면 경고만 남기고(:func:`_validate`), 강제는 **설치 관문**의
+    몫이다: :mod:`app.setup_validate` 가 통과시키지 않고 ``python -m app.setup validate``
+    가 non-zero 로 끝난다(``doctor`` 의 ``config`` 검사도 같은 것을 실패로 본다).
     """
 
     full_permissions: bool = False
@@ -954,8 +955,9 @@ def _validate(cfg: AppConfig) -> None:
     """필수키 검증(fail-fast). central 역할에 필요한 최소 집합만 강제.
 
     ⚠️ ``consent.full_permissions`` 는 **여기서 강제하지 않는다** — 동의 키가 없는 기존
-    배포를 깨지 않기 위해 경고만 남긴다. 온보딩 단계의 강제는 후속 검증기의 몫이다
-    (:mod:`app.setup_schema` 는 이미 required 로 선언해 뒀다).
+    배포를 깨지 않기 위해 경고만 남긴다. 설치 단계의 강제는 :mod:`app.setup_validate`
+    (``python -m app.setup validate``)가 한다 — :mod:`app.setup_schema` 의 required
+    선언이 그 근거다.
     """
     missing: list[str] = []
 

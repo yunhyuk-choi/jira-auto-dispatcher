@@ -85,6 +85,9 @@ DEFAULT_DONE_TRANSITION_NAMES: tuple = ("완료", "Done")
 #: JQL 검색 경로(Jira Cloud 전용 — 모듈 docstring 참조).
 SEARCH_JQL_PATH = "/rest/api/3/search/jql"
 
+#: 현재 자격의 계정 조회 경로(설정 진단용 읽기 — :meth:`JiraClient.myself`).
+MYSELF_PATH = "/rest/api/3/myself"
+
 #: 이 경로가 **없을 때** Jira 가 내는 상태코드들(= Server/DC 강한 신호).
 _ENDPOINT_ABSENT_STATUS = (404, 405, 410)
 
@@ -294,6 +297,22 @@ class JiraClient:
             return resp.json()
         except ValueError:
             return {}
+
+    # ------------------------------------------------------------------
+    # 자격 확인(설정 진단 전용 — 이슈를 건드리지 않는 읽기)
+    # ------------------------------------------------------------------
+
+    def myself(self) -> dict:
+        """현재 자격의 계정 정보 GET (:data:`MYSELF_PATH`) — **읽기 전용**.
+
+        설정 진단(:mod:`app.setup_doctor`)이 "토큰 파일이 있다"가 아니라 "이 사이트가
+        이 자격을 실제로 받아준다"를 확인하는 데 쓴다. 부작용이 없는 순수 조회라 진단에
+        안전하다(운영 경로는 이 메서드를 쓰지 않는다).
+
+        Raises:
+            JiraError: 401/403(자격 문제) · 404 등(경로 부재 → Server/DC 신호) · 네트워크.
+        """
+        return self._json_or_empty(self._request("GET", MYSELF_PATH))
 
     # ------------------------------------------------------------------
     # 이슈 읽기/쓰기

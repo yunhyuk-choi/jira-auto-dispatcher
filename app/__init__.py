@@ -22,6 +22,12 @@ Jira(PROJ) 티켓이 등록 사용자에게 새로 할당되면 이를 감지해
     config       설정 로드/검증(central 중심, run.* 공유)
     main         ROLE 분기 진입점(central app factory / worker 루프)
     auth_login   브라우저 로그인 2-스텝(claude-hacker 이식, 폴백 인증)
+    [설치 관문] — 운영 경로가 아니라 **설치 시점**에만 쓴다(`python -m app.setup`)
+    setup_schema   "무엇을 물어야 하는가"의 기계가 읽는 선언(정본)
+    setup_validate 그 선언을 강제하는 검증기(CLI·웹 온보딩 **공용** 라이브러리)
+    setup_render   예시 파일을 템플릿으로 config.yaml 생성(주석=사용자 안내 보존)
+    setup_doctor   설정이 실제로 동작하는지 실측 진단(네트워크·도커·마운트 함정)
+    setup          위 셋을 부르는 얇은 CLI 껍데기(종료코드가 곧 게이트)
     [central]
     state        state/*.json 영속 계층(jobs/watermark/dedup/registry)
     jira_client  Jira REST v2/v3 클라이언트(감시 토큰)
