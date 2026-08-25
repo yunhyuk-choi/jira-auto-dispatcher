@@ -26,7 +26,8 @@ from app.jira_client import JiraError
 def _no_ambient_env(monkeypatch):
     """호스트 env 가 검사 결과를 흔들지 않게 격리한다."""
     for name in ("HOST_DEPLOY_DIR", "SECRETS_DIR", "JIRA_WATCHER_EMAIL",
-                 "NOTIFIER_PROVIDER", "NOTIFIER_WEBHOOK_REF", "NOTIFY_ENABLED"):
+                 "NOTIFIER_PROVIDER", "NOTIFIER_WEBHOOK_REF", "NOTIFY_ENABLED",
+                 "WORKER_SHARED_SECRET"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -674,3 +675,39 @@ def test_forge_token_skip_message_never_leaks_the_token(tmp_path):
     cfg.forge.base_url_source = ""
     r = D.check_forge_token(cfg, project_dir=root, http=FakeHttp())
     assert token not in (r.message + r.hint)
+
+
+# ---------------------------------------------------------------------------
+# worker 공유 시크릿 — 존재만 본다(값은 절대 출력하지 않는다)
+# ---------------------------------------------------------------------------
+
+
+def test_worker_secret_present_in_config_passes(tmp_path):
+    cfg = make_cfg()
+    cfg.worker_shared_secret = "s3cr3t-value"
+    r = D.check_worker_secret(cfg, project_dir=str(tmp_path))
+    assert r.status == D.STATUS_PASS
+    assert "s3cr3t-value" not in r.message + r.hint      # 값 미노출
+
+
+def test_worker_secret_found_in_env_file_passes(tmp_path):
+    """호스트에서 돌리면 아직 env 에 없다 — compose 가 읽는 .env 를 봐야 한다."""
+    (tmp_path / ".env").write_text("WORKER_SHARED_SECRET=abc123\n",
+                                   encoding="utf-8", newline="")
+    r = D.check_worker_secret(make_cfg(), project_dir=str(tmp_path))
+    assert r.status == D.STATUS_PASS
+    assert "abc123" not in r.message + r.hint
+
+
+def test_missing_worker_secret_warns_but_does_not_fail(tmp_path):
+    """없다고 잡이 깨지지는 않는다(무인증으로 열릴 뿐) — 기존 배포를 FAIL 시키지 않는다."""
+    r = D.check_worker_secret(make_cfg(), project_dir=str(tmp_path))
+    assert r.status == D.STATUS_WARN
+    assert "무인증" in r.message
+    assert "바꾸지" in r.hint          # 이미 워커가 떠 있으면 바꾸지 말라는 경고
+
+
+def test_worker_secret_is_part_of_the_check_catalog():
+    assert "worker_secret" in D.CHECK_ORDER
+    results = D.run_checks(make_cfg(), only=("worker_secret",))
+    assert [r.name for r in results] == ["worker_secret"]

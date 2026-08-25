@@ -484,6 +484,36 @@ _WEBHOOK = SchemaSection(
     ),
 )
 
+_DLC_META = SchemaSection(
+    name="dlc_meta",
+    title="dlc-meta 레포(사이클로그·REPO-MAP)",
+    description=(
+        "central 이 사이클로그를 커밋·push 하고(단일 라이터) 레포 리졸버가 REPO-MAP 을 "
+        "읽는 인스턴스 레포. ⚠️ **설치자가 손으로 적을 값이 아니다** — 이 시스템의 설치는 "
+        "``ai-dlc-orchestrator`` 프레임워크의 SETTER 가 dlc-meta 를 만들어 원격에 push 한 "
+        "직후에 이어지므로, 그 클론이 이미 로컬에 있다. 설치 관문이 "
+        "``git -C <클론> remote get-url origin`` 으로 읽어 채운다"
+        "(:mod:`app.setup_autofill`)."
+    ),
+    fields=(
+        SchemaField(
+            key="run.dlc_meta_repo_url",
+            type=FieldType.STRING,
+            required=True,
+            description=(
+                "dlc-meta 레포의 clone URL(**토큰 없는 형태**). 빈 레포여도 된다. "
+                "``python -m app.setup validate|render --dlc-meta <클론 경로>`` 로 "
+                "자동 주입되며, 경로를 주지 않아도 흔한 위치(형제 디렉토리 등)를 "
+                "탐색한다. ⚠️ 이 값은 forge base_url·kind 판정의 근거이기도 하다"
+                "(:func:`app.forge.resolve_base_url` · "
+                ":func:`app.forge.infer_kind_from_url`) — 다른 조직의 예시 URL 이 남으면 "
+                "사내 토큰이 엉뚱한 호스트로 나갈 수 있어, 채우지 못하면 게이트가 막는다."
+            ),
+            example="https://gitlab.example.com/<your-group>/dlc-meta.git",
+        ),
+    ),
+)
+
 _DOCS_REPO = SchemaSection(
     name="docs_repo",
     title="설계 문서 레포(선택)",
@@ -619,7 +649,8 @@ _CONSENT = SchemaSection(
 )
 
 #: 온보딩이 물어야 하는 항목 **전체**(선언 순서 = 권장 온보딩 진행 순서).
-SETUP_SCHEMA: Tuple = (_FORGE, _NOTIFIER, _JIRA, _WEBHOOK, _DOCS_REPO, _DEPLOY, _CONSENT)
+SETUP_SCHEMA: Tuple = (_FORGE, _NOTIFIER, _JIRA, _WEBHOOK, _DLC_META, _DOCS_REPO,
+                       _DEPLOY, _CONSENT)
 
 
 # ---------------------------------------------------------------------------

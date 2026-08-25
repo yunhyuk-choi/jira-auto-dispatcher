@@ -42,10 +42,10 @@
 | **Jira 프로젝트 키** | 감시할 프로젝트 | `jira.project` |
 | **Jira watcher 토큰** | Atlassian 계정 → API 토큰 발급 | 파일 `secrets/service/jira-token` ← `jira.watcher_token_file` |
 | **forge 토큰(서비스용)** | GitLab PAT 또는 GitHub PAT | 파일 `secrets/service/forge-token` ← `forge.token_ref` |
-| **dlc-meta 레포 원격 URL** | 당신이 만든 레포(비어 있어도 된다) | `run.dlc_meta_repo_url` |
+| **dlc-meta 레포 원격 URL** | 당신이 만든 레포(비어 있어도 된다). ⚠️ **손으로 적지 않는다** — 설치 관문이 그 클론의 `origin` 에서 읽어 채운다(§2.5) | `run.dlc_meta_repo_url` |
 | **오케스트레이터 프레임워크 레포 URL** | 공개 프레임워크 | `run.orchestrator_repo_url` |
 | **설계 문서 레포 URL** *(선택)* | 없으면 비운다 → 조용히 skip | `run.docs_repo_url` |
-| **worker 공유 시크릿** | `openssl rand -hex 24` 로 즉석 생성 | `.env` 의 `WORKER_SHARED_SECRET` |
+| **worker 공유 시크릿** | ⚠️ **직접 만들지 않는다** — `python -m app.setup render` 가 없으면 생성한다(§2.5). 직접 하려면 `openssl rand -hex 32` | `.env` 의 `WORKER_SHARED_SECRET` |
 | **사용자별 `claude setup-token`** | 각 사용자가 자기 PC 에서 `claude setup-token`(Max 구독) | **관리 UI 온보딩 폼**(설치 시점 아님) |
 | **사용자별 Jira accountId·토큰·forge 토큰** | 각 사용자 | **관리 UI 온보딩 폼** |
 
@@ -87,9 +87,15 @@ forge:
 
 run:
   orchestrator_repo_url: <프레임워크 레포 URL>
-  dlc_meta_repo_url: <당신의 dlc-meta 레포 URL>
+  dlc_meta_repo_url: <설치 관문이 채운다 — §2.5 의 `--dlc-meta`>
   docs_repo_url: ""               # 선택 — 비우면 skip
 ```
+
+> `run.dlc_meta_repo_url` 은 **묻지 않는 값**이다. 이 시스템의 설치는 `ai-dlc-orchestrator`
+> 프레임워크의 SETTER 가 dlc-meta 를 만들어 원격에 push 한 **직후**에 이어지므로, 그 클론이
+> 이미 로컬에 있다 — 설치 관문이 `git -C <클론> remote get-url origin` 으로 읽어 채운다(§2.5).
+> 못 채우면 `validate` 가 막는다(예시 URL 을 그대로 남기지 않는다 — 그 값에서 forge
+> `base_url`·`kind` 가 파생되므로 남의 조직 호스트가 남으면 사내 토큰이 그리로 나갈 수 있다).
 
 > Jira 커스텀필드 id·완료 전이 id 는 **인스턴스마다 다르다**. 알아내는 방법(`/rest/api/3/field`
 > 조회 등)은 `config/config.example.yaml` 의 `jira:` 절 주석에 있다 — 여기 복제하지 않는다.
@@ -170,7 +176,7 @@ config·시크릿 마운트 source 는 반드시 **호스트 경로**여야 한�
 |---|---|---|
 | `discover` | **이 Jira 인스턴스에 실제로 있는 값**을 조회(커스텀필드 후보·프로젝트 상태·전이 id/name·라벨·`accountId`). 설정에 적힌 id·상태 이름이 **이 인스턴스에 실재하는지**까지 검증한다 | `config.yaml`(base_url·watcher_email·토큰만 있으면 됨) → 후보 목록 + 붙여넣을 `jira:` 블록 / `--json` |
 | `validate` | 수집한 답변을 `app/setup_schema.py` 선언에 대고 검증(누락·조건부 필수·허용값·타입·시크릿 값 혼입을 **전부 모아서** 보고) | 답변 JSON(파일 또는 stdin) → 사람용 출력 / `--json` |
-| `render` | 검증을 통과한 답변으로 `config.yaml` 생성. **`config/config.example.yaml` 을 템플릿으로 써서 주석(=이 안내)을 그대로 물려준다** | 답변 JSON → `config/config.yaml`(`-o` 로 변경, 기존 파일은 `--force` + 자동 `.bak-*` 백업) |
+| `render` | 검증을 통과한 답변으로 `config.yaml` 생성. **`config/config.example.yaml` 을 템플릿으로 써서 주석(=이 안내)을 그대로 물려준다.** 덤으로 `.env` 의 `WORKER_SHARED_SECRET` 을 **없으면** 만든다(멱등 — 있으면 손대지 않는다) | 답변 JSON → `config/config.yaml`(`-o` 로 변경, 기존 파일은 `--force` + 자동 `.bak-*` 백업) + `.env` |
 | `doctor` | 그 설정으로 **실제로 붙는지** 실측: Jira 자격·JQL 경로, forge 토큰 권한, dlc-meta 원격 도달성, docker 접속, 알림 웹훅 참조, `host_deploy_dir` 함정 | `config/config.yaml` → 검사별 PASS/FAIL/WARN/SKIP + 고치는 법 |
 
 ```bash
@@ -188,12 +194,29 @@ cat > answers.json <<'JSON'
   "webhook": {"enabled": true, "secret_ref": "service/jira-webhook"}
 }
 JSON
+# ↑ run.dlc_meta_repo_url 이 없다 — 아래 --dlc-meta 가 채운다(사람이 적을 값이 아니다).
 
-python -m app.setup validate answers.json          # 통과 못 하면 non-zero
-python -m app.setup render   answers.json          # → config/config.yaml (주석 보존)
+python -m app.setup validate answers.json --dlc-meta ../dlc-meta   # 통과 못 하면 non-zero
+python -m app.setup render   answers.json --dlc-meta ../dlc-meta   # → config/config.yaml + .env
 python -m app.setup discover                       # 인스턴스 조회(아래 참조)
 python -m app.setup doctor                         # 실측 진단
 ```
+
+#### 자동으로 채워지는 두 값 — 묻지 않는다
+
+| 값 | 어디서 오나 | 어디로 가나 |
+|---|---|---|
+| `run.dlc_meta_repo_url` | dlc-meta 클론의 `git remote get-url origin`. `--dlc-meta <경로>` 로 주거나 생략하면 흔한 위치(배포 디렉토리·그 상위·cwd·홈의 `dlc-meta`)를 탐색한다. env `DLC_META_DIR` 도 본다 | `config.yaml` (+ 호스트가 GitHub/GitLab 임을 스스로 밝히면 `forge.kind` 도 함께) |
+| `WORKER_SHARED_SECRET` | `secrets.token_hex(32)` — 사람이 정할 이유가 없는 랜덤값 | **`.env`**(`config.yaml` 이 아니다 — 이 리포는 설정에 값이 아니라 참조만 둔다). `--env-file` 로 경로 변경, `--no-env-secret` 으로 끔 |
+
+- ⚠️ **공유 시크릿은 이미 있으면 덮어쓰지 않는다.** 재생성하면 떠 있는 워커가 전부
+  `X-Worker-Secret` 401 로 죽는다. 값은 로그·표준출력·`--json` 어디에도 실리지 않는다.
+- 원격 URL 에 토큰이 박혀 있으면(`https://oauth2:glpat-…@…`) **자격정보를 떼고** 적는다.
+  SSH 원격(`git@host:…`)은 https 로 바꿔 적고 그 사실을 알린다 — central 은 SSH 키가 아니라
+  forge 토큰을 http(s) URL 에 실어 인증한다.
+- 채우지 못하면 **예시 값을 남기지 않고 게이트가 막는다**(`validate` 가 `run.dlc_meta_repo_url`
+  누락으로 실패). 그래도 누군가 손으로 예시 URL 을 되돌려 놓으면 `doctor --only config` 가
+  자리표시자로 잡는다 — 그물이 두 겹이다.
 
 #### `discover` — 값을 **손으로 옮겨 적지 않기** 위한 조회
 
@@ -240,8 +263,8 @@ python -m app.setup discover --json > jira.json   # 기계용(후속 온보딩·
   막는다(그 값을 출력에 싣지 않는다).
 - `doctor` 는 기본적으로 **알림을 발송하지 않는다.** 실제 발송까지 시험하려면
   `--send-test-notification`(팀 채널에 메시지가 남는다).
-- 일부만 돌리려면 `--only`: `config, secrets, host_deploy_dir, jira_auth, jira_search,
-  forge_token, dlc_meta, docker, notifier`.
+- 일부만 돌리려면 `--only`: `config, secrets, worker_secret, host_deploy_dir, jira_auth,
+  jira_search, forge_token, dlc_meta, docker, notifier`.
 - ⚠️ **`forge_token` 검사는 갈 곳을 모르면 요청 자체를 하지 않는다(SKIP).** `forge.base_url`
   이 비어 있으면 설정된 레포 URL(`run.dlc_meta_repo_url` · `run.docs_repo_url`)의 호스트에서
   유도하고, 유도조차 못 하면 SaaS(gitlab.com)로 떨어지는 대신 건너뛴다 — 사내 PAT 가
@@ -278,8 +301,11 @@ printf '%s' '<FORGE_PAT>'       > secrets/service/forge-token
 chmod -R go-rwx secrets && find secrets -type f -exec chmod 600 {} \;
 
 # (3) 호스트 경로 + worker 공유 시크릿(dispatch HTTP 인증) + central 자기 claude 토큰
-printf 'HOST_DEPLOY_DIR=%s\n' "$PWD" > .env    # ← compose 로 띄우면 로컬도 필요(§2.2)
-printf 'WORKER_SHARED_SECRET=%s\n' "$(openssl rand -hex 24)" >> .env
+printf 'HOST_DEPLOY_DIR=%s\n' "$PWD" >> .env   # ⚠️ >> (§2.5 render 가 만든 .env 를 덮어쓰지 않게)
+#                                                 compose 로 띄우면 로컬도 필요하다(§2.2)
+# WORKER_SHARED_SECRET 은 `python -m app.setup render`(§2.5)가 이미 넣었다(멱등).
+# 그 명령을 쓰지 않았다면:
+#   printf 'WORKER_SHARED_SECRET=%s\n' "$(openssl rand -hex 32)" >> .env
 printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' '<claude setup-token 값>' >> .env
 chmod 600 .env
 
@@ -326,8 +352,10 @@ git clone <이 저장소> ~/jira-auto-dispatcher && cd ~/jira-auto-dispatcher
 cp config/config.example.yaml config/config.yaml   # → §2 대로 채운다
 
 # ⚠️ host_deploy_dir 필수 — 이 디렉토리의 호스트 절대경로
-printf 'HOST_DEPLOY_DIR=%s\n' "$PWD" > .env
-printf 'WORKER_SHARED_SECRET=%s\n' "$(openssl rand -hex 24)" >> .env
+printf 'HOST_DEPLOY_DIR=%s\n' "$PWD" >> .env   # ⚠️ >> 이다 — render 가 만든 .env 를 덮어쓰지 않는다
+# WORKER_SHARED_SECRET 은 `python -m app.setup render`(§2.5)가 이미 넣었다(멱등).
+# 그 명령을 쓰지 않았다면:
+#   printf 'WORKER_SHARED_SECRET=%s\n' "$(openssl rand -hex 32)" >> .env
 printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' '<claude setup-token 값>' >> .env
 chmod 600 .env
 
@@ -383,8 +411,31 @@ docker inspect jad-central --format '{{json .Mounts}}'
 §2.1 의 동의 값을 아직 안 켠 것이다. 부팅은 되지만 그대로 운영하지 말라
 (`python -m app.setup doctor --only config` 가 같은 것을 실패로 잡는다).
 
-기동 뒤에는 **컨테이너 안에서** 한 번 더 진단한다 — `/run/secrets`·`socket-proxy` 처럼
-컨테이너 관점의 값들은 호스트에서 판정할 수 없어 그때만 `SKIP` 이 아닌 진짜 결과가 나온다:
+### 6.0 기동 후 진단은 **central 이 스스로 돌린다**
+
+`/run/secrets`·`tcp://socket-proxy:2375` 같은 값은 **컨테이너 관점**이라 호스트에서 돌린
+`doctor` 는 그것들을 `SKIP` 한다. 예전에는 그래서 기동 뒤에 사람이 진단을 한 번 더 돌려야
+완전한 판정이 나왔다. 이제 central 이 **부팅 때 컨테이너 안에서 스스로** 돌린다
+(백그라운드 데몬 스레드 — 기동을 막지도 늦추지도 않고, 실패해도 부팅은 된다). 보는 곳은 셋:
+
+```bash
+docker compose logs central | grep 자가진단                  # (1) 로그 — FAIL 은 고치는 법까지
+curl -fsS http://localhost:8787/api/doctor                   # (2) 캐시된 결과(재실행 안 함)
+curl -fsS -XPOST http://localhost:8787/api/doctor/refresh    # (3) 수동 재실행(비동기, 202)
+```
+
+(3) 은 관리 UI **최상단 배너**의 `다시 진단` 버튼과 같은 것이다. 배너에 FAIL 이 뜨면
+무엇이 실패했고 어떻게 고치는지가 함께 보인다.
+
+> ⚠️ **워커 실행에 치명적인 FAIL 이면 사용자 온보딩(`POST /onboard`)이 409 로 막힌다** —
+> `config` · `secrets` · `host_deploy_dir` · `jira_auth` · `jira_search` · `docker`. 그 상태로
+> 워커를 띄우면 에러 없이 아무 일도 안 하거나 **조용히 실패하는 잡**만 쌓이기 때문이다.
+> `forge_token` · `dlc_meta` · `notifier` · `worker_secret` 은 **막지 않는다**(central 자신의
+> git·알림 경로가 degrade 될 뿐, 잡은 돌고 MR/PR 도 나온다). 막히는 항목은 전부 관리 UI
+> **밖**(`config.yaml`·시크릿 파일·호스트 env)에서 고치는 것이라, UI 로만 고칠 수 있는 것을
+> UI 로 잠그는 자충수가 아니다. 고친 뒤 `다시 진단` 을 누르면 즉시 풀린다.
+
+컨테이너 안에서 손으로 돌리는 경로도 그대로 남아 있다:
 
 ```bash
 docker compose exec central python -m app.setup doctor

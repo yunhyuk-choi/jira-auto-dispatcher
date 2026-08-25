@@ -29,7 +29,8 @@
     cat answers.json | python -m app.setup validate --json
 
     # 2) config.yaml 생성(예시 파일의 주석을 그대로 물려받는다)
-    python -m app.setup render answers.json -o config/config.yaml
+    #    + dlc-meta 원격 URL 자동 주입 + worker 공유 시크릿 확보(.env, 멱등)
+    python -m app.setup render answers.json -o config/config.yaml --dlc-meta ../dlc-meta
 
     # 3) 실측 진단(네트워크·도커·마운트 함정)
     python -m app.setup doctor
@@ -53,7 +54,8 @@ import os
 import sys
 from typing import Any, Optional
 
-from app import setup_discover, setup_doctor, setup_render, setup_validate
+from app import (setup_autofill, setup_discover, setup_doctor, setup_render,
+                 setup_validate)
 
 EXIT_OK = 0
 EXIT_GATE_FAILED = 1
@@ -111,16 +113,52 @@ def _emit(payload: dict, text: str, as_json: bool) -> None:
         print(text)
 
 
+def _autofill(answers: Any, args: argparse.Namespace) -> tuple:
+    """답변을 평탄화하고 **묻지 않아도 되는 값**을 채운다 → ``(평탄 답변, 리포트)``.
+
+    ⚠️ 여기서 :func:`app.setup_validate.flatten_answers` 를 먼저 부르는 것이 중요하다 —
+    중첩 답변에 점 표기 키를 섞으면 같은 항목이 두 표현으로 갈라진다(:mod:`app.setup_autofill`).
+    ``--no-autofill`` 이면 평탄화만 하고 아무 것도 채우지 않는다(평탄화는 검증기가
+    어차피 하는 멱등 연산이라 동작이 달라지지 않는다).
+    """
+    flat = setup_validate.flatten_answers(answers)
+    if getattr(args, "no_autofill", False):
+        return flat, None
+    report = setup_autofill.autofill_answers(
+        flat,
+        dlc_meta_path=(getattr(args, "dlc_meta", "") or None),
+        project_dir=getattr(args, "project_dir", ".") or ".",
+    )
+    return report.answers, report
+
+
+def _autofill_lines(report) -> list:
+    """자동 채움 요약을 텍스트 출력용 줄 목록으로(빈 리포트면 빈 목록)."""
+    if report is None:
+        return []
+    text = report.format_text()
+    return [text, ""] if text else []
+
+
 # ---------------------------------------------------------------------------
 # 서브커맨드
 # ---------------------------------------------------------------------------
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
-    """``validate`` — 답변을 스키마에 대고 검증(누락·조건부·허용값·타입을 **전부** 모아서)."""
+    """``validate`` — 답변을 스키마에 대고 검증(누락·조건부·허용값·타입을 **전부** 모아서).
+
+    검증 **전에** :mod:`app.setup_autofill` 이 묻지 않아도 되는 값(dlc-meta 원격 URL 과
+    거기서 유도되는 forge 종류)을 채운다 — 그래야 "설치자가 답하지 않았다"와 "기계도
+    알아낼 수 없다"가 구분된다. 채우지 못하면 스키마의 required 가 그대로 막는다.
+    """
     answers = _load_answers(args.answers)
-    result = setup_validate.validate_answers(answers)
-    _emit(result.to_dict(), result.format_text(), args.json)
+    flat, report = _autofill(answers, args)
+    result = setup_validate.validate_answers(flat)
+    payload = result.to_dict()
+    if report is not None:
+        payload["autofill"] = report.to_dict()
+    _emit(payload, "\n".join(_autofill_lines(report) + [result.format_text()]), args.json)
     return EXIT_OK if result.ok else EXIT_GATE_FAILED
 
 
@@ -131,9 +169,14 @@ def cmd_render(args: argparse.Namespace) -> int:
     산출되지 않게 하기 위해서다(게이트는 우회 가능하면 게이트가 아니다).
     """
     answers = _load_answers(args.answers)
-    result = setup_validate.validate_answers(answers)
+    flat, report = _autofill(answers, args)
+    result = setup_validate.validate_answers(flat)
     if not result.ok:
-        _emit(result.to_dict(), result.format_text(), args.json)
+        payload = result.to_dict()
+        if report is not None:
+            payload["autofill"] = report.to_dict()
+        _emit(payload,
+              "\n".join(_autofill_lines(report) + [result.format_text()]), args.json)
         print("검증에 실패해 config.yaml 을 생성하지 않았습니다.", file=sys.stderr)
         return EXIT_GATE_FAILED
 
@@ -146,9 +189,16 @@ def cmd_render(args: argparse.Namespace) -> int:
     if args.stdout:
         # 표준 출력은 **파일 본문 전용**이다(파이프로 그대로 받을 수 있게).
         # 요약은 표준 에러로 보낸다 — 본문에 섞이면 둘 다 파싱할 수 없다.
+        # ⚠️ ``--stdout`` 은 "파일을 건드리지 않는다"는 약속이라 .env 시크릿도 만들지 않는다.
         if args.json:
-            print(json.dumps(rendered.to_dict(), ensure_ascii=False, indent=2),
+            stdout_payload = rendered.to_dict()
+            if report is not None:
+                stdout_payload["autofill"] = report.to_dict()
+            print(json.dumps(stdout_payload, ensure_ascii=False, indent=2),
                   file=sys.stderr)
+        else:
+            for line in _autofill_lines(report):
+                print(line, file=sys.stderr)
         sys.stdout.write(rendered.text if rendered.text.endswith("\n")
                          else rendered.text + "\n")
         return EXIT_OK
@@ -158,13 +208,26 @@ def cmd_render(args: argparse.Namespace) -> int:
     except setup_render.RenderError as exc:
         _die(str(exc))
 
+    # central↔worker 공유 시크릿 — 사람이 정할 이유가 없는 랜덤값이라 여기서 확보한다.
+    # ⚠️ config.yaml 이 아니라 .env 로 간다(값이 아니라 참조 규율). **이미 있으면 그대로**
+    #    둔다(재생성하면 떠 있는 워커가 전부 401). 값은 어떤 출력에도 싣지 않는다.
+    secret = None
+    if not args.no_env_secret:
+        secret = setup_autofill.ensure_worker_shared_secret(args.env_file)
+
     payload = rendered.to_dict()
     payload.update({"path": args.out, "backup": backup,
                     "warnings": [f.to_dict() for f in result.warnings]})
-    text_lines = [f"생성: {args.out}"]
+    if report is not None:
+        payload["autofill"] = report.to_dict()
+    if secret is not None:
+        payload["worker_secret"] = secret.to_dict()
+    text_lines = _autofill_lines(report) + [f"생성: {args.out}"]
     if backup:
         text_lines.append(f"기존 파일 백업: {backup}")
     text_lines.append(rendered.format_text())
+    if secret is not None:
+        text_lines.append(f"worker 공유 시크릿: {secret.detail}")
     if result.warnings:
         text_lines.append("")
         text_lines.append(result.format_text())
@@ -227,6 +290,22 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _add_autofill_args(parser: argparse.ArgumentParser) -> None:
+    """자동 채움 관련 인자(``validate``·``render`` 공용 — 두 곳이 갈라지지 않게 한 자리에)."""
+    parser.add_argument(
+        "--dlc-meta", default="", metavar="PATH",
+        help="dlc-meta 클론 경로. 그 클론의 origin 원격 URL 을 읽어 "
+             "run.dlc_meta_repo_url 에 채운다(사람이 옮겨 적을 값이 아니다). "
+             "생략하면 흔한 위치(배포 디렉토리·그 상위·cwd·홈의 dlc-meta)를 탐색하고, "
+             f"env {setup_autofill.DLC_META_ENV} 도 본다")
+    parser.add_argument(
+        "--project-dir", default=".",
+        help="배포 디렉토리(dlc-meta 자동 탐색의 기준점)")
+    parser.add_argument(
+        "--no-autofill", action="store_true",
+        help="자동 채움을 하지 않는다(답변에 적힌 값만 쓴다)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """CLI 파서(테스트가 직접 쓸 수 있게 분리)."""
     parser = argparse.ArgumentParser(
@@ -260,6 +339,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_validate.add_argument(
         "answers", nargs="?", default="-",
         help="답변 JSON 파일 경로(생략하거나 '-' 이면 표준 입력)")
+    _add_autofill_args(p_validate)
     p_validate.add_argument(
         "--json", action="store_true",
         help="기계가 읽는 출력(웹 온보딩·대화형 에이전트용)")
@@ -269,6 +349,15 @@ def build_parser() -> argparse.ArgumentParser:
         "render", help="검증을 통과한 답변으로 config.yaml 을 생성한다(주석 보존)")
     p_render.add_argument("answers", nargs="?", default="-",
                           help="답변 JSON 파일 경로(생략하거나 '-' 이면 표준 입력)")
+    _add_autofill_args(p_render)
+    p_render.add_argument("--env-file", default=setup_autofill.DEFAULT_ENV_FILE,
+                          help=f"worker 공유 시크릿을 둘 env 파일"
+                               f"(기본 {setup_autofill.DEFAULT_ENV_FILE} — compose 가 읽는다). "
+                               f"⚠️ 이미 값이 있으면 **덮어쓰지 않는다**(재생성하면 떠 있는 "
+                               f"워커가 전부 401)")
+    p_render.add_argument("--no-env-secret", action="store_true",
+                          help="worker 공유 시크릿 자동 생성을 하지 않는다"
+                               "(직접 관리하는 경우)")
     p_render.add_argument("-o", "--out", default=setup_render.DEFAULT_OUTPUT_PATH,
                           help=f"산출 경로(기본 {setup_render.DEFAULT_OUTPUT_PATH})")
     p_render.add_argument("--template", default=setup_render.DEFAULT_TEMPLATE_PATH,

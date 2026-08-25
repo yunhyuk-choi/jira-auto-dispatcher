@@ -20,11 +20,14 @@ from app import setup_schema as S
 # --- 선언 일관성 -------------------------------------------------------------
 
 
-def test_sections_are_the_declared_seven():
+def test_sections_are_the_declared_eight():
     assert [s.name for s in S.SETUP_SCHEMA] == [
-        "forge", "notifier", "jira", "webhook", "docs_repo", "deploy", "consent",
+        "forge", "notifier", "jira", "webhook", "dlc_meta", "docs_repo",
+        "deploy", "consent",
     ]
     # 섹션 전체를 건너뛸 수 있는 것은 웹훅 수신과 설계문서 레포뿐이다.
+    # ⚠️ dlc_meta 는 선택이 아니다 — central 이 사이클로그를 쓰고 REPO-MAP 을 읽는 곳이고,
+    #    그 URL 이 forge base_url·kind 판정의 근거이기도 하다.
     assert [s.name for s in S.SETUP_SCHEMA if s.optional] == ["webhook", "docs_repo"]
 
 
@@ -136,6 +139,7 @@ _KEY_TO_ATTR = {
     "jira.done_transition_names": "jira.done_transition_names",
     "webhook.enabled": "webhook.enabled",
     "webhook.secret_ref": "webhook.secret_ref",
+    "run.dlc_meta_repo_url": "run.dlc_meta_repo_url",
     "run.docs_repo": "run.docs_repo",
     "run.docs_repo_url": "run.docs_repo_url",
     "deploy.profile": "deploy.profile",

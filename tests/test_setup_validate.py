@@ -25,6 +25,10 @@ GOOD = {
              "watcher_email": "bot@acme.example"},
     "notifier": {"provider": "none"},
     "webhook": {"enabled": True, "secret_ref": "service/jira-webhook"},
+    # ⚠️ 설치자가 손으로 적는 값이 아니다 — 설치 관문의 자동 채움
+    # (app/setup_autofill.py)이 dlc-meta 클론의 origin 에서 넣어 준다. 검증기 관점에서는
+    # 그냥 필수 항목이므로 여기서는 채워진 상태로 둔다.
+    "run": {"dlc_meta_repo_url": "https://git.example.com/acme/dlc-meta.git"},
 }
 
 
@@ -61,7 +65,8 @@ def test_nested_and_dotted_answers_are_equivalent():
               "jira.watcher_token_file": "service/jira-token",
               "jira.watcher_email": "bot@acme.example",
               "notifier.provider": "none",
-              "webhook.enabled": True, "webhook.secret_ref": "service/jira-webhook"}
+              "webhook.enabled": True, "webhook.secret_ref": "service/jira-webhook",
+              "run.dlc_meta_repo_url": "https://git.example.com/acme/dlc-meta.git"}
     assert V.validate_answers(dotted).ok
     assert V.validate_answers(dotted).explicit == V.validate_answers(GOOD).explicit
 

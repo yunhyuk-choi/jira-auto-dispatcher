@@ -216,3 +216,75 @@ def test_onboard_prefers_new_forge_token_field(tmp_path, isolated_state):
     assert client.post("/onboard", json=data).status_code == 201
     with open(os.path.join(base, "testuser", "forge-token"), encoding="utf-8") as fh:
         assert fh.read() == "NEW-VAL"
+
+
+# ---------------------------------------------------------------------------
+# 설정 자가진단 게이트 — 잘못된 설정으로 워커를 띄우지 않는다
+# ---------------------------------------------------------------------------
+
+
+def _wire_with_doctor(tmp_path, results):
+    """대역 진단 결과를 물린 온보딩 앱(실제 검사는 부르지 않는다)."""
+    from app import doctor_runtime as DR
+
+    base = str(tmp_path / "secrets")
+    reg = Registry()
+    cfg = SimpleNamespace(secrets=SimpleNamespace(base_dir=base))
+    doctor = DR.DoctorRuntime(cfg, run_checks=lambda _cfg, **_kw: list(results))
+    doctor.run_once()
+    app = Flask(__name__)
+    register_onboarding_api(app, {"registry": reg, "config": cfg, "spawner": None,
+                                  "doctor": doctor})
+    return app.test_client(), reg, base
+
+
+def _check(name, status):
+    from app import setup_doctor as D
+
+    return D.CheckResult(name, status, f"{name} 가 잘못됐습니다", f"{name} 를 고치세요")
+
+
+def test_onboard_is_blocked_when_a_fatal_check_failed(tmp_path, isolated_state):
+    """워커 바인드가 어긋난 상태로 사용자를 붙이면 조용히 실패하는 잡만 쌓인다."""
+    from app import setup_doctor as D
+
+    client, reg, base = _wire_with_doctor(
+        tmp_path, [_check("host_deploy_dir", D.STATUS_FAIL)])
+    res = client.post("/onboard", json=_FULL)
+    assert res.status_code == 409
+    body = res.get_json()
+    assert body["blocking"] == ["host_deploy_dir"]
+    assert body["failures"][0]["hint"]          # 어떻게 고치는지가 응답에 있다
+    # ⚠️ 아무 것도 쓰지 않았다 — 레지스트리도 시크릿 파일도 그대로다.
+    assert reg.get("testuser") is None
+    assert not os.path.exists(os.path.join(base, "testuser"))
+    # 토큰 값이 응답에 실리지 않는다(관리 UI 에는 인증이 없다).
+    raw = res.get_data(as_text=True)
+    assert "JIRA-TOK-VAL" not in raw and "CLAUDE-TOK-VAL" not in raw
+
+
+def test_onboard_is_not_blocked_by_a_degrading_failure(tmp_path, isolated_state):
+    """central 자신의 git 경로(dlc-meta)가 깨져도 잡은 돈다 — 설치를 막지 않는다."""
+    from app import setup_doctor as D
+
+    client, _reg, _base = _wire_with_doctor(tmp_path, [_check("dlc_meta", D.STATUS_FAIL)])
+    assert client.post("/onboard", json=_FULL).status_code == 201
+
+
+def test_onboard_is_not_blocked_before_the_first_diagnosis(tmp_path, isolated_state):
+    """진단이 아직 안 돌았으면 막지 않는다 — 부팅 직후 관리 UI 가 잠기면 안 된다."""
+    from app import doctor_runtime as DR
+
+    base = str(tmp_path / "secrets")
+    cfg = SimpleNamespace(secrets=SimpleNamespace(base_dir=base))
+    app = Flask(__name__)
+    register_onboarding_api(app, {"registry": Registry(), "config": cfg,
+                                  "spawner": None,
+                                  "doctor": DR.DoctorRuntime(cfg)})   # 한 번도 안 돌았다
+    assert app.test_client().post("/onboard", json=_FULL).status_code == 201
+
+
+def test_onboard_works_without_a_doctor_component(tmp_path, isolated_state):
+    """doctor 컴포넌트가 없는 조립(테스트·임베드)에서도 온보딩은 그대로 동작한다."""
+    client, _reg, _base = _wire(tmp_path)
+    assert client.post("/onboard", json=_FULL).status_code == 201

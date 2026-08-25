@@ -204,14 +204,107 @@
         background-color: #333333;
         color: #aaaaaa;
       }
+      /* --- 설정 자가진단 배너 — 페이지 최상단. 실패는 여기서 먼저 보여야 한다. --- */
+      #doctor-panel {
+        border-radius: 6px;
+        padding: 12px 14px;
+        margin: 0 0 16px;
+        font-size: 0.9em;
+        border: 1px solid #3c3c3c;
+        background-color: #252526;
+      }
+      #doctor-panel.doctor-fail {
+        background-color: #2d1414;
+        border-color: #7a2b2b;
+      }
+      #doctor-panel.doctor-warn {
+        background-color: #332b00;
+        border-color: #cca700;
+      }
+      #doctor-panel.doctor-pass {
+        background-color: #14261f;
+        border-color: #2d5a45;
+      }
+      #doctor-head {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        justify-content: space-between;
+      }
+      #doctor-title {
+        font-weight: bold;
+      }
+      #doctor-panel ul {
+        margin: 10px 0 0;
+        padding-left: 18px;
+      }
+      #doctor-panel li {
+        margin-bottom: 8px;
+        line-height: 1.45;
+      }
+      #doctor-panel .check-name {
+        font-family: Consolas, monospace;
+        color: #9cdcfe;
+      }
+      #doctor-panel .check-hint {
+        display: block;
+        color: #c8c8c8;
+        font-size: 0.92em;
+        margin-top: 2px;
+      }
+      #doctor-panel .mark-fail {
+        color: #f48771;
+        font-weight: bold;
+      }
+      #doctor-panel .mark-warn {
+        color: #e6c66a;
+        font-weight: bold;
+      }
+      #doctor-meta {
+        color: #9aa;
+        font-size: 0.85em;
+        margin-top: 8px;
+      }
+      #doctor-refresh {
+        padding: 6px 12px;
+        font-size: 0.85em;
+      }
+      /* 온보딩이 차단됐을 때 폼을 흐리게 — 눌러도 안 되는 이유가 함께 보이게. */
+      #onboard-section.blocked #onboard-form {
+        opacity: 0.45;
+        pointer-events: none;
+      }
+      #onboard-blocked-note {
+        background-color: #2d1414;
+        border-left: 4px solid #7a2b2b;
+        padding: 10px;
+        margin: 10px 0;
+        font-size: 0.9em;
+        color: #f4a6a6;
+      }
     </style>
   </head>
   <body>
     <h2>⚙️ jira-auto-dispatcher — central 관리 콘솔</h2>
 
+    <!-- 0. 설정 자가진단 — central 이 **컨테이너 안에서 스스로** 돌린 결과
+         (app/doctor_runtime.py). FAIL 이 있으면 이 배너가 가장 먼저 보이고,
+         워커 실행에 치명적인 FAIL 은 아래 사용자 온보딩을 막는다. -->
+    <section id="doctor-panel">
+      <div id="doctor-head">
+        <span id="doctor-title">설정 자가진단 — 확인 중…</span>
+        <button id="doctor-refresh" type="button">다시 진단</button>
+      </div>
+      <div id="doctor-body"></div>
+      <div id="doctor-meta"></div>
+    </section>
+
     <!-- 1. 사용자 온보딩 -->
     <section id="onboard-section">
       <h3>사용자 온보딩</h3>
+      <!-- 자가진단 차단 안내 — 서버(POST /onboard)도 같은 기준으로 409 를 낸다.
+           UI 비활성화는 안내이지 게이트가 아니다(게이트는 서버에 있다). -->
+      <div id="onboard-blocked-note" style="display: none"></div>
       <div class="info-box">
         💡 <b>Claude 인증(setup-token):</b> 각 사용자는 <b>본인 노트북</b> 터미널에서
         <code>claude setup-token</code>(Max, long-lived)을 실행해 나온 토큰을 아래
@@ -546,12 +639,16 @@
       const onboardBtn = document.getElementById("onboard-btn");
       const onboardMsg = document.getElementById("onboard-msg");
 
+      // 제출 중 표시 — 자가진단 폴링(5초)이 버튼을 도중에 다시 켜지 않게 한다.
+      let onboardBusy = false;
+
       onboardBtn.addEventListener("click", async () => {
         const fd = new FormData(onboardForm);
         const payload = {};
         fd.forEach((v, k) => {
           payload[k] = v;
         });
+        onboardBusy = true;
         onboardBtn.disabled = true;
         onboardMsg.style.color = "#9cdcfe";
         onboardMsg.innerText = "등록 중…";
@@ -571,12 +668,18 @@
           } else {
             onboardMsg.style.color = "#f48771";
             onboardMsg.innerText =
-              "실패: " + (data.error || res.status) + (data.missing ? " [" + data.missing.join(", ") + "]" : "");
+              "실패: " +
+              (data.error || res.status) +
+              (data.missing ? " [" + data.missing.join(", ") + "]" : "") +
+              // 409 = 설정 자가진단 차단(서버가 낸 게이트). 무엇이 막았는지 그대로 보여 준다.
+              (data.blocking ? " [" + data.blocking.join(", ") + "]" : "");
+            if (data.blocking) loadDoctor();
           }
         } catch (e) {
           onboardMsg.style.color = "#f48771";
           onboardMsg.innerText = "네트워크 오류: " + e;
         } finally {
+          onboardBusy = false;
           onboardBtn.disabled = false;
         }
       });
@@ -873,9 +976,127 @@
         }
       });
 
+      // --- [설정 자가진단 배너] ---
+      // central 이 컨테이너 안에서 부팅 시 스스로 돌린 진단(app/doctor_runtime.py)을
+      // 그대로 보여 준다. FAIL 이 하나라도 있으면 무엇이 실패했고 **어떻게 고치는지**
+      // (hint)까지 최상단에 띄우고, 워커 실행에 치명적인 FAIL 이면 온보딩을 막는다.
+      const doctorPanel = document.getElementById("doctor-panel");
+      const doctorTitle = document.getElementById("doctor-title");
+      const doctorBody = document.getElementById("doctor-body");
+      const doctorMeta = document.getElementById("doctor-meta");
+      const doctorRefreshBtn = document.getElementById("doctor-refresh");
+      const onboardSection = document.getElementById("onboard-section");
+      const onboardBlockedNote = document.getElementById("onboard-blocked-note");
+
+      function renderDoctorList(checks, level) {
+        const mark = level === "fail" ? "FAIL" : "WARN";
+        const cls = level === "fail" ? "mark-fail" : "mark-warn";
+        return (
+          "<ul>" +
+          checks
+            .map(
+              (c) =>
+                "<li><span class='" + cls + "'>[" + mark + "]</span> " +
+                "<span class='check-name'>" + esc(c.name) + "</span> — " +
+                esc(c.message) +
+                (c.hint ? "<span class='check-hint'>↳ " + esc(c.hint) + "</span>" : "") +
+                "</li>"
+            )
+            .join("") +
+          "</ul>"
+        );
+      }
+
+      function applyOnboardBlock(snap) {
+        const blocking = snap.blocking || [];
+        if (snap.onboarding_blocked && blocking.length) {
+          onboardSection.classList.add("blocked");
+          onboardBlockedNote.style.display = "block";
+          onboardBlockedNote.innerHTML =
+            "⛔ <b>설정 자가진단 실패로 온보딩이 차단됐습니다</b> (" +
+            esc(blocking.join(", ")) +
+            "). 잘못된 설정으로 워커를 띄우면 <b>조용히 실패하는 잡</b>만 쌓입니다 — " +
+            "위 배너의 안내대로 고친 뒤 <b>다시 진단</b>을 누르세요. " +
+            "(이 항목들은 관리 UI 가 아니라 <code>config.yaml</code>·시크릿 파일·호스트 " +
+            "환경에서 고칩니다.)";
+          onboardBtn.disabled = true;
+        } else {
+          onboardSection.classList.remove("blocked");
+          onboardBlockedNote.style.display = "none";
+          if (!onboardBusy) onboardBtn.disabled = false;
+        }
+      }
+
+      function renderDoctor(snap) {
+        const checks = snap.checks || [];
+        const fails = checks.filter((c) => c.status === "fail");
+        const warns = checks.filter((c) => c.status === "warn");
+        doctorPanel.classList.remove("doctor-fail", "doctor-warn", "doctor-pass");
+
+        if (snap.state === "pending") {
+          doctorTitle.innerText = snap.running
+            ? "설정 자가진단 — 실행 중…"
+            : "설정 자가진단 — 아직 실행되지 않음";
+          doctorBody.innerHTML = "";
+        } else if (fails.length) {
+          doctorPanel.classList.add("doctor-fail");
+          doctorTitle.innerText = "⛔ 설정 자가진단 실패 " + fails.length + "건";
+          doctorBody.innerHTML =
+            renderDoctorList(fails, "fail") +
+            (warns.length ? renderDoctorList(warns, "warn") : "");
+        } else if (warns.length) {
+          doctorPanel.classList.add("doctor-warn");
+          doctorTitle.innerText = "⚠️ 설정 자가진단 경고 " + warns.length + "건";
+          doctorBody.innerHTML = renderDoctorList(warns, "warn");
+        } else {
+          doctorPanel.classList.add("doctor-pass");
+          doctorTitle.innerText = "✅ 설정 자가진단 통과";
+          doctorBody.innerHTML = "";
+        }
+
+        const counts = snap.counts || {};
+        const parts = [];
+        if (snap.state !== "pending") {
+          parts.push(
+            "통과 " + (counts.pass || 0) + " · 실패 " + (counts.fail || 0) +
+            " · 경고 " + (counts.warn || 0) + " · 건너뜀 " + (counts.skip || 0)
+          );
+        }
+        if (snap.running) parts.push("진단 실행 중…");
+        else if (snap.age_sec != null) parts.push(Math.round(snap.age_sec) + "초 전 측정");
+        if (snap.error) parts.push("진단 오류: " + snap.error);
+        doctorMeta.innerText = parts.join(" | ");
+
+        applyOnboardBlock(snap);
+      }
+
+      async function loadDoctor() {
+        try {
+          const res = await fetch("/api/doctor");
+          renderDoctor(await res.json());
+        } catch (e) {
+          doctorTitle.innerText = "설정 자가진단 — 조회 실패";
+          doctorMeta.innerText = String(e);
+        }
+      }
+
+      doctorRefreshBtn.addEventListener("click", async () => {
+        doctorRefreshBtn.disabled = true;
+        doctorTitle.innerText = "설정 자가진단 — 실행 중…";
+        // 재실행은 백그라운드에서 돌고 응답은 즉시 온다(네트워크 검사가 여럿이라
+        // 요청을 붙잡지 않는다) — 결과는 아래 주기 폴링이 받아 온다.
+        await post("/api/doctor/refresh", {});
+        setTimeout(() => {
+          doctorRefreshBtn.disabled = false;
+          loadDoctor();
+        }, 1500);
+      });
+
       // 초기 로드 + 주기 폴링.
+      loadDoctor();
       loadUsers();
       loadJobs();
+      setInterval(loadDoctor, 5000);
       setInterval(loadUsers, 5000);
       setInterval(loadJobs, 5000);
     </script>

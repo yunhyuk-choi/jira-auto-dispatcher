@@ -257,6 +257,40 @@ def check_secrets(cfg: Any, *, project_dir: str = ".") -> CheckResult:
                        f"루트={root}({note or '설정값'}) · 참조 {len(refs)}개 모두 존재")
 
 
+def check_worker_secret(cfg: Any, *, project_dir: str = ".") -> CheckResult:
+    """central↔worker 공유 시크릿(``WORKER_SHARED_SECRET``)이 **존재하는가**.
+
+    이 값이 비면 :mod:`app.dispatch` 는 ``X-Worker-Secret`` 검증을 통째로 건너뛴다 —
+    잡을 가져가고 상태를 회신하는 엔드포인트가 **무인증으로 열린다**(신뢰 네트워크
+    전제였던 옛 기본값). 자율 실행 시스템에서 이건 알고는 있어야 할 상태다.
+
+    ⚠️ 실패(FAIL)가 아니라 경고(WARN)다 — 그 전제로 운영 중인 기존 배포가 있고, 이 값이
+    없다고 잡이 조용히 깨지지는 않는다. 설치 관문(``render``)이 없으면 자동 생성하므로
+    (:func:`app.setup_autofill.ensure_worker_shared_secret`) 새 설치에서는 거의 뜨지 않는다.
+
+    ⚠️ **값은 어떤 경로로도 출력하지 않는다** — 존재 여부만 말한다.
+    """
+    from app.setup_autofill import (DEFAULT_ENV_FILE, WORKER_SECRET_ENV,
+                                    read_env_file_secret)
+
+    if str(getattr(cfg, "worker_shared_secret", "") or "").strip():
+        return CheckResult("worker_secret", STATUS_PASS,
+                           "dispatch 공유 시크릿 설정됨(값은 출력하지 않습니다)")
+    env_path = os.path.join(project_dir, DEFAULT_ENV_FILE)
+    if read_env_file_secret(env_path):
+        return CheckResult(
+            "worker_secret", STATUS_PASS,
+            f"이 프로세스 env 에는 없으나 {env_path} 에 있습니다"
+            f"(compose 가 central·워커에 주입합니다)")
+    return CheckResult(
+        "worker_secret", STATUS_WARN,
+        f"{WORKER_SECRET_ENV} 가 없습니다 — dispatch 엔드포인트가 무인증으로 열립니다",
+        f"설치 관문이 없으면 자동 생성합니다(python -m app.setup render …). 직접 하려면 "
+        f"{DEFAULT_ENV_FILE} 에 {WORKER_SECRET_ENV}=$(openssl rand -hex 32) 를 넣으세요. "
+        f"⚠️ 이미 워커가 떠 있다면 값을 **바꾸지** 마세요(전부 401 이 됩니다).",
+    )
+
+
 def check_host_deploy_dir(cfg: Any, *, project_dir: str = ".") -> CheckResult:
     """⚠️ **워커 바인드가 조용히 어긋나는 조합**을 잡는다(가장 자주 밟는 함정).
 
@@ -710,7 +744,7 @@ def _is_compose_internal(docker_host: str) -> bool:
 
 #: 실행 순서 = 의존 순서(앞이 깨지면 뒤가 왜 깨지는지 읽힌다).
 CHECK_ORDER: tuple = (
-    "config", "secrets", "host_deploy_dir",
+    "config", "secrets", "worker_secret", "host_deploy_dir",
     "jira_auth", "jira_search", "forge_token", "dlc_meta", "docker", "notifier",
 )
 
@@ -742,6 +776,7 @@ def run_checks(cfg: Any, *, config_path: str = "", project_dir: str = ".",
     runners: dict = {
         "config": lambda: check_config(cfg, config_path=config_path),
         "secrets": lambda: check_secrets(cfg, project_dir=project_dir),
+        "worker_secret": lambda: check_worker_secret(cfg, project_dir=project_dir),
         "host_deploy_dir": lambda: check_host_deploy_dir(cfg, project_dir=project_dir),
         "jira_auth": lambda: check_jira_auth(cfg, project_dir=project_dir,
                                              client=jira_client),

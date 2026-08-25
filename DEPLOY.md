@@ -147,13 +147,19 @@ find secrets -type f -exec chmod 600 {} \;
 ```
 
 - **worker 공유시크릿**(`WORKER_SHARED_SECRET`, dispatch HTTP 인증)은 파일이 아니라
-  **env**로 주입한다. `.env` 에 두거나 셸 env로 export 한다:
+  **env**로 주입한다. ⚠️ **직접 만들지 않는 것이 기본이다** — `python -m app.setup render`
+  (INSTALL.md §2.5)가 `.env`에 없으면 만들고(0600), **이미 있으면 손대지 않는다**(멱등).
+  재생성하면 떠 있는 워커가 전부 `X-Worker-Secret` 401로 죽으므로 바꾸지 않는다.
+  그 명령을 쓰지 않는 배포라면 손으로:
 
   ```bash
   # /opt/jira-auto-dispatcher/.env  (compose가 자동 로드; 0600 권장)
-  echo "WORKER_SHARED_SECRET=$(openssl rand -hex 24)" > .env
+  echo "WORKER_SHARED_SECRET=$(openssl rand -hex 32)" >> .env   # ⚠️ >> (기존 .env 보존)
   chmod 600 .env
   ```
+
+  값이 있는지는 `python -m app.setup doctor --only worker_secret` 이 확인한다(값은 출력하지
+  않는다). 없으면 dispatch 엔드포인트가 **무인증으로 열린다**는 경고가 뜬다.
 
 - **per-user 시크릿**(각자 Jira/forge 토큰·claude setup-token)은 여기서 손으로 만들지
   않는다 — **온보딩(5단계)**에서 관리 UI가 `secrets/<username>/` 하위에 0600으로 기록한다.

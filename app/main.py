@@ -69,6 +69,7 @@ def build_central_components(config_path: str = "config/config.yaml") -> dict:
     from app.config import central_forge_token_ref, load_config, read_secret
     from app.dispatch import Dispatcher
     from app.dlc_meta_writer import DlcMetaWriter
+    from app.doctor_runtime import DoctorRuntime
     from app.gate import DedupGate
     from app.jira_client import JiraClient
     from app.poller import Poller
@@ -141,8 +142,15 @@ def build_central_components(config_path: str = "config/config.yaml") -> dict:
     # 스포너: docker 클라이언트는 지연 생성(최초 컨테이너 조작 시). 신뢰 네트워크 전제.
     spawner = Spawner(cfg, registry)
 
+    # 부팅 자가진단(central 전용) — 여기서는 **조립만** 한다. 실행은
+    # start_central_background 가 데몬 스레드로 띄운다(부팅을 막지도 늦추지도 않는다 —
+    # app/doctor_runtime.py). 컨테이너 안에서 도는 덕에 /run/secrets·socket-proxy 같은
+    # **컨테이너 관점** 값까지 판정된다(호스트에서 돌린 doctor 는 그걸 SKIP 한다).
+    doctor = DoctorRuntime(cfg, config_path=config_path, project_dir=".")
+
     components = {
         "config": cfg,
+        "doctor": doctor,
         "jira": jira,
         "registry": registry,
         "queue": job_queue,
@@ -285,6 +293,31 @@ def _register_admin_api(app: Flask, comps: dict) -> None:
     registry = comps["registry"]
     dispatcher = comps["dispatcher"]
     scheduler = comps["scheduler"]
+    doctor = comps.get("doctor")
+
+    @app.route("/api/doctor", methods=["GET"])
+    def api_doctor():
+        # 부팅 자가진단의 **캐시된** 결과. ⚠️ 매 요청마다 재실행하지 않는다 — 관리 UI 가
+        # 주기 폴링하므로 그러면 진단이 겹쳐 쌓인다. 재실행은 아래 refresh 경로로.
+        # (호환 겸 ?refresh=1 도 재실행을 **트리거만** 하고 즉시 현재 스냅샷을 돌려준다.)
+        if doctor is None:
+            return jsonify({"state": "pending", "running": False, "ok": None,
+                            "checks": [], "counts": {}, "blocking": [],
+                            "onboarding_blocked": False, "error": ""})
+        if request.args.get("refresh") in ("1", "true", "yes"):
+            doctor.refresh()
+        return jsonify(doctor.snapshot())
+
+    @app.route("/api/doctor/refresh", methods=["POST"])
+    def api_doctor_refresh():
+        # 수동 재실행(관리 UI 버튼). 검사는 백그라운드에서 돌고 응답은 즉시 돌아간다 —
+        # 네트워크 검사가 여럿이라 요청을 수십 초 붙잡아 두지 않는다. UI 는 폴링으로 받는다.
+        if doctor is None:
+            return jsonify({"error": "doctor unavailable"}), 501
+        started = doctor.refresh()
+        payload = doctor.snapshot()
+        payload["started"] = started      # 이미 돌고 있었으면 False(중복 실행 안 함)
+        return jsonify(payload), 202
 
     @app.route("/api/users", methods=["GET"])
     def api_users():
@@ -342,6 +375,14 @@ def start_central_background(tick_interval_sec: int = 30) -> None:
     scheduler = _components["scheduler"]
     status_watcher = _components["status_watcher"]
     spawner = _components.get("spawner")
+
+    # 부팅 자가진단 — **컨테이너 안에서** 스스로 돈다(사람이 exec 로 한 번 더 돌리지
+    # 않아도 완전한 판정이 나온다). 데몬 스레드라 부팅을 늦추지 않고, 실패해도 기동을
+    # 막지 않는다(설정을 고칠 관리 UI 가 같이 안 뜨면 자충수다). 결과는 로그 +
+    # /api/doctor + 관리 UI 최상단 배너로 나가고, 치명적 FAIL 은 온보딩을 막는다.
+    doctor = _components.get("doctor")
+    if doctor is not None:
+        doctor.start()
 
     # 프랙탈 P2 센트럴 신경로 게이트(worker 의 _fractal_enabled 게이트와 대칭) — ON 일 때만
     # 상주 센트럴 세션 경로가 활성이다. 세션 프로세스는 첫 Jira 이벤트 주입 때 lazy 스폰되며

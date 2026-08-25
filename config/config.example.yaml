@@ -208,6 +208,12 @@ run:
   # 위 레포들의 clone 원본 URL(토큰 없는 형태). worker가 사용자 forge 토큰으로
   # clone(없으면)/pull(있으면)한다(app/repos.py). 비우면 그 레포 프로비저닝 skip+경고.
   orchestrator_repo_url: https://github.com/yunhyuk-choi/ai-dlc-orchestrator.git   # 필수 공개 프레임워크(리터럴 유지)
+  # ⚠️ 이 값은 **손으로 적지 않는다.** 설치 관문이 dlc-meta 클론의 origin 에서 읽어 채운다:
+  #   python -m app.setup render answers.json --dlc-meta <dlc-meta 클론 경로>
+  # (경로를 안 줘도 흔한 위치 — 배포 디렉토리·그 상위·cwd·홈의 dlc-meta — 를 탐색한다.)
+  # 아래 예시 값이 그대로 남아 있으면 `doctor --only config` 가 자리표시자로 잡아 실패시킨다.
+  # 남겨 두면 안 되는 이유: 이 URL 이 forge base_url·kind 판정의 근거라(app/forge.py),
+  # 남의 조직 호스트가 적혀 있으면 사내 토큰이 그리로 나갈 수 있다.
   dlc_meta_repo_url: https://gitlab.example.com/<your-group>/dlc-meta.git
   # 설계 문서 레포는 **완전 선택**이다 — 비우면(또는 키를 지우면) 프로비저닝을 조용히
   # 건너뛰고 경고만 남긴다(잡은 정상 진행). 레거시 키 dataspace_docs_repo_url 도 계속 읽음.

@@ -11,6 +11,7 @@ TemplateNotFound으로 HTTP 500이 나던 문제. 수정 후 200 + index.html �
 from __future__ import annotations
 
 import textwrap
+import time
 
 import pytest
 
@@ -115,3 +116,85 @@ def test_scheduler_state_endpoint_read_only(central_client):
     after = {j.ticket: (j.status, j.attempts) for j in scheduler.jobs.list_jobs()}
     assert before == after
     assert scheduler.jobs.get("PROJ-8").status == "queued"
+
+
+# ---------------------------------------------------------------------------
+# 설정 자가진단 노출(/api/doctor) — 부팅을 막지도 늦추지도 않는다
+# ---------------------------------------------------------------------------
+
+
+def test_doctor_endpoint_reports_pending_before_the_first_run(central_client):
+    """create_central_app 만으로는 진단이 돌지 않는다(실행은 백그라운드 기동에서).
+
+    그래서 이 시점의 응답은 'pending' 이며, 온보딩도 막지 않는다.
+    """
+    body = central_client.get("/api/doctor").get_json()
+    assert body["state"] == "pending"
+    assert body["checks"] == [] and body["onboarding_blocked"] is False
+
+
+def test_doctor_endpoint_serves_the_cached_result_without_rerunning(central_client):
+    from app import main
+    from app import setup_doctor as D
+
+    calls = []
+    doctor = main._components["doctor"]
+
+    def fake_run(cfg, **kwargs):
+        calls.append(kwargs)
+        return [D.CheckResult("config", D.STATUS_FAIL, "자리표시자가 남았습니다",
+                              "실제 값으로 바꾸세요")]
+
+    doctor._run_checks = fake_run
+    doctor.run_once()
+
+    for _ in range(3):
+        body = central_client.get("/api/doctor").get_json()
+    assert len(calls) == 1                      # 조회는 재실행하지 않는다(캐시)
+    assert body["state"] == "ready" and body["ok"] is False
+    assert body["blocking"] == ["config"]
+    assert body["onboarding_blocked"] is True
+    assert body["checks"][0]["hint"]            # 고치는 법이 UI 로 나간다
+
+
+def test_doctor_refresh_endpoint_triggers_a_rerun_and_returns_immediately(central_client):
+    from app import main
+    from app import setup_doctor as D
+
+    calls = []
+    doctor = main._components["doctor"]
+    doctor._run_checks = lambda cfg, **kw: (calls.append(kw) or
+                                            [D.CheckResult("config", D.STATUS_PASS, "ok")])
+    doctor.run_once()
+    res = central_client.post("/api/doctor/refresh")
+    assert res.status_code == 202
+    for _ in range(200):
+        if len(calls) >= 2:
+            break
+        time.sleep(0.01)
+    assert len(calls) == 2                      # 수동 재실행 경로가 실제로 돈다
+
+
+def test_onboarding_is_blocked_through_the_real_app(central_client):
+    """게이트는 UI 가 아니라 **서버**에 있다 — 폼을 우회해 POST 해도 막힌다."""
+    from app import main
+    from app import setup_doctor as D
+
+    doctor = main._components["doctor"]
+    doctor._run_checks = lambda cfg, **kw: [
+        D.CheckResult("docker", D.STATUS_FAIL, "접속 실패", "socket-proxy 를 확인하세요")]
+    doctor.run_once()
+    res = central_client.post("/onboard", json={
+        "username": "u1", "jira_account_id": "a", "jira_email": "e",
+        "jira_token": "TOK", "claude_setup_token": "CTOK"})
+    assert res.status_code == 409
+    assert res.get_json()["blocking"] == ["docker"]
+    assert "TOK" not in res.get_data(as_text=True)
+
+
+def test_index_shows_the_doctor_banner_at_the_top(central_client):
+    """관리 UI 최상단에 진단 배너가 있다(실패를 여기서 먼저 본다)."""
+    body = central_client.get("/").get_data(as_text=True)
+    assert 'id="doctor-panel"' in body
+    assert body.index('id="doctor-panel"') < body.index('id="onboard-section"')
+    assert "/api/doctor" in body and "/api/doctor/refresh" in body

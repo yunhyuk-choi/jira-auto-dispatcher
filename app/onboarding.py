@@ -15,6 +15,9 @@
     - 시크릿 "값"은 secrets.base_dir/<user>/ 에 0600으로 저장하고, 레지스트리엔
       **참조 경로만**(secrets_ref) 남긴다. 토큰 값은 응답·로그에 절대 싣지 않는다.
     - upsert 시 enabled=false(안전 기본) — 운영자가 검토 후 명시적으로 활성화한다.
+    - **설정 자가진단 게이트**: 부팅 자가진단(:mod:`app.doctor_runtime`)에서 워커 실행에
+      치명적인 검사가 FAIL 이면 ``POST /onboard`` 를 409 로 거부한다. 잘못된 설정으로
+      워커를 띄우면 조용히 실패하는 잡만 쌓이기 때문이다(아래 ``_doctor_gate``).
 """
 
 from __future__ import annotations
@@ -116,15 +119,52 @@ def register_onboarding_api(app, comps: dict) -> None:
     registry = comps["registry"]
     config = comps["config"]
     spawner = comps.get("spawner")
+    doctor = comps.get("doctor")
 
     def _spawner_or_501():
         if spawner is None:
             return None, (jsonify({"error": "spawner unavailable"}), 501)
         return spawner, None
 
+    def _doctor_gate():
+        """설정 자가진단이 **치명적으로** 실패했으면 온보딩을 막는다(막을 응답, 아니면 None).
+
+        왜 막는가: 온보딩은 곧 워커 기동이다. 워커 바인드가 어긋났거나(host_deploy_dir)
+        Jira 자격·프로젝트 키가 틀렸거나 docker 에 닿지 못하는 상태에서 사용자를 붙이면,
+        **에러 없이** 아무 일도 일어나지 않거나 조용히 실패하는 잡만 쌓인다 — 이 시스템에서
+        가장 비싼 실패 모드다. 무엇을 막고 무엇을 막지 않는지의 근거는
+        :data:`app.doctor_runtime.BLOCKING_CHECKS` 주석.
+
+        ⚠️ 진단이 아직 안 돌았으면 **막지 않는다**("모르면 막지 않는다" — 부팅 직후 관리
+        UI 가 이유 없이 잠기지 않게). 그리고 막히는 항목은 전부 관리 UI **밖**에서 고치는
+        것들이라(config.yaml·시크릿 파일·호스트 env), UI 로만 고칠 수 있는 것을 UI 로
+        잠그는 자충수가 아니다.
+        """
+        if doctor is None:
+            return None
+        blocking = doctor.blocking_failures()
+        if not blocking:
+            return None
+        snapshot = doctor.snapshot()
+        failures = [c for c in snapshot.get("checks", []) if c.get("name") in blocking]
+        log.warning("온보딩 차단 — 자가진단 실패: %s", ", ".join(blocking))
+        return jsonify({
+            "error": "설정 자가진단 실패로 온보딩이 차단됐습니다 — "
+                     "아래를 고친 뒤 '다시 진단' 을 누르세요.",
+            "blocking": blocking,
+            # 진단 메시지·힌트만 싣는다(CheckResult 는 값이 아니라 존재·응답코드·마스킹된
+            # 출력만 담는다 — 관리 UI 에는 인증이 없다).
+            "failures": failures,
+        }), 409
+
     @app.route("/onboard", methods=["POST"])
     @_json_errors
     def onboard():
+        # 0) 자가진단 게이트 — **아무 것도 쓰기 전에** 본다.
+        blocked = _doctor_gate()
+        if blocked is not None:
+            return blocked
+
         data = request.get_json(silent=True) or request.form.to_dict() or {}
 
         # 1) 필수 필드 검증.

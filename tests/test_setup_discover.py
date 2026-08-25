@@ -379,6 +379,8 @@ def test_suggested_answers_round_trip_through_validate_and_the_parser():
         "jira.watcher_email": "bot@acme.example",
         "notifier.provider": "none",
         "webhook.enabled": True, "webhook.secret_ref": "service/jira-webhook",
+        # discover 가 묻지 않는 항목(설치 관문의 자동 채움 몫 — app/setup_autofill.py).
+        "run.dlc_meta_repo_url": "https://git.example.com/acme/dlc-meta.git",
         **result.suggested_answers(),
     }
     validated = V.validate_answers(answers)
