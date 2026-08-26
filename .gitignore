@@ -37,13 +37,14 @@ __pycache__/
 /dataspace_docs/
 /workspace/docs/
 
-# --- 로컬 Claude 세션/인증 (볼륨으로 영속) ---
-# ⚠️ `.claude/` 를 통째로 무시하면 **추적 대상인 프로젝트 스킬까지** 사라진다
-#    (`.claude/skills/**` 는 이 리포가 배포하는 산출물이다 — 클론한 사람의 `claude` 가
-#    설치 마법사를 발견하는 경로). 그래서 디렉토리가 아니라 **그 안의 항목**을 무시하고
-#    skills 만 되살린다. `.claude/` 로 두면 하위 negation(`!`)이 아예 평가되지 않는다.
-.claude/*
-!.claude/skills/
+# --- 로컬 Claude 세션/인증·스킬 (전부 개인 영역) ---
+# ⚠️ 여기에 negation(`!.claude/skills/`)으로 구멍을 뚫지 말 것. `.claude/` 아래는 **그
+#    머신의 개인 영역**이다 — 세션 인증·로컬 설정·머신별 절대경로가 섞이므로 공유하면
+#    서로의 환경을 덮어쓴다. 프로젝트 스킬도 예외가 아니다: 리포가 추적하는 것은
+#    `skill-templates/` 의 **템플릿**뿐이고, 실제 `.claude/skills/<이름>/SKILL.md` 는
+#    클론한 사람이 `python -m app.setup skill` 로 자기 머신에 만든다(app/setup_skill.py).
+#    짝 프레임워크 `ai-dlc-orchestrator` 의 SETTER S8.7 과 같은 규율(POLICY-TRACKING).
+.claude/
 
 # --- 추적 유지: 디렉토리 골격 표식 ---
 !config/.gitkeep

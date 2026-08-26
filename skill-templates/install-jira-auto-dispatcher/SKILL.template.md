@@ -5,6 +5,12 @@ description: jira-auto-dispatcher 를 처음 설치·설정할 때 쓴다. 설�
 
 # jira-auto-dispatcher 설치
 
+> 이 파일은 **생성된 개인 산출물**이다(gitignore). 원본은 리포가 추적하는
+> `skill-templates/install-jira-auto-dispatcher/SKILL.template.md` 이고,
+> `python -m app.setup skill` 이 그 템플릿에서 이 파일을 만든다.
+> 내용을 바꾸려면 **템플릿을 고치고** `python -m app.setup skill --force` 로 다시 생성해라
+> (여기를 직접 고치면 다음 재생성 때 갈린다 — 그래서 `--force` 없이는 덮어쓰지 않는다).
+
 이 스킬은 **값을 캐내는 인터페이스**다. 검증·생성·판정은 **전부** 기존 CLI 가 한다:
 
 | 명령 | 하는 일 |
@@ -30,9 +36,9 @@ description: jira-auto-dispatcher 를 처음 설치·설정할 때 쓴다. 설�
 
 **A. 지금 이 대화로 진행**(아래 절차). 값을 물어보고 `setup-answers.json` 에 모은 뒤 CLI 를 태운다.
 
-**B. claude 없이**: 설치자가 직접 `python -m app.setup wizard` 를 실행한다. 같은 질문을
-터미널에서 하고 같은 답변 파일·같은 CLI 를 쓴다. 설치자가 대화를 원하지 않거나, 서버에
-SSH 로만 붙어 있으면 이쪽을 권해라. (수동 절차 전체는 `INSTALL.md`.)
+**B. claude 없이**(1차 진입점): 설치자가 직접 `python -m app.setup wizard` 를 실행한다. 같은
+질문을 터미널에서 하고 같은 답변 파일·같은 CLI 를 쓴다. 설치자가 대화를 원하지 않거나,
+서버에 SSH 로만 붙어 있으면 이쪽을 권해라. (수동 절차 전체는 `INSTALL.md`.)
 
 ---
 

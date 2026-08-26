@@ -47,7 +47,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 from app import (inject, setup_autofill, setup_discover, setup_doctor,
-                 setup_render, setup_schema as S, setup_validate)
+                 setup_render, setup_schema as S, setup_skill, setup_validate)
 
 #: 종료코드 — :mod:`app.setup` 과 **같은 계약**(테스트가 드리프트를 잡는다).
 EXIT_OK = 0
@@ -892,6 +892,33 @@ def _step_doctor(s: _Session, config_path: str, doctor_fn: Callable) -> bool:
     return all(r.ok for r in results)
 
 
+def _step_skill(s: _Session) -> None:
+    """프로젝트 스킬 생성(**편의 · 실패해도 설치를 막지 않는다**).
+
+    ⚠️ 이 단계는 게이트가 **아니다.** 리포가 추적하는 템플릿에서 개인 `.claude/skills/`
+    를 만들어 주는 것뿐이고(:mod:`app.setup_skill`), 권한이 없거나 파일시스템이 읽기
+    전용이면 경고 한 줄만 남기고 그대로 진행한다 — 스킬은 ``claude`` 를 쓸 때만 의미
+    있는 선택지이며, 설치의 1차 진입점은 이 마법사(=CLI) 자신이다.
+    (짝 프레임워크의 EX-15 / C FALLBACK — degraded 로 계속, 중단 금지 — 와 같은 사상.)
+
+    기존 파일은 **덮어쓰지 않는다** — 직접 고친 스킬을 조용히 날리지 않기 위해서다
+    (덮어쓰려면 사람이 ``python -m app.setup skill --force`` 를 명시해야 한다).
+    """
+    s.io.heading("12. 프로젝트 스킬 (선택 — claude 를 쓸 때만)")
+    try:
+        report = setup_skill.install_best_effort(s.options.project_dir)
+    except Exception as exc:  # noqa: BLE001 — 이 단계의 실패가 설치를 멈추게 두지 않는다
+        s.io.say(f"  ⚠️ 스킬을 만들지 못했습니다({type(exc).__name__}: {exc}) — "
+                 f"설치와는 무관하므로 그대로 진행합니다.")
+        return
+    if not report.templates:
+        s.io.say("  설치할 스킬 템플릿이 없습니다 — 건너뜁니다.")
+        return
+    s.io.say(report.format_text())
+    if not report.ok:
+        s.io.say("  ⚠️ 스킬은 편의일 뿐입니다 — 설치 자체는 위 결과 그대로 유효합니다.")
+
+
 def _step_next(s: _Session, config_path: Optional[str], healthy: bool) -> None:
     s.io.heading("다음 단계")
     if config_path is None:
@@ -978,6 +1005,7 @@ def _run(s: _Session, discover_fn: Callable, doctor_fn: Callable) -> int:
 
     config_path = _step_render(s, result)
     healthy = _step_doctor(s, config_path, doctor_fn) if config_path else False
+    _step_skill(s)          # 편의 — 실패해도 종료코드에 영향을 주지 않는다
     _step_next(s, config_path, healthy)
     if config_path is None:
         return EXIT_GATE_FAILED

@@ -7,6 +7,7 @@
     render    :mod:`app.setup_render`    통과한 답변으로 config.yaml 생성(주석 보존)
     doctor    :mod:`app.setup_doctor`    그 설정으로 **실제로 붙는가**(실측 검사)
     wizard    :mod:`app.setup_wizard`    위 넷을 **대화로** 태운다(값을 캐내는 인터페이스)
+    skill     :mod:`app.setup_skill`     추적되는 템플릿 → 로컬 `.claude/skills/` 생성(편의)
 
 왜 껍데기여야 하는가:
     같은 검증 로직을 **CLI 와 웹 온보딩(:mod:`app.onboarding` 후속 확장)이 함께** 쓴다.
@@ -14,10 +15,14 @@
     그래서 이 모듈은 인자 파싱 · 입출력 · 종료코드만 담당한다.
 
 그리고 왜 CLI 인가:
-    대화형 온보딩(``wizard`` · 프로젝트 스킬 ``.claude/skills/install-jira-auto-dispatcher/``)은 **값을
-    캐내는 인터페이스일 뿐**이다. 대화가 질문을 건너뛰거나 "대충 됐다"고 판단해도,
-    산출·검증·판정은 이 명령이 한다 — 통과하지 못하면 **non-zero 로 끝난다.**
+    대화형 온보딩(``wizard`` · ``skill`` 이 깔아 주는 프로젝트 스킬)은 **값을 캐내는
+    인터페이스일 뿐**이다. 대화가 질문을 건너뛰거나 "대충 됐다"고 판단해도, 산출·검증·판정은
+    이 명령이 한다 — 통과하지 못하면 **non-zero 로 끝난다.**
     강제성의 원천은 지시가 아니라 종료코드다.
+
+    ⚠️ **1차 진입점은 이 CLI 다** — ``claude`` 가 없어도 설치가 끝나야 한다. 스킬은
+    "claude 를 쓰면 슬래시 커맨드로도 시작할 수 있다"는 선택지이고, 그 파일은 리포가
+    추적하지 않는 **개인 산출물**이라 각자 ``skill`` 로 만든다(:mod:`app.setup_skill`).
 
 사용 예(가장 쉬운 길)::
 
@@ -61,7 +66,7 @@ import sys
 from typing import Any, Optional
 
 from app import (setup_autofill, setup_discover, setup_doctor, setup_render,
-                 setup_validate, setup_wizard)
+                 setup_skill, setup_validate, setup_wizard)
 
 EXIT_OK = 0
 EXIT_GATE_FAILED = 1
@@ -296,6 +301,39 @@ def cmd_wizard(args: argparse.Namespace) -> int:
     return setup_wizard.run_wizard(setup_wizard.WizardIO(), options)
 
 
+def cmd_skill(args: argparse.Namespace) -> int:
+    """``skill`` — 추적되는 템플릿에서 로컬 ``.claude/skills/`` 를 만든다.
+
+    설치 흐름의 필수 경로가 **아니다**(:mod:`app.setup_skill`) — 그래서 마법사는 이 실패를
+    무시하고 진행한다. 반면 사람이 이 명령을 **직접** 불렀다면 결과를 솔직히 말해야
+    하므로, 못 만들었으면 non-zero 로 끝낸다(스크립트가 알아챌 수 있게).
+    """
+    only = tuple(n.strip() for n in (args.only or "").split(",") if n.strip())
+    root = args.templates or ""
+
+    if args.list:
+        templates = setup_skill.discover_templates(args.project_dir, root=root)
+        payload = {"root": root or setup_skill.templates_root(args.project_dir),
+                   "templates": [t.to_dict() for t in templates]}
+        lines = [f"스킬 템플릿 {len(templates)}개 ({payload['root']}):"]
+        for tpl in templates:
+            lines.append(f"  /{tpl.name}")
+            if tpl.description:
+                lines.append(f"      {tpl.description}")
+            lines.append(f"      템플릿: {tpl.template_path}")
+        _emit(payload, "\n".join(lines), args.json)
+        return EXIT_OK if templates else EXIT_GATE_FAILED
+
+    try:
+        report = setup_skill.install_skills(args.project_dir, root=root, only=only,
+                                            force=args.force)
+    except ValueError as exc:   # 없는 스킬 이름 — 사용 오류
+        _die(str(exc))
+
+    _emit(report.to_dict(), report.format_text(), args.json)
+    return EXIT_OK if report.ok else EXIT_GATE_FAILED
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """``doctor`` — 설정이 **실제로 동작하는지** 실측(선언이 아니라 실측)."""
     from app.config import ConfigError, load_config
@@ -437,6 +475,28 @@ def build_parser() -> argparse.ArgumentParser:
                                "--json 을 함께 주면 요약은 표준 에러로 간다)")
     p_render.add_argument("--json", action="store_true", help="요약을 JSON 으로")
     p_render.set_defaults(func=cmd_render)
+
+    p_skill = sub.add_parser(
+        "skill",
+        help="이 리포의 프로젝트 스킬을 내 로컬 .claude/skills/ 에 만든다"
+             "(선택 — claude 를 쓸 때만 의미 있다)")
+    p_skill.add_argument("--project-dir", default=".",
+                         help="배포 디렉토리(.claude/skills/ 를 만들 기준점)")
+    p_skill.add_argument("--templates", default="", metavar="DIR",
+                         help=f"스킬 템플릿 루트(기본 <project-dir>/"
+                              f"{setup_skill.TEMPLATE_DIRNAME}, 없으면 리포 루트). "
+                              f"템플릿 파일 하나 = 설치 대상 하나 — 목록은 코드가 아니라 "
+                              f"이 디렉토리가 정한다")
+    p_skill.add_argument("--only", default="",
+                         help="쉼표로 구분한 스킬 이름만 설치(기본: 전부)")
+    p_skill.add_argument("--force", action="store_true",
+                         help="내용이 다른 기존 스킬 파일을 덮어쓴다"
+                              "(먼저 .bak-<타임스탬프> 로 백업). ⚠️ 이 플래그가 없으면 "
+                              "직접 고친 파일을 **그대로 둔다**")
+    p_skill.add_argument("--list", action="store_true",
+                         help="설치하지 않고 어떤 스킬이 있는지만 보여준다")
+    p_skill.add_argument("--json", action="store_true", help="기계가 읽는 출력")
+    p_skill.set_defaults(func=cmd_skill)
 
     p_doctor = sub.add_parser(
         "doctor", help="설정이 실제로 동작하는지 실측 진단한다")

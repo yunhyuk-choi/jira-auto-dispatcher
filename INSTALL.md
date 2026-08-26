@@ -203,6 +203,7 @@ run:
 | `validate` | 수집한 답변을 `app/setup_schema.py` 선언에 대고 검증(누락·조건부 필수·허용값·타입·시크릿 값 혼입을 **전부 모아서** 보고) | 답변 JSON(파일 또는 stdin) → 사람용 출력 / `--json` |
 | `render` | 검증을 통과한 답변으로 `config.yaml` 생성. **`config/config.example.yaml` 을 템플릿으로 써서 주석(=이 안내)을 그대로 물려준다.** 덤으로 `.env` 의 `WORKER_SHARED_SECRET` 을 **없으면** 만든다(멱등 — 있으면 손대지 않는다) | 답변 JSON → `config/config.yaml`(`-o` 로 변경, 기존 파일은 `--force` + 자동 `.bak-*` 백업) + `.env` |
 | `doctor` | 그 설정으로 **실제로 붙는지** 실측: Jira 자격·JQL 경로, forge 토큰 권한, dlc-meta 원격 도달성, docker 접속, 알림 웹훅 참조 | `config/config.yaml` → 검사별 PASS/FAIL/WARN/SKIP + 고치는 법 |
+| `skill` | (선택 · 게이트 아님) 리포가 추적하는 스킬 템플릿을 **내 로컬** `.claude/skills/` 로 펼친다 — `claude` 를 쓸 때만 의미 있다([§2.7](#27-선택-프로젝트-스킬--python--m-appsetup-skill)) | `skill-templates/` → `.claude/skills/<이름>/SKILL.md`(멱등, 덮어쓰기는 `--force`) |
 
 ```bash
 cat > answers.json <<'JSON'
@@ -341,9 +342,38 @@ python -m app.setup wizard
   `<project-dir>/secrets`) · `--no-discover`(오프라인) · `--no-doctor` · `--all`(프로파일
   파생 항목까지 전부 질문) · `--answers <경로>`.
 
-> `claude` 로 이 리포를 열었다면 프로젝트 스킬 `install-jira-auto-dispatcher`
-> (`.claude/skills/`)가 같은 절차를 대화로 진행한다. 스킬도 마법사도 같은 CLI 를 부르므로
-> 게이트는 하나다.
+> **이 마법사(=CLI)가 1차 진입점이다 — `claude` 없이 설치가 끝나야 한다.** `claude` 를
+> 쓴다면 §2.7 의 스킬로도 같은 절차를 시작할 수 있지만, 그것은 선택지일 뿐이고 게이트는
+> 어느 쪽이든 같은 CLI 하나다.
+
+---
+
+### 2.7 (선택) 프로젝트 스킬 — `python -m app.setup skill`
+
+`claude` 로 이 리포를 여는 사람을 위한 **편의**다. 설치에 필요하지 않다 — 없어도 §2.5·
+§2.6 으로 설치가 끝난다.
+
+```bash
+python -m app.setup skill          # skill-templates/ → 내 .claude/skills/ (멱등)
+python -m app.setup skill --list   # 설치하지 않고 목록만
+```
+
+그러면 `claude` 세션에서 `/install-jira-auto-dispatcher` 로 부를 수 있다. 스킬은 값을
+캐내는 인터페이스일 뿐이고, 검증·산출·판정은 그대로 §2.5 의 CLI 가 한다.
+
+- **`.claude/` 는 추적하지 않는다.** 그 아래는 그 머신의 **개인 영역**이다 — 세션 인증·
+  로컬 설정·머신별 절대경로가 섞이므로 팀이 공유하면 서로의 환경을 덮어쓴다. 리포가
+  추적하는 것은 `skill-templates/` 의 **템플릿**뿐이고, 실제 파일은 클론한 사람이 위
+  명령으로 자기 머신에 만든다.
+- **템플릿 하나 = 스킬 하나.** 생성기는 `skill-templates/` 를 스캔할 뿐 목록을 코드에
+  들고 있지 않다. 새 스킬은 템플릿 파일(`<이름>/SKILL.template.md` 또는
+  `<이름>.template.md`)을 추가하면 그것으로 끝이고, 스킬 이름·설명은 그 파일의
+  frontmatter 에서 읽는다. 일부만 깔려면 `--only <이름>[,<이름>…]`.
+- **멱등**: 이미 같은 내용이면 아무것도 쓰지 않는다. 내용이 다르면(=직접 고쳤다면)
+  **조용히 덮어쓰지 않고** 그대로 두고 멈춘다 — 덮어쓰려면 `--force` 를 명시해야 하고,
+  그때도 먼저 `.bak-<타임스탬프>` 로 백업한다.
+- **실패해도 설치를 막지 않는다**: 권한이 없거나 파일시스템이 읽기 전용이면 마법사는
+  경고 한 줄만 남기고 그대로 진행한다(종료코드에 영향 없음). 스킬은 필수 경로가 아니다.
 
 ---
 

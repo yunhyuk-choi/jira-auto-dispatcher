@@ -30,10 +30,26 @@ python -m app.setup wizard      # 대화로 물어보고 config.yaml·시크릿�
 해도 된다. 검증·생성·판정은 전부 설치 관문 CLI(`python -m app.setup validate|render|
 doctor`)가 하고, 통과하지 못하면 `config.yaml` 이 만들어지지 않는다.
 
-`claude` 로 이 리포를 열었다면 프로젝트 스킬
-(`.claude/skills/install-jira-auto-dispatcher/`)이 같은 절차를 대화로 진행한다.
-마법사도 스킬도 **편의일 뿐** — 손으로 채우는 절차는 [INSTALL.md](INSTALL.md) 에
-그대로 유효하다.
+**이 CLI 가 1차 진입점이다 — `claude` 가 없어도 설치가 끝난다.** 손으로 채우는 절차도
+[INSTALL.md](INSTALL.md) 에 그대로 유효하다.
+
+<details><summary>선택 — <code>claude</code> 를 쓴다면 슬래시 커맨드로도 시작할 수 있다</summary>
+
+```bash
+python -m app.setup skill          # skill-templates/ → 내 .claude/skills/ (멱등)
+python -m app.setup skill --list   # 어떤 스킬이 있는지만 보기
+```
+
+만들어진 스킬은 `claude` 세션에서 `/install-jira-auto-dispatcher` 로 부른다. 스킬도 결국
+같은 CLI(`validate`/`render`/`doctor`)를 태우므로 **게이트는 하나다.**
+
+`.claude/` 아래는 그 머신의 **개인 영역**이라 리포가 추적하지 않는다(세션 인증·로컬 설정이
+섞이는 자리다). 추적되는 것은 `skill-templates/` 의 템플릿뿐이고 — 템플릿을 하나 더 넣으면
+코드 수정 없이 설치 대상이 하나 더 된다 — 실제 파일은 머신마다 위 명령으로 만든다.
+만들지 못해도(권한 없음·읽기전용 FS) **설치에는 아무 지장이 없다** — 스킬은 편의지 필수
+경로가 아니다.
+
+</details>
 
 Jira(`jira.project` + `jira.projects` 로 지정, 사용자별로는 온보딩의 `scope` 로 좁힌다)
 티켓이 **등록 사용자**에게 새로 할당되면 이를 감지해, **그 사용자
