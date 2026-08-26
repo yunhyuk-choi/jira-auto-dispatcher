@@ -62,16 +62,6 @@ DEFAULT_ANSWERS_PATH = "setup-answers.json"
 #: (``deploy.secrets_base_dir``)와 **파일을 실제로 쓰는 이 경로**는 다르다.
 DEFAULT_SECRETS_DIRNAME = "secrets"
 
-#: 시크릿 참조의 권장 기본값(설치자가 정할 이유가 없다 — 예시 그대로 쓰면 된다).
-#: :data:`app.setup_schema.SETUP_SCHEMA` 의 ``example`` 이 정본이고 여기서는 참조만 한다.
-_SECRET_REF_FIELDS = (
-    # (스키마 키, 무엇의 값인가, 자동 생성 가능한가)
-    ("jira.watcher_token_file", "Jira 감시 계정 API 토큰", False),
-    ("forge.token_ref", "central 서비스 forge 토큰(GitLab PAT / GitHub PAT)", False),
-    ("webhook.secret_ref", "Jira 웹훅 수신 토큰", True),
-    ("notifier.webhook_ref", "알림 incoming webhook URL", False),
-)
-
 #: 풀 퍼미션 동의 항목 — 질문 문구를 첫 질문과 되묻기가 **같이** 쓴다(사람이 같은 것을
 #: 두 번째 볼 때 다른 문장이면 다른 질문으로 읽는다).
 CONSENT_KEY = "consent.full_permissions"
