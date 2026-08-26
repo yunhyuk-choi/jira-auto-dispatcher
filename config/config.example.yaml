@@ -80,7 +80,15 @@ forge:
 #    (jq 가 없으면 그냥 눈으로 읽어도 된다. $JIRA = 아래 base_url.)
 jira:
   base_url: https://your-org.atlassian.net   # ⚠️ Jira Cloud 사이트만 지원(Server/DC 미지원)
-  project: <PROJECT_KEY>
+  project: <PROJECT_KEY>          # 대표 프로젝트 키(JQL 에 항상 포함)
+  # 추가 감시 프로젝트(선택). 대표 프로젝트는 항상 포함되므로 여기 다시 적지 않는다.
+  # 사람마다 담당 프로젝트가 다르면 여기 전부 적어 두고, 사용자별 범위는 관리 UI 온보딩의
+  # scope 로 좁힌다 — 폴러는 **전 사용자 범위의 합집합**으로 JQL 을 한 번만 던지고
+  # (project in (...)), 담당자 매핑 단계에서 그 사람 범위 밖 티켓을 버린다(app/scope.py).
+  # ⚠️ 사용자 scope 가 비어 있으면 "제한 없음"이 아니라 **여기 값을 상속**한다.
+  #    합집합이 비면(기본값도 없고 사용자 범위도 없음) 폴러는 JQL 을 아예 던지지 않고
+  #    WARNING 을 남긴다 — 예전처럼 project 절만 빠져 전 프로젝트를 긁지 않는다.
+  projects: []
   poll_interval_sec: 60
   watcher_token_file: service/jira-token   # 중앙이 Jira를 감시하는 토큰(내 것/봇). secrets.base_dir 상대
   # ⚠️ Basic auth 는 **(이메일, 토큰) 쌍**이다 — 토큰만으로는 인증되지 않는다. 위 토큰을

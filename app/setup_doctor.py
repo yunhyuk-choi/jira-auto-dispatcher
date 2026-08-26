@@ -367,29 +367,37 @@ def check_jira_search(cfg: Any, *, project_dir: str = ".", client: Any = None) -
     """
     from app.jira_client import JiraError
 
+    from app import scope as scope_mod
+
     jira = getattr(cfg, "jira", None)
     base_url = str(getattr(jira, "base_url", "") or "")
-    project = str(getattr(jira, "project", "") or "")
-    if not project:
+    # ⚠️ 대표(``jira.project``)만이 아니라 **감시 범위 전체**를 실측한다. 추가 프로젝트
+    # (``jira.projects``)의 키가 틀리면 폴러 JQL 이 통째로 400 이 나 아무 티켓도 못 찾는데,
+    # 대표만 확인하면 그 실패를 여기서 못 잡는다(그게 이 검사가 존재하는 이유다).
+    projects = scope_mod.instance_projects(cfg)
+    if not projects:
         return CheckResult("jira_search", STATUS_SKIP, "jira.project 가 비어 있습니다")
     if client is None:
         client, reason = _jira_client(cfg, project_dir)
         if client is None:
             return CheckResult("jira_search", STATUS_SKIP, reason)
+    shown = ", ".join(projects)
     try:
-        page = client.search_jql_page(f"project = {project}", fields=["key"], max_results=1)
+        page = client.search_jql_page(scope_mod.project_clause(projects),
+                                      fields=["key"], max_results=1)
     except JiraError as exc:
         result = _jira_failure("jira_search", exc, base_url)
         if getattr(exc, "status_code", None) == 400:
             return CheckResult(
                 "jira_search", STATUS_FAIL,
-                f"JQL 이 거부됐습니다(HTTP 400) — 프로젝트 키 {project!r} 가 없을 수 있습니다",
+                f"JQL 이 거부됐습니다(HTTP 400) — 프로젝트 키 {shown} 중 없는 것이 "
+                f"있을 수 있습니다",
                 "Jira 에서 프로젝트 키를 확인하세요(이슈 키의 앞부분입니다).",
             )
         return result
     count = len((page or {}).get("issues") or [])
     return CheckResult("jira_search", STATUS_PASS,
-                       f"JQL 검색 경로 정상(project={project}, 표본 {count}건)")
+                       f"JQL 검색 경로 정상(project={shown}, 표본 {count}건)")
 
 
 def _forge_destination_unknown(kind: str, resolution: Any) -> CheckResult:

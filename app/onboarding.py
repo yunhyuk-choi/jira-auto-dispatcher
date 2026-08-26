@@ -47,6 +47,7 @@ import os
 
 from flask import jsonify, request
 
+from app import scope as scope_mod
 from app import user_schema as US
 from app.registry import UserRecord
 
@@ -131,12 +132,38 @@ def _json_errors(fn):
 
 
 def _parse_scope(raw) -> list:
-    """scope(projects)를 리스트로 정규화(쉼표구분 문자열 또는 리스트)."""
+    """scope(projects)를 리스트로 정규화(쉼표구분 문자열 또는 리스트).
+
+    ⚠️ **모양 검증은 하지 않는다** — 그건 :func:`app.scope.normalize_projects` 의 몫이고,
+    여기서 조용히 버리면 사용자는 자기가 적은 키가 왜 사라졌는지 알 수 없다. 이 함수는
+    "쉼표 문자열/리스트를 원소로 편다"까지만 한다.
+    """
     if isinstance(raw, list):
         return [str(x).strip() for x in raw if str(x).strip()]
     if isinstance(raw, str):
         return [x.strip() for x in raw.split(",") if x.strip()]
     return []
+
+
+def _resolve_scope_projects(config, answers) -> list:
+    """온보딩 답변 → 레지스트리에 저장할 ``scope.projects``(검증 포함).
+
+    Raises:
+        app.scope.ScopeChoiceError: 결과가 "받을 티켓이 없는 등록"이 될 때.
+        ValueError: 프로젝트 키 모양이 아닌 값이 섞였을 때(조용히 버리지 않는다).
+    """
+    extras = _parse_scope(answers.get(US.SCOPE_KEY))
+    bad = [x for x in extras if not scope_mod.is_valid_project_key(x)]
+    if bad:
+        raise ValueError(
+            "프로젝트 키 모양이 아닙니다(영문자로 시작하는 영숫자/밑줄): "
+            + ", ".join(repr(b) for b in bad))
+    # 체크박스는 미전송 = 해제가 아니라 **미응답** 일 수 있다(옛 UI·스크립트). 그래서
+    # 부재는 선언 기본값(True = 기본 프로젝트 포함)으로 읽는다 — 기존 클라이언트가
+    # 갑자기 "범위 없음" 으로 등록되지 않게 하는 하위호환 기본값이다.
+    include_default = answers.get(US.SCOPE_INCLUDE_DEFAULT_KEY, True) is not False
+    return scope_mod.resolve_onboarding_projects(
+        scope_mod.instance_projects(config), include_default, extras)
 
 
 def register_onboarding_api(app, comps: dict) -> None:
@@ -223,6 +250,20 @@ def register_onboarding_api(app, comps: dict) -> None:
         if registry.get(username) is not None:
             return jsonify({"error": "이미 등록된 username", "username": username}), 409
 
+        # 2.5) 작업 범위 확정 — 인스턴스 기본 프로젝트 포함 여부 + 추가 프로젝트.
+        #      ⚠️ 빈 목록은 "제한 없음"이 아니라 **"인스턴스 기본값 상속"** 이다
+        #      (app/scope.py). 아무 프로젝트도 남지 않는 선택은 여기서 되묻는다 —
+        #      받을 티켓이 없는 등록을 만들어 두면 "왜 안 오지"로만 드러난다.
+        try:
+            scope_projects = _resolve_scope_projects(config, answers)
+        except (scope_mod.ScopeChoiceError, ValueError) as exc:
+            return jsonify({
+                "error": str(exc),
+                "missing": [US.SCOPE_KEY],
+                "findings": [{"level": "error", "key": US.SCOPE_KEY,
+                              "code": "scope_empty", "message": str(exc), "hint": ""}],
+            }), 400
+
         base_dir = config.secrets.base_dir or ""
         if not base_dir:
             return jsonify({"error": "secrets.base_dir 미설정(서버 구성 오류)"}), 500
@@ -263,7 +304,7 @@ def register_onboarding_api(app, comps: dict) -> None:
                     "git_name": str(answers.get("git_name", "")).strip(),
                     "git_email": str(answers.get("git_email", "")).strip(),
                 },
-                "scope": {"projects": _parse_scope(answers.get("scope"))},
+                "scope": {"projects": scope_projects},
                 # 본인 동의 + **서버 수신 시각**(감사 흔적). 검증기가 이미 True 임을
                 # 보장했으므로 여기서 다시 판정하지 않는다.
                 "consent": {

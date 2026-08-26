@@ -22,16 +22,20 @@
 
 흐름:
     1. 두 워터마크 로드(부재 시 now 시드)
-    2. (A) JQL: project=<p> AND assignee in (<enabled ids>)
+    2. (A) JQL: project in (<전 사용자 scope 합집합>) AND assignee in (<enabled ids>)
        AND status in (<match.statuses>) [AND created > "<created_wm>"]
        ORDER BY created ASC
-       (B) JQL: project=<p> AND assignee in (<enabled ids>)
+       (B) JQL: project in (<전 사용자 scope 합집합>) AND assignee in (<enabled ids>)
        AND status in (<match.statuses>)
        AND assignee CHANGED TO (<enabled ids>) [AFTER "<assignee_wm>"]
        ORDER BY updated ASC
+       ⚠️ 합집합이 비면 **JQL 을 던지지 않는다**(None) — 예전처럼 project 절만 빠져
+       전 프로젝트를 긁는 일이 없도록. 왜 안 도는지는 WARNING 으로 남는다.
     3. (A)·(B) 결과를 **티켓 키로 합집합·중복제거** 후, 각 유니크 이슈:
-       gate.claim(key) → resolve_user(enabled) → target_repos 해석 →
-       Job 생성 → dispatcher.enqueue(user, job)
+       gate.claim(key) → resolve_user(enabled + **per-user 프로젝트 범위 게이트**) →
+       target_repos 해석 → Job 생성 → dispatcher.enqueue(user, job)
+       (JQL 은 합집합이라 남의 프로젝트 티켓이 섞여 온다 — 담당자 매핑 단계에서
+       :func:`app.scope.resolve_user_in_scope` 가 그것을 거른다.)
     4. created 워터마크는 처리한 max created로, assignee 워터마크는 now로 전진 후 영속
 
 참고:
@@ -50,6 +54,7 @@ from typing import Callable, Optional
 
 from app import queue as q
 from app import scheduler as sched
+from app import scope as scope_mod
 from app.queue import Job
 from app.repo_resolver import CentralAIRateLimited
 
@@ -352,15 +357,41 @@ class Poller:
             if u.enabled and u.jira_account_id
         ]
 
+    def _scope_union(self) -> list:
+        """enabled 사용자 전원의 유효 프로젝트 범위 합집합(:mod:`app.scope`)."""
+        return scope_mod.union_projects(self.registry, self.config)
+
+    def _project_clause_or_none(self, where: str) -> Optional[str]:
+        """``project in (...)`` 절. 합집합이 비면 **None** + 왜 안 도는지 로그.
+
+        합집합이 비었다는 것은 "아무도 프로젝트를 지정하지 않았고 인스턴스 기본값
+        (``jira.project``)도 없다"는 뜻이다. 예전에는 이때 project 절이 통째로 빠져
+        **등록 사용자에게 할당된 전 프로젝트** 티켓을 긁었다 — 조용히 넓어지는, 가장 나쁜
+        실패다. 지금은 JQL 을 아예 만들지 않고 이유를 남긴다(조용히 아무것도 안 하면
+        원인 추적이 불가능하다).
+        """
+        clause = scope_mod.project_clause(self._scope_union())
+        if not clause:
+            log.warning(
+                "%s: 감시할 프로젝트가 없어 JQL 을 만들지 않습니다 — 등록(enabled) 사용자의 "
+                "scope.projects 가 모두 비어 있고 인스턴스 기본값 jira.project 도 비어 "
+                "있습니다. config.yaml 의 jira.project(또는 jira.projects)를 채우거나 "
+                "관리 UI 온보딩에서 사용자 범위를 지정하세요.", where)
+            return None
+        return clause
+
     def build_jql(self) -> Optional[str]:
-        """트리거 조건 + watermark로 JQL 구성. enabled 사용자가 없으면 None."""
+        """트리거 조건 + watermark로 JQL 구성.
+
+        enabled 사용자가 없거나 **전 사용자 scope 합집합이 비면** None(폴링 안 함).
+        """
         account_ids = self._enabled_account_ids()
         if not account_ids:
             return None
-        clauses = []
-        project = getattr(self.config.jira, "project", "")
-        if project:
-            clauses.append(f"project = {project}")
+        project_clause = self._project_clause_or_none("build_jql")
+        if project_clause is None:
+            return None
+        clauses = [project_clause]
         ids = ", ".join(f'"{a}"' for a in account_ids)
         clauses.append(f"assignee in ({ids})")
         statuses = list(getattr(self.config.match, "statuses", []) or [])
@@ -385,11 +416,11 @@ class Poller:
         account_ids = self._enabled_account_ids()
         if not account_ids:
             return None
+        project_clause = self._project_clause_or_none("build_assignee_change_jql")
+        if project_clause is None:
+            return None
         ids = ", ".join(f'"{a}"' for a in account_ids)
-        clauses = []
-        project = getattr(self.config.jira, "project", "")
-        if project:
-            clauses.append(f"project = {project}")
+        clauses = [project_clause]
         clauses.append(f"assignee in ({ids})")
         statuses = list(getattr(self.config.match, "statuses", []) or [])
         if statuses:
@@ -483,14 +514,20 @@ class Poller:
             self.gate.release(key)
             log.info("reconcile(%s) → pending 드롭 + claim 해제: %s", reason, key)
 
-    def resolve_user(self, issue: dict):
-        """이슈 담당자 account_id → enabled 등록 사용자(없으면 None)."""
-        fields = (issue or {}).get("fields", {}) or {}
-        assignee = fields.get("assignee") or {}
-        account_id = assignee.get("accountId") if isinstance(assignee, dict) else None
-        if not account_id:
-            return None
-        return self.registry.get_by_account_id(account_id)
+    def resolve_user(self, issue: dict, key: str = ""):
+        """이슈 담당자 account_id → enabled 등록 사용자 **+ 프로젝트 범위 게이트**.
+
+        ⚠️ 매핑과 게이트는 **한 함수 안에** 있다(:func:`app.scope.resolve_user_in_scope`).
+        JQL 은 전 사용자 scope 의 *합집합* 으로 던지므로, 남의 프로젝트 티켓이 결과에
+        섞여 들어오는 것은 정상이다 — 그것을 걸러 내는 자리가 바로 여기다. 폴러·웹훅·
+        워처가 전부 이 수렴점을 쓴다.
+
+        ``key`` 는 이슈에 최상위 ``key`` 가 없는 호출(웹훅 재검증 응답 등)을 위한 보조
+        입력이다. 범위 밖/미등록/비활성이면 None.
+        """
+        user, _reason = scope_mod.resolve_user_in_scope(
+            self.registry, self.config, key or (issue or {}).get("key", ""), issue)
+        return user
 
     @staticmethod
     def _assignee_account_id(issue: dict) -> Optional[str]:
@@ -528,7 +565,15 @@ class Poller:
         if new_rec.username == job.user:
             return False  # 같은 소유자(중복 트리거) → 일반 스킵
         # 담당자 변경 감지 — 핸드오프/재배정으로 라우팅.
-        enabled = bool(new_rec.enabled)
+        # ⚠️ 새 담당자 Y 가 enabled 라도 **이 티켓의 프로젝트가 Y 의 범위 밖**이면 Y 에게
+        # 실행을 넘기지 않는다 — 비활성과 동일하게 다뤄 park 시킨다(실행 중 잡은
+        # checkpoint 로 보존된다). 그러지 않으면 재배정이 per-user scope 를 우회하는
+        # 구멍이 된다.
+        in_scope = scope_mod.in_user_scope(key, issue, new_rec, self.config)
+        if new_rec.enabled and not in_scope:
+            log.info("재배정 대상이 범위 밖 — park 로 처리: %s (user=%s, 프로젝트=%s)",
+                     key, new_rec.username, scope_mod.project_key_of(key, issue) or "?")
+        enabled = bool(new_rec.enabled) and in_scope
         mode = _mode_for(new_rec, job.target_repos)
         signal = scheduler.reassign_or_handoff(
             key, new_rec.username, enabled=enabled, autonomy_mode=mode)
@@ -654,13 +699,20 @@ class Poller:
             log.info("enabled 사용자가 없어 폴링 skip")
             return 0
 
+        # 두 번째 공통 게이트: 감시할 프로젝트가 하나도 없으면 **JQL 을 던지지 않는다**
+        # (예전에는 project 절 없이 전 프로젝트를 긁었다). 이유는 로그로 드러난다.
+        if self._project_clause_or_none("poll_once") is None:
+            return 0
+
         # assignee 워터마크 전진 기준(폴 시각). 폴 *시작* 시각으로 고정해, 폴 도중
         # 발생한 담당자-변경은 반드시 다음 폴에서 잡히게 한다(_jql_time 분 단위
         # 절삭이 경계를 과거로 당겨 gap 대신 overlap → dedup가 흡수).
         poll_now = self._now()
 
+        # ``project`` 를 함께 받는다 — 범위 게이트가 티켓의 프로젝트 키를 이슈 키 접두사
+        # 추정이 아니라 응답에서 직접 읽게 하기 위해서다(:func:`app.scope.project_key_of`).
         fields = ["assignee", "status", "created", "updated", "summary",
-                  "components", "labels"]
+                  "components", "labels", "project"]
 
         # (A) 신규-티켓 경로 — created 워터마크 + ORDER BY created ASC (현행 유지).
         jql_created = self.build_jql()
@@ -721,10 +773,10 @@ class Poller:
                 self._handle_reassignment(key, issue)
                 continue
 
-            user = self.resolve_user(issue)
+            user = self.resolve_user(issue, key)
             if user is None:
-                # 미등록/비활성 → claim 되돌림(나중에 enabled 되면 재트리거 가능)
-                log.info("매핑 실패(미등록/비활성) — skip & release: %s", key)
+                # 미등록/비활성/범위 밖 → claim 되돌림(나중에 enabled·범위 포함되면 재트리거).
+                log.info("매핑 실패(미등록/비활성/범위 밖) — skip & release: %s", key)
                 self.gate.release(key)
                 continue
 
@@ -784,8 +836,10 @@ class Poller:
         Returns:
             디스패치했으면 True, (미조회/상태 불일치/중복/미매핑/취소·추적제외) 스킵이면 False.
         """
+        # ``project`` 를 함께 받는다 — 범위 게이트가 티켓의 프로젝트 키를 이슈 키 접두사
+        # 추정이 아니라 응답에서 직접 읽게 하기 위해서다(:func:`app.scope.project_key_of`).
         fields = ["assignee", "status", "created", "updated", "summary",
-                  "components", "labels"]
+                  "components", "labels", "project"]
         try:
             issue = self.jira.get_issue(key, fields=fields)
         except Exception as exc:  # noqa: BLE001 — 재검증 실패는 스킵(폴러 백스톱이 흡수)
@@ -832,10 +886,10 @@ class Poller:
             log.info("webhook 트리거 skip(상태 불일치 %s): %s", status_name, key)
             return False
 
-        user = self.resolve_user(issue)
+        user = self.resolve_user(issue, key)
         if user is None:
-            # 미등록/비활성 → claim 되돌림(나중에 enabled 되면 재트리거 가능).
-            log.info("webhook 트리거 매핑 실패(미등록/비활성) — release: %s", key)
+            # 미등록/비활성/범위 밖 → claim 되돌림(나중에 enabled·범위 포함되면 재트리거).
+            log.info("webhook 트리거 매핑 실패(미등록/비활성/범위 밖) — release: %s", key)
             self.gate.release(key)
             return False
 
@@ -912,11 +966,11 @@ class Poller:
                     self._persist_pending()
                 continue
 
-            user = self.resolve_user(issue)
+            user = self.resolve_user(issue, key)
             if user is None:
-                # 담당자가 더 이상 등록/enabled 아님 → claim 되돌리고 pending 제거
-                # (나중에 다시 enabled 되면 재트리거 가능).
-                log.info("drain: 매핑 실패(미등록/비활성) — release+drop: %s", key)
+                # 담당자가 더 이상 등록/enabled 아니거나 티켓이 그 사람 범위 밖 → claim
+                # 되돌리고 pending 제거(나중에 다시 enabled·범위 포함되면 재트리거 가능).
+                log.info("drain: 매핑 실패(미등록/비활성/범위 밖) — release+drop: %s", key)
                 self.gate.release(key)
                 self._drop_pending(key)
                 continue

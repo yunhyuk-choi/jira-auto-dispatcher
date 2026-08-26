@@ -43,7 +43,7 @@
 | 준비물 | 어디서 | 어디에 넣나 |
 |---|---|---|
 | **Jira Cloud 사이트 URL** | `https://<your-org>.atlassian.net` (⚠️ **Cloud 전용** — Server/DC 미지원) | `jira.base_url` |
-| **Jira 프로젝트 키** | 감시할 프로젝트 | `jira.project` |
+| **Jira 프로젝트 키** | 감시할 대표 프로젝트(여러 개면 `jira.projects` 에 나머지) | `jira.project` |
 | **Jira watcher 토큰** | Atlassian 계정 → API 토큰 발급 | 파일 `secrets/service/jira-token` ← `jira.watcher_token_file` |
 | **forge 토큰(서비스용)** | GitLab PAT 또는 GitHub PAT | 파일 `secrets/service/forge-token` ← `forge.token_ref` |
 | **dlc-meta 레포 원격 URL** | 당신이 만든 레포(비어 있어도 된다). ⚠️ **손으로 적지 않는다** — 설치 관문이 그 클론의 `origin` 에서 읽어 채운다(§2.5) | `run.dlc_meta_repo_url` |
@@ -479,7 +479,8 @@ docker compose exec central python -m app.setup doctor
 | dlc-meta pull/push 가 안 됨 | 사설 GitLab 을 이 호스트에서 열 수 없거나 토큰 권한 부족 | `--only dlc_meta` |
 | 시크릿 파일을 못 읽음 | 참조 경로 오타 · 파일 부재 · 값을 config 에 직접 적음 | `--only secrets` (+ `validate`) |
 | 온보딩이 `Read-only file system` 500 | central 의 `./secrets` 마운트를 `:ro` 로 바꿨다 — central 은 **rw** 여야 한다 | — |
-| 티켓이 감지되지 않음 | `jira.project`·`jira.trigger_statuses`(상태 **이름**)·assignee accountId 매핑 중 하나. 폴링 주기(기본 60s)도 기다렸는지 | `--only jira_search` (프로젝트 키까지) |
+| 티켓이 감지되지 않음 | `jira.project`/`jira.projects`·사용자 `scope.projects`(그 사람 범위 밖 티켓은 버려진다)·`jira.trigger_statuses`(상태 **이름**)·assignee accountId 매핑 중 하나. 폴링 주기(기본 60s)도 기다렸는지 | `--only jira_search` (프로젝트 키까지) |
+| 폴러가 아무 JQL 도 안 던짐(로그에 "감시할 프로젝트가 없어") | 인스턴스 기본값(`jira.project`)도 없고 등록 사용자 `scope.projects` 도 전부 비었다 — 전 프로젝트를 긁지 않으려고 **의도적으로** 멈춘 것이다 | `--only jira_search` |
 | "티켓 없음"처럼 조용히 넘어감 대신 에러 | Jira **Server/DC** 를 가리켰다 — Cloud 전용이다 | `--only jira_auth,jira_search` |
 | 잡이 running 으로 안 넘어감 | 자원 어드미션이 큐잉 중일 수 있다(`admission.min_free_mem_mb`·`max_load_per_core`) | — |
 | MR 작성자가 엉뚱한 사용자 | worker 가 앰비언트 자격증명으로 push 했다 — per-user forge 토큰 경로를 확인 | — |

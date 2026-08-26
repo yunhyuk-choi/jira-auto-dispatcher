@@ -6,6 +6,10 @@
     이후 폴러와 동일하게 담당자를 등록(enabled) 사용자로 매핑해 그 사용자 큐에
     디스패치한다(dispatcher.enqueue). 폴러와 동일 수렴점이라 중복은 게이트가 흡수.
 
+    ⚠️ 매핑은 :func:`app.scope.resolve_user_in_scope` 를 쓴다 — 담당자 해석과 **per-user
+    프로젝트 범위 게이트**가 한 함수에 묶여 있어, 폴러만 고치고 이 경로를 빠뜨려 범위 밖
+    티켓이 새어 들어오는 일이 생기지 않는다.
+
 역할 소속: **central**.
 
 구현 Phase: **Phase 4** (폴러 + 웹훅).
@@ -26,6 +30,7 @@ from typing import Optional
 
 from flask import Blueprint, request
 
+from app import scope as scope_mod
 from app.poller import build_job
 
 log = logging.getLogger("jad.webhook")
@@ -65,10 +70,13 @@ def handle_webhook(req, config, jira_client, gate, registry, dispatcher, shared_
     if not key:
         return {"status": "ignored", "reason": "no issue key"}, 200
 
-    # 페이로드를 믿지 않고 Jira에서 재검증.
+    # 페이로드를 믿지 않고 Jira에서 재검증. ``project`` 도 함께 받는다 — 범위 게이트가
+    # 티켓의 프로젝트 키를 응답에서 직접 읽게 하기 위해서다.
     try:
         issue = jira_client.get_issue(
-            key, fields=["assignee", "status", "created", "summary", "components", "labels"]
+            key,
+            fields=["assignee", "status", "created", "summary", "components",
+                    "labels", "project"],
         )
     except Exception as exc:  # noqa: BLE001
         log.warning("웹훅 재검증 실패(%s): %s", key, exc)
@@ -82,11 +90,14 @@ def handle_webhook(req, config, jira_client, gate, registry, dispatcher, shared_
     if statuses and status_name not in statuses:
         return {"status": "ignored", "reason": "status mismatch"}, 200
 
-    # 담당자 → enabled 사용자 매핑.
-    assignee = fields.get("assignee") or {}
-    account_id = assignee.get("accountId") if isinstance(assignee, dict) else None
-    user = registry.get_by_account_id(account_id) if account_id else None
+    # 담당자 → enabled 사용자 매핑 **+ per-user 프로젝트 범위 게이트**.
+    # ⚠️ 폴러·상태 감시축과 **같은 함수**를 쓴다(:func:`app.scope.resolve_user_in_scope`) —
+    # 한 경로만 고치면 다른 경로로 범위 밖 티켓이 새어 들어온다.
+    user, reason = scope_mod.resolve_user_in_scope(registry, config, key, issue)
     if user is None:
+        if reason == "out-of-scope":
+            log.info("웹훅 범위 밖 티켓 — ignored: %s", key)
+            return {"status": "ignored", "reason": "out of scope"}, 200
         return {"status": "ignored", "reason": "unmapped/disabled"}, 200
 
     # dedup 게이트(폴러와 공용 수렴점).

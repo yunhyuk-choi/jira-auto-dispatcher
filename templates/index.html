@@ -76,6 +76,15 @@
         background-color: #3c3c3c;
         color: white;
       }
+      /* 체크박스 항목은 "라벨 위 / 입력 아래" 격자에 맞지 않는다 — 한 줄로 붙인다. */
+      .check-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .check-row label {
+        margin-bottom: 0;
+      }
       button {
         padding: 10px 20px;
         background-color: #0e639c;
@@ -627,6 +636,23 @@
         const canLookup =
           f.key === "jira_account_id" && !!(guide.jira && guide.jira.base_url);
         const input = fieldInputHtml(f);
+        // 체크박스는 라벨을 오른쪽에 붙여 한 줄로 — 무엇을 켜고 끄는지가 바로 읽힌다.
+        const head =
+          f.type === "bool"
+            ? '<div class="check-row">' + input +
+              '<label for="f-' + esc(f.key) + '">' + esc(f.key) +
+              (f.required ? ' <span class="field-req">*</span>' : "") +
+              "</label></div>"
+            : null;
+        if (head !== null) {
+          return (
+            "<div>" + head +
+            '<span class="field-note">' + esc(f.description) +
+            (f.note ? " " + esc(f.note) : "") + "</span>" +
+            '<span class="field-err" id="e-' + esc(f.key) + '"></span>' +
+            "</div>"
+          );
+        }
         return (
           "<div>" +
           "<label>" + esc(f.key) +

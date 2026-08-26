@@ -498,3 +498,56 @@ jira:
 secrets: { base_dir: "${SECRETS_DIR}" }
 """))
     assert cfg.jira.trigger_statuses == ["해야 할 일"]
+
+
+# --- 감시 프로젝트 복수화(하위호환) -------------------------------------------
+
+
+def test_jira_projects_extends_the_primary_project(tmp_path, monkeypatch):
+    """``jira.project``(대표) 는 그대로 문자열, ``jira.projects`` 가 나머지를 더한다."""
+    monkeypatch.setenv("SECRETS_DIR", "/tmp/jad-secrets")
+    cfg = C.load_config(_write(tmp_path, """
+role: central
+jira:
+  base_url: https://x.atlassian.net
+  project: PROJ
+  projects: ["TEAM", "OPS"]
+  watcher_token_file: service/jira-token
+match: { statuses: ["해야 할 일"] }
+secrets: { base_dir: "${SECRETS_DIR}" }
+"""))
+    assert cfg.jira.project == "PROJ"
+    assert cfg.jira.projects == ["TEAM", "OPS"]   # 설정 파일이 말한 그대로(대표 제외)
+    from app import scope as SC
+    assert SC.instance_projects(cfg) == ["PROJ", "TEAM", "OPS"]   # 합집합은 scope 가 만든다
+
+
+def test_jira_projects_defaults_to_empty_and_drops_malformed_keys(tmp_path, monkeypatch):
+    monkeypatch.setenv("SECRETS_DIR", "/tmp/jad-secrets")
+    cfg = C.load_config(_write(tmp_path, """
+role: central
+jira:
+  base_url: https://x.atlassian.net
+  project: PROJ
+  projects: ["TEAM", "not a key"]
+  watcher_token_file: service/jira-token
+match: { statuses: ["해야 할 일"] }
+secrets: { base_dir: "${SECRETS_DIR}" }
+"""))
+    assert cfg.jira.projects == ["TEAM"]          # 모양이 아닌 값은 JQL 에 실리지 않는다
+
+
+def test_jira_project_given_as_a_list_is_absorbed_not_stringified(tmp_path, monkeypatch):
+    """옛 설정이 ``project`` 에 목록을 적었어도 "['A', 'B']" 라는 유령 키를 만들지 않는다."""
+    monkeypatch.setenv("SECRETS_DIR", "/tmp/jad-secrets")
+    cfg = C.load_config(_write(tmp_path, """
+role: central
+jira:
+  base_url: https://x.atlassian.net
+  project: ["PROJ", "TEAM"]
+  watcher_token_file: service/jira-token
+match: { statuses: ["해야 할 일"] }
+secrets: { base_dir: "${SECRETS_DIR}" }
+"""))
+    assert cfg.jira.project == "PROJ"
+    assert cfg.jira.projects == ["TEAM"]

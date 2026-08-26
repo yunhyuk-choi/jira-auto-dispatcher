@@ -48,6 +48,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from app import scope as _scope_mod
 from app.setup_schema import (
     DEPLOY_PROFILES,
     FORGE_KINDS,
@@ -165,7 +166,17 @@ class JiraConfig:
     """
 
     base_url: str = ""
+    #: **대표** 프로젝트 키(문자열 하나 — 예전부터 그대로). discover·doctor·온보딩 안내가
+    #: 스칼라로 소비한다. 감시 범위의 정본은 "대표 + 아래 ``projects``" 이며 그 합집합을
+    #: 만드는 것은 :func:`app.scope.instance_projects` 다.
     project: str = ""
+    #: **추가** 감시 프로젝트 키(대표 ``project`` 는 여기 포함되지 않는다 — 설정 파일에
+    #: 적힌 그대로다). 로더가 모양 검증만 해서 채운다.
+    #:
+    #: 감시 범위의 **전체 목록**이 필요하면 :func:`app.scope.instance_projects` 를 쓴다
+    #: (대표 + 추가를 합쳐 준다). per-user ``scope.projects`` 가 비어 있을 때 상속되는
+    #: 인스턴스 기본값이 바로 그 합집합이다.
+    projects: list = field(default_factory=list)
     poll_interval_sec: int = 60
     watcher_token_file: str = ""  # 중앙 감시 토큰(내 것/봇). secrets.base_dir 상대
     watcher_email: str = ""       # Basic auth actor(감시 계정 이메일). env JIRA_WATCHER_EMAIL 폴백
@@ -773,6 +784,25 @@ def _build_config(raw: dict) -> AppConfig:
     if not done_id and len(set(done_ids.values())) == 1:
         done_id = next(iter(done_ids.values()))
 
+    # 감시 프로젝트 — 대표(``jira.project``, 문자열 하나) + 추가(``jira.projects``, 목록).
+    # 옛 설정이 ``project`` 에 리스트를 적어 둔 경우도 조용히 ``str(...)`` 로 뭉개지 않고
+    # 첫 원소를 대표로, 나머지를 추가로 흡수한다(그러지 않으면 "['A', 'B']" 라는 존재하지
+    # 않는 프로젝트 키로 JQL 이 나가 아무 티켓도 못 찾는다).
+    jira_project_raw = jira.get("project", "")
+    if isinstance(jira_project_raw, (list, tuple)):
+        _pl = [str(x).strip() for x in jira_project_raw if str(x).strip()]
+        jira_project = _pl[0] if _pl else ""
+        jira_extra_projects = [*_pl[1:], *(jira.get("projects", []) or [])]
+        log.warning("jira.project 에 목록이 왔습니다 — 대표는 %r, 나머지는 jira.projects "
+                    "로 흡수합니다(설정에는 jira.projects 를 쓰세요).", jira_project)
+    else:
+        jira_project = str(jira_project_raw or "")
+        jira_extra_projects = list(jira.get("projects", []) or [])
+    # ⚠️ 대표(``project``)는 여기 섞지 않는다 — 이 필드는 "설정 파일이 뭐라고 했나"를
+    #    그대로 담고(스키마 기본값 ``[]`` 와 일치), 합집합은 app/scope.py 가 만든다.
+    jira_projects = _scope_mod.normalize_projects(
+        jira_extra_projects, source="jira.projects")
+
     cfg = AppConfig(
         role=str(raw.get("role", "central")).strip().lower(),
         server=ServerConfig(
@@ -781,7 +811,8 @@ def _build_config(raw: dict) -> AppConfig:
         ),
         jira=JiraConfig(
             base_url=str(jira.get("base_url", "")).rstrip("/"),
-            project=str(jira.get("project", "")),
+            project=jira_project,
+            projects=jira_projects,
             poll_interval_sec=int(jira.get("poll_interval_sec", 60)),
             watcher_token_file=str(jira.get("watcher_token_file", "")),
             watcher_email=str(jira.get("watcher_email", "")),

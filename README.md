@@ -20,7 +20,8 @@
 >
 > 위험 모델·보완 통제의 정본은 **[SECURITY.md](SECURITY.md)**, 설치는 **[INSTALL.md](INSTALL.md)**.
 
-Jira(`jira.project` 로 지정) 티켓이 **등록 사용자**에게 새로 할당되면 이를 감지해, **그 사용자
+Jira(`jira.project` + `jira.projects` 로 지정, 사용자별로는 온보딩의 `scope` 로 좁힌다)
+티켓이 **등록 사용자**에게 새로 할당되면 이를 감지해, **그 사용자
 정체성으로** 오케스트레이터(`claude` CLI = ai-dlc-orchestrator)를 자율 실행해
 브랜치·MR을 만드는 시스템이다.
 

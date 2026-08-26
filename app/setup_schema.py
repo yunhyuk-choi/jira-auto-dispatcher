@@ -330,8 +330,25 @@ _JIRA = SchemaSection(
             key="jira.project",
             type=FieldType.STRING,
             required=True,
-            description="감시할 프로젝트 키. 폴러 JQL 의 project 절이 된다.",
+            description=(
+                "감시할 **대표** 프로젝트 키. 폴러 JQL 의 project 절에 항상 포함되고, "
+                "온보딩에서 사용자가 자기 범위를 비워 두면 상속하는 기본값이기도 하다. "
+                "여러 프로젝트를 감시하려면 아래 ``jira.projects`` 에 나머지를 적는다."
+            ),
             example="PROJ",
+        ),
+        SchemaField(
+            key="jira.projects",
+            type=FieldType.STRING_LIST,
+            default=[],
+            description=(
+                "**추가** 감시 프로젝트 키 목록(대표 프로젝트는 항상 포함되므로 여기 다시 "
+                "적을 필요 없다). 사람마다 담당 프로젝트가 다르면 여기 전부 적어 두고 "
+                "관리 UI 온보딩에서 사용자별 범위(``scope.projects``)를 좁힌다 — 폴러는 "
+                "전 사용자 범위의 **합집합**으로 JQL 을 던지고, 담당자 매핑 단계에서 "
+                "그 사람의 범위 밖 티켓을 버린다."
+            ),
+            example=["OTHER"],
         ),
         SchemaField(
             key="jira.poll_interval_sec",

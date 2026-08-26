@@ -504,3 +504,69 @@ def test_doctor_gate_runs_before_validation(tmp_path, isolated_state):
     res = client.post("/onboard", json={})
     assert res.status_code == 409
     assert res.get_json()["blocking"] == ["docker"]
+
+
+# --- 작업 범위(scope) — 기본 포함 여부 + 추가 프로젝트 ------------------------
+
+
+def _scope_cfg(tmp_path, projects=("PROJ",)):
+    """온보딩 범위 질문이 읽는 최소 config(인스턴스 기본 프로젝트 포함)."""
+    return SimpleNamespace(
+        secrets=SimpleNamespace(base_dir=str(tmp_path / "secrets")),
+        jira=SimpleNamespace(base_url="https://x.atlassian.net",
+                             project=projects[0] if projects else "",
+                             projects=list(projects[1:])),
+    )
+
+
+def _wire_with_config(tmp_path, cfg):
+    reg = Registry()
+    app = Flask(__name__)
+    register_onboarding_api(app, {"registry": reg, "config": cfg, "spawner": None})
+    return app.test_client(), reg
+
+
+def test_onboard_default_choice_inherits_instance_projects(tmp_path, isolated_state):
+    """기본 프로젝트만 받겠다면 빈 목록으로 저장한다 — 기본이 늘어나면 따라간다."""
+    client, reg = _wire_with_config(tmp_path, _scope_cfg(tmp_path, ("PROJ", "TEAM")))
+    payload = {k: v for k, v in _FULL.items() if k != "scope"}
+    assert client.post("/onboard", json=payload).status_code == 201
+    rec = reg.get("testuser")
+    assert rec.scope.projects == []                       # 상속(빈 값이 의도다)
+
+    from app import scope as SC
+    assert SC.user_projects(rec, SC.instance_projects(_scope_cfg(tmp_path,
+                                                                ("PROJ", "TEAM")))) ==         ["PROJ", "TEAM"]
+
+
+def test_onboard_extra_projects_are_pinned_on_top_of_the_default(tmp_path, isolated_state):
+    client, reg = _wire_with_config(tmp_path, _scope_cfg(tmp_path, ("PROJ",)))
+    res = client.post("/onboard", json={**_FULL, "scope": "TEAM"})
+    assert res.status_code == 201
+    assert reg.get("testuser").scope.projects == ["PROJ", "TEAM"]
+
+
+def test_onboard_can_opt_out_of_the_default_project(tmp_path, isolated_state):
+    client, reg = _wire_with_config(tmp_path, _scope_cfg(tmp_path, ("PROJ",)))
+    res = client.post("/onboard", json={**_FULL, "scope": "TEAM",
+                                        "scope_include_default": False})
+    assert res.status_code == 201
+    assert reg.get("testuser").scope.projects == ["TEAM"]
+
+
+def test_onboard_rejects_a_registration_that_would_receive_nothing(tmp_path, isolated_state):
+    """기본 제외 + 추가 없음 = 받을 티켓이 없는 등록 — 조용히 만들지 않고 되묻는다."""
+    client, reg = _wire_with_config(tmp_path, _scope_cfg(tmp_path, ("PROJ",)))
+    res = client.post("/onboard", json={**_FULL, "scope": "",
+                                        "scope_include_default": False})
+    assert res.status_code == 400
+    assert "scope" in res.get_json()["missing"]
+    assert reg.get("testuser") is None
+
+
+def test_onboard_rejects_malformed_project_keys(tmp_path, isolated_state):
+    """조용히 버리지 않는다 — 적은 값이 왜 사라졌는지 알 수 없게 되면 안 된다."""
+    client, reg = _wire_with_config(tmp_path, _scope_cfg(tmp_path, ("PROJ",)))
+    res = client.post("/onboard", json={**_FULL, "scope": 'TEAM") OR ("x'})
+    assert res.status_code == 400
+    assert reg.get("testuser") is None

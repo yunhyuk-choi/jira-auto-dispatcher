@@ -27,6 +27,7 @@ from datetime import datetime
 from typing import Optional
 
 from app import queue as q
+from app import scope as scope_mod
 from app.poller import build_job
 
 log = logging.getLogger("jad.status_watcher")
@@ -57,7 +58,10 @@ class StatusWatcher:
     # 취소 신호를 실제로 반영할 대상 잡 상태(이미 종결/취소중이면 건너뜀 — 멱등).
     _CANCELABLE = frozenset({q.QUEUED, q.RUNNING, q.INTERRUPTED})
 
-    _WATCH_FIELDS = ["status", "updated", "assignee", "summary", "components", "labels"]
+    # ``project`` 를 함께 받는다 — 재오픈 재-디스패치의 범위 게이트가 티켓의 프로젝트
+    # 키를 응답에서 직접 읽게 하기 위해서다(:func:`app.scope.project_key_of`).
+    _WATCH_FIELDS = ["status", "updated", "assignee", "summary", "components",
+                     "labels", "project"]
 
     def __init__(self, config, jira_client, gate, registry, dispatcher,
                  now_provider=None) -> None:
@@ -114,8 +118,16 @@ class StatusWatcher:
     # ------------------------------------------------------------------
 
     def _project_clause(self) -> str:
-        project = getattr(self.config.jira, "project", "")
-        return f"project = {project} AND " if project else ""
+        """감시 JQL 의 project 절 — **폴러와 같은 합집합**(:mod:`app.scope`).
+
+        ⚠️ 예전에는 ``jira.project`` 하나만 걸었다. per-user scope 가 여러 프로젝트를
+        허용하게 된 지금 그대로 두면, 기본 프로젝트가 아닌 곳의 티켓이 취소돼도 감시축이
+        그것을 보지 못해 추적 잡이 계속 돈다. 합집합이 비면 예전처럼 빈 문자열을 돌려
+        (프로젝트 무관 감시) 기존 동작을 보존한다 — 이 경로는 **이미 추적 중인 잡**에만
+        작용하므로 새 티켓을 긁어 오지 않는다.
+        """
+        clause = scope_mod.project_clause(scope_mod.union_projects(self.registry, self.config))
+        return f"{clause} AND " if clause else ""
 
     def _detect_cancellations(self, result: dict) -> None:
         """`취소 상태`(config) + updated 워터마크 JQL → 추적 중인 잡을 cancel_job."""
@@ -219,14 +231,16 @@ class StatusWatcher:
     # 재오픈 감지
     # ------------------------------------------------------------------
 
-    def _resolve_user(self, issue: dict):
-        """이슈 담당자 account_id → enabled 등록 사용자(없으면 None)."""
-        fields = (issue or {}).get("fields", {}) or {}
-        assignee = fields.get("assignee") or {}
-        account_id = assignee.get("accountId") if isinstance(assignee, dict) else None
-        if not account_id:
-            return None
-        return self.registry.get_by_account_id(account_id)
+    def _resolve_user(self, key: str, issue: dict):
+        """담당자 account_id → enabled 등록 사용자 **+ 프로젝트 범위 게이트**.
+
+        재오픈은 **재-디스패치**다 — 폴러·웹훅과 같은 게이트를 통과해야 한다
+        (:func:`app.scope.resolve_user_in_scope`). 그러지 않으면 "취소됐다 되살아난
+        티켓"이 per-user scope 를 우회하는 뒷문이 된다.
+        """
+        user, _reason = scope_mod.resolve_user_in_scope(
+            self.registry, self.config, key, issue)
+        return user
 
     def _detect_reopens(self, result: dict) -> None:
         """취소 확정 잡의 티켓이 `해야 할 일`로 오면 재-claim + 재-enqueue(§10.4)."""
@@ -260,9 +274,9 @@ class StatusWatcher:
                 log.info("재오픈 skip(opt-out 라벨 잔존): %s", key)
                 continue
 
-            user = self._resolve_user(issue)
+            user = self._resolve_user(key, issue)
             if user is None:
-                log.info("재오픈 매핑 실패(미등록/비활성) — skip: %s", key)
+                log.info("재오픈 매핑 실패(미등록/비활성/범위 밖) — skip: %s", key)
                 continue
             # 취소 확정 시 dedup가 풀렸으므로 재-claim(멱등; 결과 무시).
             self.gate.claim(key)

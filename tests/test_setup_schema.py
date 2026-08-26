@@ -126,6 +126,7 @@ _KEY_TO_ATTR = {
     "notifier.notify_cancelled": "notifier.notify_cancelled",
     "jira.base_url": "jira.base_url",
     "jira.project": "jira.project",
+    "jira.projects": "jira.projects",
     "jira.poll_interval_sec": "jira.poll_interval_sec",
     "jira.watcher_token_file": "jira.watcher_token_file",
     "jira.watcher_email": "jira.watcher_email",

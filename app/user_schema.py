@@ -54,6 +54,7 @@ import datetime as _dt
 from typing import Any, Mapping, Optional
 
 from app import forge
+from app import scope as scope_mod
 from app import setup_schema as S
 from app import setup_validate as V
 from app.jira_client import MYSELF_PATH
@@ -71,6 +72,20 @@ CONSENT_AT_KEY = "consent_accepted_at"
 
 #: 폼에 입력칸을 만들지 **않는** 필드(서버가 채운다).
 SERVER_DERIVED_KEYS: frozenset = frozenset({CONSENT_AT_KEY})
+
+#: 작업 범위 — **추가** 프로젝트 키 목록(쉼표구분). 비면 인스턴스 기본값을 상속한다.
+SCOPE_KEY = "scope"
+
+#: 작업 범위 — 인스턴스 기본 프로젝트를 포함할지(기본 True).
+#:
+#: 왜 두 필드인가: 예전에는 빈 칸에 ``<PROJECT_KEY>`` 자리표시자만 있어서 합류자는 무엇을
+#: 적어야 하는지 알 수 없었다. 이 인스턴스가 실제로 감시하는 키를 **보여 주고**(안내는
+#: :func:`build_guide` 가 설정에서 렌더한다) "그걸 포함할지 + 더 받을 게 있는지"만 물으면
+#: 답할 수 있다.
+SCOPE_INCLUDE_DEFAULT_KEY = "scope_include_default"
+
+#: :func:`_field_card` 의 "예시를 덮지 않았다" 표식(``None`` 은 유효한 오버라이드 값이다).
+_KEEP = object()
 
 
 # ---------------------------------------------------------------------------
@@ -294,14 +309,24 @@ _WORK = S.SchemaSection(
             example="bypass",
         ),
         S.SchemaField(
-            key="scope",
+            key=SCOPE_INCLUDE_DEFAULT_KEY,
+            type=S.FieldType.BOOL,
+            default=True,
+            description=(
+                "이 인스턴스의 기본 프로젝트를 내 작업 범위에 포함한다. 대부분은 켠 채로 "
+                "두면 된다 — 끄면 아래 '추가 프로젝트'에 적은 것만 받는다(둘 다 비면 "
+                "받을 티켓이 없으므로 등록이 통과하지 않는다)."
+            ),
+        ),
+        S.SchemaField(
+            key=SCOPE_KEY,
             type=S.FieldType.STRING_LIST,
             default=[],
             description=(
-                "(선택·기록용) 당신이 받을 Jira 프로젝트 키 목록(쉼표구분). ⚠️ 현재 폴러는 "
-                "**인스턴스 설정의 ``jira.project``** 로 감시 범위를 정하고 담당자 "
-                "accountId 로 사용자를 고른다 — 이 값은 그 판정에 쓰이지 않는다. "
-                "누가 어느 프로젝트를 맡는지 기록해 두는 자리다."
+                "**추가로** 받을 Jira 프로젝트 키(쉼표구분). 기본 프로젝트 외에 더 받을 게 "
+                "없으면 비워 둔다 — 비워 두면 인스턴스 기본값을 그대로 상속하며, 나중에 "
+                "기본 프로젝트가 늘어나도 자동으로 따라간다. ⚠️ 여기 적힌 프로젝트의 "
+                "티켓만 당신 워커로 간다(폴러가 담당자 매핑 단계에서 범위를 확인한다)."
             ),
             example=["PROJ"],
         ),
@@ -553,13 +578,18 @@ def jira_guide(config: Any) -> dict:
     """이 배포의 Jira 사이트에 맞는 **개인 자격 안내**.
 
     Returns:
-        ``{base_url, project, myself_url, profile_hint, token_url}``. ``base_url`` 이
+        ``{base_url, project, projects, myself_url, profile_hint, token_url}``.
+        ``projects`` 는 이 인스턴스의 감시 프로젝트 전체 목록이다. ``base_url`` 이
         비어 있으면(설정 미완) 사이트 의존 링크는 빈 문자열로 남긴다.
     """
     base_url = _cfg(config, "jira.base_url").rstrip("/")
     return {
         "base_url": base_url,
+        # 대표 프로젝트(스칼라 — 기존 소비처 그대로).
         "project": _cfg(config, "jira.project"),
+        # 이 인스턴스가 실제로 감시하는 **전체** 프로젝트 키. 온보딩 범위 질문이 이걸
+        # 보여 준다(하드코딩 금지 — 설정에서 렌더한다).
+        "projects": scope_mod.instance_projects(config),
         "myself_url": (base_url + MYSELF_PATH) if base_url else "",
         "myself_path": MYSELF_PATH,
         "profile_hint": (
@@ -621,8 +651,13 @@ def join_steps(config: Any) -> list:
 
 
 def _field_card(f: S.SchemaField, note: str = "", link: str = "",
-                link_label: str = "") -> dict:
-    """필드 선언 하나 → UI 가 그대로 그리는 안내 카드(값은 절대 담지 않는다)."""
+                link_label: str = "", example: Any = _KEEP) -> dict:
+    """필드 선언 하나 → UI 가 그대로 그리는 안내 카드(값은 절대 담지 않는다).
+
+    ``example`` 을 주면 선언된 예시 대신 그것을 싣는다 — 스키마가 알 수 없는 **인스턴스
+    의존 예시**(이 배포가 실제로 감시하는 프로젝트 키 등)를 위해서다. 시크릿 필드에는
+    어떤 예시도 싣지 않는다(그 규칙이 이 오버라이드보다 우선한다).
+    """
     return {
         "key": f.key,
         "type": f.type.value,
@@ -631,7 +666,8 @@ def _field_card(f: S.SchemaField, note: str = "", link: str = "",
         "secret": bool(f.secret),
         "choices": list(f.choices),
         "default": f.default,
-        "example": None if f.secret else f.example,   # 시크릿은 예시조차 두지 않는다
+        "example": None if f.secret else (
+            f.example if example is _KEEP else example),  # 시크릿은 예시조차 두지 않는다
         "description": f.description,
         "legacy_keys": list(f.legacy_keys),
         "input": f.key not in SERVER_DERIVED_KEYS,
@@ -657,6 +693,9 @@ def build_guide(config: Any = None) -> dict:
     """
     fg = forge_guide(config)
     jg = jira_guide(config)
+    #: 이 인스턴스가 실제로 감시하는 프로젝트 키 — 범위 질문을 **설정에서 렌더**한다.
+    default_projects = list(jg.get("projects") or [])
+    default_projects_text = ", ".join(default_projects) or "(설정 미완 — 운영자에게 문의)"
 
     #: 필드별 **인스턴스 의존 부연**(설정에서 유도된 것만 — 문구를 복제하지 않는다).
     notes: dict = {
@@ -677,9 +716,21 @@ def build_guide(config: Any = None) -> dict:
         "claude_setup_token": (
             "본인 머신 터미널에서 `claude setup-token` 실행 → 출력된 토큰을 붙여넣는다."
         ),
-        "scope": (
-            f"이 인스턴스가 감시하는 프로젝트: {jg['project'] or '(설정 미완)'}"
+        SCOPE_INCLUDE_DEFAULT_KEY: (
+            f"이 인스턴스의 기본 프로젝트: {default_projects_text}. "
+            f"켜 두면 이 프로젝트(들)의 티켓 중 당신이 담당자인 것을 받는다."
         ),
+        SCOPE_KEY: (
+            f"비워 두면 기본 프로젝트({default_projects_text})만 받는다. "
+            f"여기 적은 키는 기본 프로젝트에 **더해진다**"
+            f"(위 체크를 끄면 여기 적은 것만 받는다)."
+        ),
+    }
+    #: 필드별 **인스턴스 의존 예시**(placeholder). 선언된 예시로는 말할 수 없는 것만.
+    examples: dict = {
+        # 지어낸 프로젝트 키를 placeholder 로 두면 그것을 그대로 적는 사람이 생긴다.
+        # 여기서는 *형식*만 말하고, 실제 키는 위 note 가 설정에서 읽어 보여 준다.
+        SCOPE_KEY: "추가할 프로젝트 키를 쉼표로 (없으면 비워 두기)",
     }
     links: dict = {
         "jira_token": (jg["token_url"], "API 토큰 발급"),
@@ -697,7 +748,8 @@ def build_guide(config: Any = None) -> dict:
             "fields": [
                 _field_card(f, note=notes.get(f.key, ""),
                             link=links.get(f.key, ("", ""))[0],
-                            link_label=links.get(f.key, ("", ""))[1])
+                            link_label=links.get(f.key, ("", ""))[1],
+                            example=examples.get(f.key, _KEEP))
                 for f in section.fields
             ],
         })

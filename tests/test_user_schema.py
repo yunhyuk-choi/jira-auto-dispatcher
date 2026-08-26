@@ -287,3 +287,35 @@ def test_guide_carries_the_secret_handling_note():
     """토큰을 붙여넣는 사람에게 보관 규율을 말해 준다(필드가 아니라 폼 전체에 걸린다)."""
     note = U.build_guide(_cfg())["secrets_note"]
     assert "0600" in note and "enabled=false" in note
+
+
+# --- 작업 범위 안내는 **설정에서 렌더**된다 -----------------------------------
+
+
+def _scope_fields(config):
+    return {f["key"]: f
+            for sec in U.build_guide(config)["sections"] for f in sec["fields"]}
+
+
+def test_guide_names_the_actual_instance_projects_not_a_placeholder():
+    """빈 칸에 지어낸 ``<PROJECT_KEY>`` 대신 이 인스턴스가 실제로 감시하는 키를 보여 준다."""
+    cfg = _cfg()
+    cfg.jira.projects = ["TEAM"]
+    guide = U.build_guide(cfg)
+    assert guide["jira"]["projects"] == ["PROJ", "TEAM"]
+    fields = {f["key"]: f for sec in guide["sections"] for f in sec["fields"]}
+    assert "PROJ, TEAM" in fields[U.SCOPE_INCLUDE_DEFAULT_KEY]["note"]
+    assert "PROJ, TEAM" in fields[U.SCOPE_KEY]["note"]
+    # placeholder 로 지어낸 프로젝트 키를 주지 않는다(그대로 적는 사람이 생긴다).
+    assert "<PROJECT_KEY>" not in str(fields[U.SCOPE_KEY]["example"])
+
+
+def test_guide_says_settings_incomplete_when_no_project_configured():
+    fields = _scope_fields(_cfg(project=""))
+    assert "설정 미완" in fields[U.SCOPE_INCLUDE_DEFAULT_KEY]["note"]
+
+
+def test_scope_include_default_is_a_checkbox_defaulting_to_on():
+    fields = _scope_fields(_cfg())
+    card = fields[U.SCOPE_INCLUDE_DEFAULT_KEY]
+    assert card["type"] == "bool" and card["default"] is True and card["input"] is True
