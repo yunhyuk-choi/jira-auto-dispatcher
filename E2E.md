@@ -77,12 +77,28 @@ ssh <deploy-user>@<서버> 'cd /opt/jira-auto-dispatcher && docker compose logs 
 
 ## 1. 온보딩 (사용자 직접) → worker 자동 spawn
 
+> ⚠️ 실제 합류는 **2단**이다 — 여기(웹 등록) 말고 로컬에서 `ai-dlc-orchestrator` 의
+> SETTER 를 합류 모드로 돌려 `dlc-meta` 를 clone 하는 단계가 앞에 있다
+> ([INSTALL.md §8](INSTALL.md)). 이 문서는 **배포 플로우 검증**이 목적이라 웹 쪽만 다룬다.
+
 ### 1.1 조작 — 자격증명 입력 → 등록
 
-UI 온보딩 폼(또는 `POST /onboard`)에 입력한다. **필수**: `username`, `jira_account_id`,
-`jira_email`, `jira_token`, `claude_setup_token`. **선택**: `forge_token`(브랜치 push·MR/PR
-생성용 — GitLab/GitHub PAT(`forge.kind` 에 맞춰). 옛 이름 `gitlab_token` 도 계속 받는다),
-`git_name`/`git_email`(커밋 author 귀속), `autonomy_mode`, `permission_level`, `scope`.
+UI 온보딩 폼(또는 `POST /onboard`)에 입력한다. 필드 목록의 **정본은 스키마 선언**
+(`app/user_schema.py`)이고, UI 는 그것을 이 인스턴스 설정과 함께 렌더한다
+(`GET /api/onboarding/guide` — forge 종류에 맞는 PAT 안내만 보인다).
+
+**필수**: `username`, `jira_account_id`, `jira_email`, `jira_token`, `forge_token`,
+`claude_setup_token`, `consent_full_permissions`.
+**선택**: `git_name`/`git_email`(커밋 author 귀속), `autonomy_mode`, `permission_level`,
+`scope`, `notify_user_id`.
+
+- `forge_token` 은 **선택이 아니다**(브랜치 push·MR/PR 생성용 — GitLab/GitHub PAT,
+  `forge.kind` 에 맞춰. 옛 이름 `gitlab_token` 도 계속 받는다). 없으면 워커가 커밋만 하고
+  변경요청을 못 만드는 조용한 반쪽 동작이 된다.
+- `consent_full_permissions` 는 **합류자 본인**의 풀 퍼미션 동의다. 서버가 강제하며
+  (400) 동의 시각은 서버 수신 시각으로 레지스트리에 남는다.
+- `jira_account_id` 를 모르면 UI 의 `내 accountId 조회` 버튼(= `POST /api/onboarding/whoami`)
+  이 이메일+토큰으로 `GET /rest/api/3/myself` 를 대신 호출해 채워 준다.
 
 - **autonomy_mode = B 권장(최초)** — 경량 1차(트리아지+브랜치+스캐폴딩+1차 시도+`runs` 저널).
   MR을 강행하지 않아 최초 검증에서 부작용이 작다(§5). A는 컨벤션이 성숙한 FE에서 나중에.
@@ -97,8 +113,10 @@ curl -sS -X POST http://localhost:8787/onboard \
   -d '{"username":"<username>","jira_account_id":"<JIRA_ACCOUNT_ID>","jira_email":"you@example.com",
        "jira_token":"<JIRA_API_TOKEN>","claude_setup_token":"<SETUP_TOKEN>",
        "forge_token":"<FORGE_PAT>","git_name":"<git-name>","git_email":"you@example.com",
-       "autonomy_mode":"B","scope":"<PROJECT_KEY>"}'
-# 기대: HTTP 201 {"status":"ok","username":"<username>","enabled":false}
+       "autonomy_mode":"B","scope":"<PROJECT_KEY>","consent_full_permissions":true}'
+# 기대: HTTP 201 {"status":"ok","username":"<username>","enabled":false,
+#                 "consent_accepted_at":"<서버 수신 시각 ISO-8601>"}
+# 검증 실패 시: HTTP 400 {"error":...,"missing":[...],"findings":[{"key":"<필드>",...}]}
 ```
 
 ### 1.2 조작 — 활성화(enable) → worker spawn

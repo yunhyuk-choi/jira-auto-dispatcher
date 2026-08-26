@@ -12,12 +12,22 @@
     **값을 캐내는 인터페이스일 뿐**이고 판정은 여기서 한다.
 
 설계 원칙 — **검증기는 하나, 소비처는 둘**:
-    이 모듈은 I/O·전역 상태·부작용이 **전혀 없는 순수 라이브러리**다. CLI(:mod:`app.setup`)
-    도 웹 온보딩(:mod:`app.onboarding` 의 후속 확장)도 같은 :func:`validate_answers` 를
-    호출해야 한다 — 검증 로직이 두 벌이 되는 순간 둘은 갈라지고, 갈라진 게이트는 게이트가
-    아니다. 그래서 결과(:class:`ValidationResult`)는 사람이 읽는 형태
+    이 모듈은 I/O·전역 상태·부작용이 **전혀 없는 순수 라이브러리**다. 소비처는 실제로 둘이다:
+
+        1. **설치 관문 CLI**(:mod:`app.setup`) — 인스턴스를 세우는 사람의 답변.
+           스키마는 :data:`app.setup_schema.SETUP_SCHEMA`.
+        2. **웹 온보딩**(:mod:`app.onboarding`) — 이미 도는 인스턴스에 합류하는 팀원의
+           per-user 자격증명. 스키마는 :data:`app.user_schema.USER_SCHEMA`.
+
+    둘은 **필드 집합이 다르다**(설치 설정 vs 개인 자격증명). 그래서 스키마를 억지로 합치지
+    않고, :func:`validate_answers` 의 ``sections`` 인자로 스키마만 갈아 끼운다 — 규칙
+    (필수·조건부 필수·타입·허용값·동의 게이트)은 한 벌로 남는다. 검증 로직이 두 벌이 되는
+    순간 둘은 갈라지고, 갈라진 게이트는 게이트가 아니다.
+
+    결과(:class:`ValidationResult`)는 사람이 읽는 형태
     (:meth:`ValidationResult.format_text`)와 기계가 읽는 형태
-    (:meth:`ValidationResult.to_dict`) 둘 다로 내보낸다.
+    (:meth:`ValidationResult.to_dict`) 둘 다로 내보낸다. 후자의 ``findings[].key`` 가
+    **필드별 키**이므로 웹 온보딩은 그걸로 입력칸을 짚어 오류를 표시한다.
 
 첫 오류에서 멈추지 않는다:
     누락·조건부 누락·허용값 위반·타입 불일치를 **전부 모아서** 보고한다. 하나씩 알려주면
@@ -208,7 +218,16 @@ class ValidationResult:
 # ---------------------------------------------------------------------------
 
 
-def flatten_answers(raw: Mapping) -> dict:
+def _sections(sections: Optional[tuple]) -> tuple:
+    """기준 스키마를 정한다 — 주지 않으면 설치 스키마(:data:`S.SETUP_SCHEMA`).
+
+    이 한 줄이 "검증기는 하나, 소비처는 둘"의 이음매다. 소비처는 스키마를 갈아 끼울 뿐
+    규칙(필수·조건부·타입·허용값·동의)은 전부 이 모듈 것을 쓴다.
+    """
+    return S.SETUP_SCHEMA if sections is None else tuple(sections)
+
+
+def flatten_answers(raw: Mapping, sections: Optional[tuple] = None) -> dict:
     """수집된 답변을 ``{점 표기 키: 값}`` 으로 평탄화한다.
 
     두 입력 모양을 **모두** 받는다 — 웹 폼은 평평한 점 표기를 주고, config.yaml 을 그대로
@@ -218,13 +237,18 @@ def flatten_answers(raw: Mapping) -> dict:
 
     ⚠️ **스키마를 보며 내려간다**: 경로가 선언된 필드에 닿으면 거기서 멈춘다. 그래야
     ``jira.custom_fields`` 같은 STRING_MAP 값(dict)을 자식 키로 쪼개지 않는다.
+
+    Args:
+        raw: 답변(중첩 또는 점 표기).
+        sections: 기준 스키마. 생략하면 설치 스키마(:data:`app.setup_schema.SETUP_SCHEMA`).
     """
+    sections = _sections(sections)
     out: dict = {}
 
     def walk(node: Mapping, prefix: str) -> None:
         for raw_key, value in node.items():
             key = f"{prefix}.{raw_key}" if prefix else str(raw_key)
-            if S.get_field(key) is not None:
+            if S.get_field_in(sections, key) is not None:
                 out[key] = value          # 선언된 필드 — 값을 통째로 받는다
             elif isinstance(value, Mapping) and value:
                 walk(value, key)          # 아직 섹션 — 더 내려간다
@@ -235,7 +259,7 @@ def flatten_answers(raw: Mapping) -> dict:
     return out
 
 
-def resolve_values(flat: Mapping) -> tuple:
+def resolve_values(flat: Mapping, sections: Optional[tuple] = None) -> tuple:
     """평탄화된 답변 → ``(해석된 값 표, 명시적으로 답한 값 표, 경고 목록)``.
 
     해석 규칙은 :mod:`app.config` 의 ``_pick`` 과 **같아야 한다**:
@@ -243,12 +267,16 @@ def resolve_values(flat: Mapping) -> tuple:
 
     레거시 ``notify.enabled`` 만은 값의 모양이 달라(bool → provider 이름) 파서와 같은
     특례를 둔다: ``true`` 면 ``google_chat``(그 시절 유일한 구현), 아니면 ``none``.
+
+    Args:
+        flat: 평탄화된 답변.
+        sections: 기준 스키마. 생략하면 설치 스키마.
     """
     values: dict = {}
     explicit: dict = {}
     notes: list = []
 
-    for f in S.iter_fields():
+    for f in S.iter_fields_in(_sections(sections)):
         if f.key in flat:
             values[f.key] = flat[f.key]
             explicit[f.key] = flat[f.key]
@@ -428,18 +456,22 @@ def _env_token_hits(value: Any) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _check_consent(values: Mapping) -> list:
-    """풀 퍼미션 동의 게이트 — **이 시스템의 설치 전제**.
+def _check_consent(values: Mapping, key: str, hint: str) -> list:
+    """풀 퍼미션 동의 게이트 — **이 시스템의 전제**.
 
     이 소프트웨어는 사람의 매 단계 승인 없이 도구 권한(파일 쓰기·셸·git push)을 가진
-    코딩 에이전트를 헤드리스로 돌린다. 설치자가 그걸 알고 감수한다는 명시 동의 없이
-    통과시키면 안 된다 — 그래서 값이 **정확히 true** 가 아니면 오류다(누락·false·"true"
-    문자열 전부 불통과).
+    코딩 에이전트를 헤드리스로 돌린다. 그걸 알고 감수한다는 명시 동의 없이 통과시키면
+    안 된다 — 그래서 값이 **정확히 true** 가 아니면 오류다(누락·false·"true" 문자열
+    전부 불통과).
 
     ⚠️ :mod:`app.config` 의 부팅 검증은 이걸 강제하지 **않는다**(동의 키가 없던 기존
-    배포를 깨지 않으려고 경고만 남긴다). 강제는 설치 관문인 여기의 몫이다.
+    배포를 깨지 않으려고 경고만 남긴다). 강제는 관문인 여기의 몫이다.
+
+    동의는 **누가 무엇에 동의하는가**에 따라 키가 다르다 — 설치자는
+    ``consent.full_permissions``(설치 스키마), 합류자는 ``consent_full_permissions``
+    (per-user 온보딩 스키마). 판정 논리는 하나고 키만 주입한다.
     """
-    value = values.get("consent.full_permissions")
+    value = values.get(key)
     if value is True:
         return []
     if value is None:
@@ -449,43 +481,74 @@ def _check_consent(values: Mapping) -> list:
     else:
         detail = f"true/false 가 아닙니다(받은 타입: {type(value).__name__})"
     return [Finding(
-        LEVEL_ERROR, "consent.full_permissions", CODE_CONSENT_REQUIRED,
-        f"풀 퍼미션 실행 동의가 필요합니다 — {detail}.",
-        "이 시스템은 사람 승인 없이 셸·파일 쓰기·git push 를 하는 에이전트를 헤드리스로 "
-        "실행합니다(SECURITY.md). 무엇에 동의하는지 읽고 consent.full_permissions 를 "
-        "true 로, consent.accepted_at 을 동의 시각(ISO-8601)으로 채우세요.",
+        LEVEL_ERROR, key, CODE_CONSENT_REQUIRED,
+        f"풀 퍼미션 실행 동의가 필요합니다 — {detail}.", hint,
     )]
 
 
-def _check_unknown_keys(flat: Mapping) -> list:
+#: 설치자용 동의 힌트(기본값). per-user 소비처는 자기 문구를 주입한다.
+CONSENT_HINT_SETUP = (
+    "이 시스템은 사람 승인 없이 셸·파일 쓰기·git push 를 하는 에이전트를 헤드리스로 "
+    "실행합니다(SECURITY.md). 무엇에 동의하는지 읽고 consent.full_permissions 를 "
+    "true 로, consent.accepted_at 을 동의 시각(ISO-8601)으로 채우세요."
+)
+
+
+def _check_unknown_keys(flat: Mapping, sections: tuple, closed: tuple) -> list:
     """스키마에 없는 키 경고(오타 잡기). 레거시 키는 :func:`resolve_values` 가 이미 다뤘다.
 
-    경고 범위를 :data:`CLOSED_SECTIONS` 로 좁히는 이유는 모듈 상단 주석 참조 —
-    완전한 config.yaml 을 그대로 검증해도 경고가 쏟아지지 않게 하기 위해서다.
+    경고 범위를 ``closed``(기본 :data:`CLOSED_SECTIONS`)로 좁히는 이유는 모듈 상단 주석
+    참조 — 완전한 config.yaml 을 그대로 검증해도 경고가 쏟아지지 않게 하기 위해서다.
+    ``closed`` 가 비면 이 검사는 아무것도 하지 않는다(모르는 키를 자유롭게 받는 소비처용).
     """
-    legacy = S.legacy_key_map()
+    if not closed:
+        return []
+    legacy = S.legacy_key_map_in(sections)
     out: list = []
     for key in flat:
-        if S.get_field(key) is not None or key in legacy:
+        if S.get_field_in(sections, key) is not None or key in legacy:
             continue
         section = key.split(".", 1)[0]
-        if section not in CLOSED_SECTIONS:
+        if section not in closed:
             continue
         out.append(Finding(
             LEVEL_WARNING, key, CODE_UNKNOWN_KEY,
             f"{section} 섹션에 선언되지 않은 항목입니다 — 오타이거나 무시됩니다.",
             f"허용 항목: " + ", ".join(
-                f.key for f in S.iter_fields() if f.key.startswith(section + ".")
+                f.key for f in S.iter_fields_in(sections)
+                if f.key.startswith(section + ".")
             ),
         ))
     return out
 
 
-def validate_answers(raw: Mapping) -> ValidationResult:
+def validate_answers(
+    raw: Mapping,
+    *,
+    sections: Optional[tuple] = None,
+    consent_key: str = "consent.full_permissions",
+    consent_hint: str = "",
+    accepted_at_key: str = "consent.accepted_at",
+    allow_secret_values: bool = False,
+    closed_sections: Optional[tuple] = None,
+) -> ValidationResult:
     """수집된 답변을 스키마 선언에 대고 검증한다(**공개 진입점**).
 
     Args:
         raw: 중첩 매핑 또는 점 표기 매핑(둘 다 받는다 — :func:`flatten_answers`).
+        sections: 기준 스키마. 생략하면 설치 스키마
+            (:data:`app.setup_schema.SETUP_SCHEMA`). per-user 온보딩처럼 **필드 집합이
+            다른** 소비처는 자기 스키마를 같은 자료구조로 선언해 여기에 넣는다 —
+            스키마를 합치지 않고 **검증 메커니즘만** 공유하기 위한 자리다.
+        consent_key: 풀 퍼미션 동의 항목의 키(누가 동의하는가에 따라 다르다).
+        consent_hint: 동의 미승인 오류의 힌트 문구(생략하면 설치자용 문구).
+        accepted_at_key: 동의 시각 항목의 키(ISO-8601 형식 경고 대상).
+        allow_secret_values: 시크릿 **값**을 답변으로 받아도 되는가. 기본 False —
+            설치 답변은 config.yaml 로 흘러가므로 값이 오면 오류다. per-user 온보딩은
+            토큰 값을 받아 **시크릿 파일로** 저장하고 레지스트리엔 참조만 남기므로
+            True 로 부른다(그 규율은 :func:`app.onboarding._write_secret` 이 지킨다).
+        closed_sections: 모르는 키를 경고할 섹션 목록. 생략하면 :data:`CLOSED_SECTIONS`.
+            빈 튜플을 주면 모르는 키를 경고하지 않는다.
 
     Returns:
         :class:`ValidationResult`. ``result.ok`` 가 False 면 호출부는 **반드시** 실패로
@@ -501,10 +564,12 @@ def validate_answers(raw: Mapping) -> ValidationResult:
         7. 풀 퍼미션 동의 미승인
         8. (경고) 레거시 키 사용 · 모르는 키 · 미치환 ``${VAR}`` · 동의 시각 형식
     """
-    flat = flatten_answers(raw)
-    values, explicit, findings = resolve_values(flat)
+    sections = _sections(sections)
+    closed = CLOSED_SECTIONS if closed_sections is None else tuple(closed_sections)
+    flat = flatten_answers(raw, sections)
+    values, explicit, findings = resolve_values(flat, sections)
 
-    for f in S.iter_fields():
+    for f in S.iter_fields_in(sections):
         value = values.get(f.key)
         empty = is_empty(value)
 
@@ -546,7 +611,7 @@ def validate_answers(raw: Mapping) -> ValidationResult:
             ))
 
         # --- 5. 시크릿 값 규율 ---------------------------------------------
-        if f.secret:
+        if f.secret and not allow_secret_values:
             # 스키마에 값 시크릿은 없지만(테스트가 지킨다), 생기더라도 config.yaml 로는
             # 절대 못 가게 여기서 막는다.
             findings.append(Finding(
@@ -565,6 +630,11 @@ def validate_answers(raw: Mapping) -> ValidationResult:
                 ))
 
         # --- 6. 자리표시자 --------------------------------------------------
+        # ⚠️ 시크릿 **값**에는 돌리지 않는다 — 토큰 안에 우연히 ``<...>``·``${...}`` 가
+        # 들어 있을 수 있고, 그 오탐은 붙여넣은 사람이 고칠 방법이 없다(값은 발급기관이
+        # 정한다). 참조·일반 값에만 적용한다.
+        if f.secret:
+            continue
         if _placeholder_hits(value):
             findings.append(Finding(
                 LEVEL_ERROR, f.key, CODE_PLACEHOLDER,
@@ -581,19 +651,20 @@ def validate_answers(raw: Mapping) -> ValidationResult:
             ))
 
     # --- 7. 동의 게이트 ------------------------------------------------------
-    findings.extend(_check_consent(values))
+    findings.extend(_check_consent(values, consent_key,
+                                   consent_hint or CONSENT_HINT_SETUP))
 
     # --- 8. 경고: 동의 시각 형식 ---------------------------------------------
-    accepted = values.get("consent.accepted_at")
+    accepted = values.get(accepted_at_key)
     if isinstance(accepted, str) and accepted.strip() and not _ISO8601.match(accepted.strip()):
         findings.append(Finding(
-            LEVEL_WARNING, "consent.accepted_at", CODE_BAD_TIMESTAMP,
+            LEVEL_WARNING, accepted_at_key, CODE_BAD_TIMESTAMP,
             "ISO-8601 형태로 보이지 않습니다(감사 흔적으로 쓰입니다).",
             "예: 2026-08-25T09:00:00+09:00",
         ))
 
     # --- 8. 경고: 모르는 키 ---------------------------------------------------
-    findings.extend(_check_unknown_keys(flat))
+    findings.extend(_check_unknown_keys(flat, sections, closed))
 
     return ValidationResult(findings=findings, values=values, explicit=explicit)
 

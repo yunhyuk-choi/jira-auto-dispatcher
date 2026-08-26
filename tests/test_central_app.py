@@ -198,3 +198,39 @@ def test_index_shows_the_doctor_banner_at_the_top(central_client):
     assert 'id="doctor-panel"' in body
     assert body.index('id="doctor-panel"') < body.index('id="onboard-section"')
     assert "/api/doctor" in body and "/api/doctor/refresh" in body
+
+
+def test_onboarding_guide_is_wired_into_the_real_app(central_client):
+    """관리 UI 가 폼·준비물 안내를 그리는 원천이 실제 앱에 배선돼 있다.
+
+    이 엔드포인트가 없으면 index.html 은 입력칸을 하나도 그리지 못한다(안내를 HTML 에
+    하드코딩하지 않기로 한 대가다) — 그래서 배선 자체가 회귀 대상이다.
+    """
+    res = central_client.get("/api/onboarding/guide")
+    assert res.status_code == 200
+    body = res.get_json()
+    assert [s["id"] for s in body["steps"]] == ["local", "web"]
+    keys = {f["key"] for sec in body["sections"] for f in sec["fields"]}
+    assert {"username", "jira_token", "forge_token", "claude_setup_token"} <= keys
+    assert "forge_token" in body["required"]
+    assert body["consent_key"] in body["required"]
+    # 이 인스턴스의 Jira 사이트가 안내에 반영된다(하드코딩이면 반영되지 않는다).
+    assert body["jira"]["base_url"] == "https://example.atlassian.net"
+
+
+def test_index_html_does_not_hardcode_onboarding_guidance(central_client):
+    """준비물 안내는 템플릿이 아니라 스키마가 소유한다(하드코딩 회귀 방지).
+
+    예전 index.html 에는 발급 경로("아바타 → Edit profile → Access Tokens")와 필드 힌트가
+    통째로 박혀 있었다. 그러면 forge 를 GitHub 으로 바꾼 배포의 합류자에게 존재하지 않는
+    화면 경로를 보여 준다.
+    """
+    body = central_client.get("/").get_data(as_text=True)
+    # 온보딩 섹션 마크업만 본다(아래 '폴백 로그인' 섹션은 별개의 옛 기능 안내다).
+    section = body[body.index('id="onboard-section"'):body.index('id="users-section"')]
+    for hardcoded in ("Edit profile", "Developer settings", "id.atlassian.com",
+                      "setup-token", "accountId", "PROJECT_KEY"):
+        assert hardcoded not in section, hardcoded
+    # 대신 스키마에서 렌더할 자리와 2단 절차 자리가 있다.
+    assert 'id="onboard-fields"' in section
+    assert 'id="join-steps"' in section

@@ -15,6 +15,10 @@
 
 ## 0. 어느 갈래인가
 
+> **당신이 설치자가 아니라 이미 도는 인스턴스에 합류하는 팀원이라면** — §1~§7 을 읽을 필요가
+> 없다. [§8 팀원 합류](#8-팀원-합류-이미-도는-인스턴스에-참여하는-사람) 하나만 보면 된다
+> (로컬 프레임워크 합류 + 웹 자격증명 등록의 2단).
+
 | 갈래 | 쓰는 경우 | 본문 |
 |---|---|---|
 | **A. 로컬** | 개인 노트북에서 평가·개발. 도커 소켓 직결. | §3 |
@@ -51,6 +55,10 @@
 
 > **per-user 자격증명은 설치 단계에서 만들지 않는다.** central 이 뜬 뒤 관리 UI 온보딩
 > 폼으로 받아 `secrets/<username>/` 에 0600 으로 저장한다.
+>
+> ⚠️ 그리고 **합류자는 웹 등록만으로 끝나지 않는다** — 로컬에서 `ai-dlc-orchestrator`
+> 프레임워크의 SETTER 를 합류 모드로 돌려 `dlc-meta` 를 clone 해야 그 사람의 로컬
+> 오케스트레이터가 정체성을 갖는다. 2단 절차는 [§8 팀원 합류](#8-팀원-합류-이미-도는-인스턴스에-참여하는-사람).
 
 ---
 
@@ -450,6 +458,9 @@ docker compose exec central python -m app.setup doctor
 2. UI 에서 enable → central 이 `jad-worker-<username>` 컨테이너를 비-root 로 spawn.
 3. `docker ps --filter name=jad-worker-` 로 Up 확인.
 
+> ⚠️ **웹 등록만으로는 절반이다.** 합류자는 로컬 프레임워크 합류도 거쳐야 한다 —
+> 바로 아래 §8 이 그 2단 절차다. 팀원에게 링크를 줄 때는 §8 을 준다.
+
 ### 6.2 실제 티켓으로 끝까지
 
 배포가 살아 있는지가 아니라 **플로우가 도는지**를 검증하려면 [E2E.md](E2E.md) 를 따른다
@@ -474,3 +485,78 @@ docker compose exec central python -m app.setup doctor
 | MR 작성자가 엉뚱한 사용자 | worker 가 앰비언트 자격증명으로 push 했다 — per-user forge 토큰 경로를 확인 | — |
 | 알림이 안 감 | `notifier.provider` 가 `none` 이거나 목록 밖 값(경고만 남기고 미발송) | `--only notifier` |
 | worker 를 못 띄움 | docker 엔드포인트 접속 실패(소켓 권한 · socket-proxy 미기동) | `--only docker` |
+
+---
+
+## 8. 팀원 합류 (이미 도는 인스턴스에 참여하는 사람)
+
+> §1~§7 은 **인스턴스를 세우는 사람**을 위한 것이다. 이 장은 그 인스턴스에 **나중에
+> 합류하는 사람**을 위한 것이다 — 설치자는 이 장의 링크만 팀원에게 주면 된다.
+
+### 8.0 합류는 **2단**이다 (하나만 하면 절반만 된다)
+
+| 단계 | 어디서 | 무엇을 | 안 하면 |
+|---|---|---|---|
+| **1. 로컬 — 프레임워크 합류(SETTER)** | 본인 머신 | `ai-dlc-orchestrator` 를 clone 하고 `claude` 를 띄운다. 부트스트랩되지 않은 환경이면 SETTER 가 **합류 모드**로 분기해 공유 원격(`dlc-meta`)을 clone 하고 세션 자가점검 훅을 설치한다 | 당신의 **로컬 오케스트레이터가 정체성도 `dlc-meta` 도 없는 상태**로 남는다. 워커는 돌지만 당신 쪽 로컬 루프(리뷰·완성·완료 전이)가 성립하지 않는다 |
+| **2. 웹 — 대시보드에 자격증명 등록** | 관리 UI(`http://<central>:8787`) | 아래 준비물을 폼에 넣고 제출 → 운영자가 enable | central 이 **당신 워커를 띄우지 않는다**. 당신에게 배정된 티켓은 아무 일도 일어나지 않는다(에러도 안 난다) |
+
+프레임워크 레포: `https://github.com/yunhyuk-choi/ai-dlc-orchestrator`
+(이 배포가 다른 URL 을 쓰면 관리 UI 의 **STEP 1** 카드에 그 주소가 표시된다 —
+`run.orchestrator_repo_url` 에서 렌더된다.)
+
+```bash
+# 1단 — 로컬
+git clone https://github.com/yunhyuk-choi/ai-dlc-orchestrator
+cd ai-dlc-orchestrator
+claude          # 미부트스트랩이면 SETTER 가 합류 모드로 분기한다
+```
+
+⚠️ 1단의 **정본은 프레임워크 레포의 안내**다. 여기서는 진입점만 적는다 — 남의 레포 절차를
+복제하면 갈라진다. 그 레포의 `CLAUDE.md` / `agents/SETTER.md` 를 따른다.
+
+### 8.1 2단(웹)의 준비물
+
+⚠️ **아래 표는 참고용이다.** 화면의 실제 안내는 관리 UI 가 **이 인스턴스 설정에서 렌더**한다
+(`GET /api/onboarding/guide` → `app/user_schema.py`). 그래서 forge 가 GitHub 인 배포에서는
+GitHub PAT 안내만 보이고, 사내 GitLab 이면 토큰 발급 링크도 그 호스트를 가리킨다.
+**문서와 화면이 어긋나면 화면이 맞다.**
+
+| 값 | 무엇 | 어디서 |
+|---|---|---|
+| `username` | 내부 식별자(공백 없이). 워커 컨테이너·시크릿 폴더 이름이 된다 | 본인이 정한다(등록 후 변경 불가) |
+| `jira_account_id` **(필수)** | 폴러가 티켓 담당자를 당신에게 매핑하는 키. **틀리면 당신 티켓은 영원히 감지되지 않는다(에러도 없다)** | 폼의 **`내 accountId 조회`** 버튼(이메일+토큰으로 서버가 `GET /rest/api/3/myself` 를 대신 호출) · 또는 Jira 프로필 URL 의 `/people/<accountId>` 뒷부분 |
+| `jira_email` **(필수)** | Atlassian 계정 이메일. Jira Cloud 인증은 (이메일, 토큰) **쌍**이다 | 본인 Atlassian 계정 |
+| `jira_token` **(필수)** | 본인 Jira API 토큰 | Atlassian 계정 → Security → API tokens → Create (`https://id.atlassian.com/manage-profile/security/api-tokens`) |
+| `forge_token` **(필수)** | 브랜치 push + 변경요청(MR/PR) 생성을 **당신 이름으로** 하는 개인 토큰 | GitLab: 아바타 → Edit profile → Access Tokens, 스코프 `api` / GitHub: Settings → Developer settings → Personal access tokens, 스코프 `repo` |
+| `claude_setup_token` **(필수)** | 워커 안 에이전트가 쓸 **당신의** Claude 자격 | 본인 머신 터미널에서 `claude setup-token`(Max 구독). ⚠️ 재발급하면 기존 토큰이 무효화된다 |
+| `git_name` · `git_email` | 커밋 author. ⚠️ `git_email` 은 forge 계정에 **인증된 이메일**이어야 커밋이 당신 계정에 연결된다 | 본인 |
+| `autonomy_mode` | A=완전자율(변경요청 초안까지) / B=경량 1차. 처음엔 B 권장 | 본인이 고른다 |
+| 풀 퍼미션 동의 **(필수)** | 아래 §8.2 | 본인이 체크 |
+
+> **`forge_token` 은 왜 필수인가.** 예전에는 없어도 등록이 됐다. 그러면 워커는 커밋까지는
+> 하고 **MR/PR 을 만들지 못한다** — 에러 없이 반쪽만 도는, 이 시스템에서 가장 비싼 실패
+> 모드다. 두 자율 모드(A·B) 모두 브랜치를 원격에 push 하도록 지시하므로 forge 를 쓰지
+> 않는 경우가 없다. 그래서 **조건부가 아니라 무조건 필수**로 올렸다.
+
+### 8.2 풀 퍼미션 동의는 **본인이** 한다
+
+등록하면 이 시스템은 워커 안에서 `--dangerously-skip-permissions` 로 코딩 에이전트를
+실행하고, 그 에이전트는 **당신의** Jira·forge·Claude 자격증명으로 동작한다. 사람의 매 단계
+승인 없이 셸 실행·파일 쓰기·`git push`·티켓 전이가 일어나며 그 흔적은 **당신 계정에** 남는다.
+
+- 설치자가 `config.yaml` 에 켠 `consent.full_permissions` 는 *설치자 자신*의 동의일 뿐이다.
+- 그래서 온보딩 폼에 **본인 동의 체크박스**가 있고, 체크하지 않으면 서버가 등록을 거부한다
+  (UI 비활성화가 아니라 `POST /onboard` 가 400 — 게이트는 서버에 있다).
+- 동의 시각은 **서버 수신 시각**으로 레지스트리(`state/registry.json` 의
+  `consent.accepted_at`)에 남는다. 클라이언트가 보낸 시각은 쓰지 않는다.
+
+무엇에 동의하는지의 정본은 [SECURITY.md](SECURITY.md).
+
+### 8.3 등록 후
+
+등록은 안전 기본 `enabled=false` 로 시작한다. 운영자가 목록에서 **enable** 하면 그때
+`jad-worker-<username>` 컨테이너가 뜬다. 그전까지는 티켓이 배정돼도 아무 일도 일어나지
+않는다(정상이다).
+
+> ⚠️ 관리 UI 상단 배너가 **온보딩 차단**을 표시하면 등록이 409 로 막힌다. 그건 당신 입력의
+> 문제가 아니라 인스턴스 설정 문제다(§6.0) — 운영자가 고쳐야 한다.

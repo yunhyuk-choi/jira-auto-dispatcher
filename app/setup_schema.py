@@ -642,40 +642,75 @@ SETUP_SCHEMA: Tuple = (_FORGE, _NOTIFIER, _JIRA, _WEBHOOK, _DLC_META, _DOCS_REPO
 # ---------------------------------------------------------------------------
 
 
-def iter_sections() -> Iterator[SchemaSection]:
-    """선언 순서대로 섹션을 순회한다."""
-    yield from SETUP_SCHEMA
+# ⚠️ 아래 조회 헬퍼는 **두 벌**이다:
+#   - ``*_in(sections, ...)``  임의의 섹션 묶음을 대상으로 하는 순수 함수. 이 자료구조
+#     (:class:`SchemaSection`/:class:`SchemaField`)를 쓰는 **다른 스키마**도 같은 검증·
+#     렌더 기계를 그대로 재사용할 수 있게 하려고 열어 둔다 — 지금은 per-user 온보딩
+#     스키마(:mod:`app.user_schema`)가 이걸 쓴다. 설치 스키마와 필드 집합이 다르므로
+#     스키마를 억지로 합치지 않고 **메커니즘만** 공유한다.
+#   - 인자 없는 옛 이름들. :data:`SETUP_SCHEMA` 를 대상으로 하는 얇은 위임이며 기존
+#     호출부(설치 관문 CLI·검증기·렌더러)는 아무것도 바뀌지 않는다.
 
 
-def iter_fields() -> Iterator[SchemaField]:
-    """모든 섹션의 모든 필드를 선언 순서대로 순회한다."""
-    for section in SETUP_SCHEMA:
+def iter_sections_in(sections: Tuple) -> Iterator[SchemaSection]:
+    """주어진 섹션 묶음을 선언 순서대로 순회한다."""
+    yield from sections
+
+
+def iter_fields_in(sections: Tuple) -> Iterator[SchemaField]:
+    """주어진 섹션 묶음의 모든 필드를 선언 순서대로 순회한다."""
+    for section in sections:
         yield from section.fields
 
 
-def get_section(name: str) -> Optional[SchemaSection]:
-    """섹션 이름으로 조회(없으면 None)."""
-    for section in SETUP_SCHEMA:
+def get_section_in(sections: Tuple, name: str) -> Optional[SchemaSection]:
+    """주어진 섹션 묶음에서 섹션 이름으로 조회(없으면 None)."""
+    for section in sections:
         if section.name == name:
             return section
     return None
 
 
-def get_field(key: str) -> Optional[SchemaField]:
-    """점 표기 키 경로로 필드 조회(없으면 None)."""
-    for f in iter_fields():
+def get_field_in(sections: Tuple, key: str) -> Optional[SchemaField]:
+    """주어진 섹션 묶음에서 점 표기 키 경로로 필드 조회(없으면 None)."""
+    for f in iter_fields_in(sections):
         if f.key == key:
             return f
     return None
 
 
-def legacy_key_map() -> dict:
-    """``{레거시 키 경로: 신규 키 경로}`` — 하위호환 매핑 한눈에 보기.
-
-    후속 마이그레이션 도구가 옛 config.yaml 을 신규 키로 옮길 때 쓰라고 노출한다.
-    """
+def legacy_key_map_in(sections: Tuple) -> dict:
+    """주어진 섹션 묶음의 ``{레거시 키 경로: 신규 키 경로}``."""
     out: dict = {}
-    for f in iter_fields():
+    for f in iter_fields_in(sections):
         for old in f.legacy_keys:
             out[old] = f.key
     return out
+
+
+def iter_sections() -> Iterator[SchemaSection]:
+    """선언 순서대로 섹션을 순회한다(설치 스키마)."""
+    yield from iter_sections_in(SETUP_SCHEMA)
+
+
+def iter_fields() -> Iterator[SchemaField]:
+    """모든 섹션의 모든 필드를 선언 순서대로 순회한다(설치 스키마)."""
+    yield from iter_fields_in(SETUP_SCHEMA)
+
+
+def get_section(name: str) -> Optional[SchemaSection]:
+    """섹션 이름으로 조회(없으면 None — 설치 스키마)."""
+    return get_section_in(SETUP_SCHEMA, name)
+
+
+def get_field(key: str) -> Optional[SchemaField]:
+    """점 표기 키 경로로 필드 조회(없으면 None — 설치 스키마)."""
+    return get_field_in(SETUP_SCHEMA, key)
+
+
+def legacy_key_map() -> dict:
+    """``{레거시 키 경로: 신규 키 경로}`` — 하위호환 매핑 한눈에 보기(설치 스키마).
+
+    후속 마이그레이션 도구가 옛 config.yaml 을 신규 키로 옮길 때 쓰라고 노출한다.
+    """
+    return legacy_key_map_in(SETUP_SCHEMA)

@@ -266,17 +266,25 @@ central·모든 worker는 **하나의 named 볼륨**(`jad-workspace` → `/app/w
 시크릿을 `secrets/<username>/` 에 0600으로 저장하고 레지스트리에 참조만 남긴 뒤
 (`enabled=false` 안전 기본), **활성화 시** Docker SDK로 worker 컨테이너를 동적 spawn 한다.
 
-온보딩 폼 필수 필드(`app/onboarding.py`):
+> ⚠️ **웹 등록은 합류의 2단 중 하나다.** 합류자는 로컬에서 `ai-dlc-orchestrator` 의
+> SETTER 를 합류 모드로 돌려 `dlc-meta` 를 clone 해야 그 사람의 로컬 오케스트레이터가
+> 정체성을 갖는다. 팀원에게는 [INSTALL.md §8](INSTALL.md) 을 준다.
 
-| 필드 | 내용 |
-|---|---|
-| `username` | 내부 식별자(컨테이너·볼륨·시크릿 경로 키) |
-| `jira_account_id` | 담당자 매핑 키(티켓 assignee accountId) |
-| `jira_email` | Jira actor 이메일(Basic auth) |
-| `jira_token` | 사용자 Jira API 토큰 → `secrets/<user>/jira-token` |
-| `claude_setup_token` | `claude setup-token` 발급 값 → `secrets/<user>/claude-oauth-token` |
-| (선택) `forge_token` | 브랜치 push·MR/PR 생성용 → `secrets/<user>/forge-token` (옛 폼 필드 이름 `gitlab_token` 도 계속 받는다) |
-| (선택) `git_name`/`git_email` | 커밋 author 귀속 |
+온보딩 폼 필드 — **정본은 스키마 선언**(`app/user_schema.py`)이며 관리 UI 는 그것을 이
+인스턴스 설정과 함께 렌더한다(`GET /api/onboarding/guide`). 아래 표는 요약이다:
+
+| 필드 | 필수 | 내용 |
+|---|---|---|
+| `username` | ✔ | 내부 식별자(컨테이너·볼륨·시크릿 경로 키) |
+| `jira_account_id` | ✔ | 담당자 매핑 키(티켓 assignee accountId). 폼의 `내 accountId 조회` 버튼이 `GET /rest/api/3/myself` 로 대신 찾아 준다(`POST /api/onboarding/whoami`) |
+| `jira_email` | ✔ | Jira actor 이메일(Basic auth) |
+| `jira_token` | ✔ | 사용자 Jira API 토큰 → `secrets/<user>/jira-token` |
+| `forge_token` | ✔ | 브랜치 push·MR/PR 생성용 → `secrets/<user>/forge-token` (옛 폼 필드 이름 `gitlab_token` 도 계속 받는다). **선택이 아니다** — 없으면 워커가 커밋만 하고 변경요청을 못 만드는 조용한 반쪽 동작이 된다 |
+| `claude_setup_token` | ✔ | `claude setup-token` 발급 값 → `secrets/<user>/claude-oauth-token` |
+| `consent_full_permissions` | ✔ | **본인**의 풀 퍼미션 동의(체크박스). 서버가 강제하며(400) 수신 시각이 레지스트리 `consent.accepted_at` 에 남는다. 설치자의 `consent.full_permissions` 로 갈음하지 않는다 |
+| `git_name`/`git_email` | | 커밋 author 귀속(⚠️ `git_email` 은 forge 에 인증된 이메일이어야 연결된다) |
+| `autonomy_mode` | | A(완전자율) / B(경량 1차, 기본) |
+| `notify_user_id` | | 완료 알림 @멘션용 채널 사용자 id(옛 이름 `google_chat_user_id`) |
 
 활성화(worker 기동): UI의 enable 버튼 = `POST /users/<username>/enable` →
 central이 per-user 볼륨 `jad-<username>` 보장 + 사전 인가 `settings.json` 기록 +

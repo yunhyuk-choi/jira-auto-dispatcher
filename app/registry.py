@@ -23,6 +23,10 @@
     per_repo            {repo: "A"|"B"} 레포별 모드 오버라이드
     identity            {git_name, git_email} — worker git 커밋 author
     scope               {projects: [...]} — 이 사용자가 받을 Jira 프로젝트
+    consent             {full_permissions, accepted_at} — **본인**의 풀 퍼미션 동의와
+                        그 시각(ISO-8601, 서버 수신 시각). 이 사람의 자격증명으로 자율
+                        에이전트가 도는 데 대한 동의라 설치자의 동의로 갈음하지 않는다
+                        (app/onboarding.py 가 등록 시 강제한다).
     container           {name, status} — 스포너가 갱신하는 worker 컨테이너 상태
     secrets_ref         {jira_token, forge_token, claude_oauth_token}
                         (``forge_token`` 이 정본. 옛 이름 ``gitlab_token`` 은 같은 값으로
@@ -63,6 +67,29 @@ class Scope:
     """이 사용자가 받을 작업 범위."""
 
     projects: list = field(default_factory=list)
+
+
+@dataclass
+class Consent:
+    """이 사용자 **본인**의 풀 퍼미션 동의 기록(감사 흔적).
+
+    이 시스템은 워커 안에서 ``--dangerously-skip-permissions`` 로 에이전트를 돌리고, 그
+    에이전트는 **이 사람의** Jira·forge·Claude 자격증명으로 동작한다. 그러니 동의는 인스턴스
+    단위가 아니라 사람 단위여야 한다 — 설치자가 켠 ``consent.full_permissions``(config.yaml)
+    는 *설치자 자신*의 동의일 뿐이다.
+
+    Attributes:
+        full_permissions: 동의했는가. 기본 False(동의 없이는 등록이 통과하지 않는다).
+        accepted_at: 동의 시각(ISO-8601). ⚠️ **서버 수신 시각**이다 — 클라이언트가 보낸
+            시각은 쓰지 않는다(그러면 감사 흔적이 아니다).
+
+    ⚠️ 이 필드가 없던 시절에 등록된 레코드는 ``full_permissions=False`` 로 읽힌다. 그것을
+    소급 차단 근거로 쓰지 않는다(등록은 이미 끝났다) — 이 값은 *새 등록의 게이트*와 *누가
+    언제 동의했는지의 기록*이다.
+    """
+
+    full_permissions: bool = False
+    accepted_at: str = ""
 
 
 @dataclass
@@ -123,6 +150,7 @@ class UserRecord:
     per_repo: dict = field(default_factory=dict)
     identity: Identity = field(default_factory=Identity)
     scope: Scope = field(default_factory=Scope)
+    consent: Consent = field(default_factory=Consent)
     container: Container = field(default_factory=Container)
     secrets_ref: SecretsRef = field(default_factory=SecretsRef)
 
@@ -144,6 +172,7 @@ class UserRecord:
         scope = d.get("scope") or {}
         container = d.get("container") or {}
         secrets_ref = d.get("secrets_ref") or {}
+        consent = d.get("consent") or {}
         # 알림 사용자 id: 신규 키 우선, 없으면 레거시 키(Google Chat 전용 시절)를 읽고
         # 양쪽 필드에 같은 값을 싣는다(옛 키를 읽는 코드도 그대로 동작 — 하위호환).
         notify_uid = str(d.get("notify_user_id", "") or d.get("google_chat_user_id", ""))
@@ -167,6 +196,11 @@ class UserRecord:
                 git_email=str(identity.get("git_email", "")),
             ),
             scope=Scope(projects=list(scope.get("projects", []) or [])),
+            # 동의: 이 필드가 없던 시절의 registry.json 은 미동의로 읽힌다(위 Consent 주석).
+            consent=Consent(
+                full_permissions=bool(consent.get("full_permissions", False)),
+                accepted_at=str(consent.get("accepted_at", "") or ""),
+            ),
             container=Container(
                 name=str(container.get("name", "")),
                 status=str(container.get("status", "absent")),

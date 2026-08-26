@@ -282,6 +282,85 @@
         font-size: 0.9em;
         color: #f4a6a6;
       }
+      /* --- 합류 2단 절차 --- */
+      .join-step {
+        background-color: #2a2d2e;
+        border-left: 4px solid #569cd6;
+        padding: 10px 12px;
+        margin: 10px 0;
+        font-size: 0.9em;
+        line-height: 1.5;
+      }
+      .join-step .step-no {
+        color: #569cd6;
+        font-weight: bold;
+      }
+      .join-step .step-where {
+        color: #9aa;
+        font-size: 0.85em;
+      }
+      .join-step .step-why {
+        display: block;
+        color: #e6c66a;
+        margin-top: 4px;
+      }
+      /* --- 스키마 렌더 폼 --- */
+      .form-section {
+        margin: 14px 0 4px;
+      }
+      .form-section > .section-desc {
+        font-size: 0.85em;
+        color: #b8b8b8;
+        line-height: 1.5;
+        margin: 2px 0 8px;
+      }
+      .form-section.section-consent {
+        background-color: #332b00;
+        border-left: 4px solid #cca700;
+        padding: 10px 12px;
+      }
+      .form-section.section-consent > .section-desc {
+        color: #e6c66a;
+      }
+      .field-req {
+        color: #f48771;
+      }
+      .field-note {
+        display: block;
+        font-size: 0.8em;
+        color: #9cdcfe;
+        margin-top: 2px;
+        line-height: 1.45;
+      }
+      .field-err {
+        display: none;
+        font-size: 0.8em;
+        color: #f48771;
+        margin-top: 3px;
+        line-height: 1.45;
+      }
+      .field-link {
+        color: #4ec9b0;
+        font-size: 0.8em;
+      }
+      .field-inline {
+        display: flex;
+        gap: 6px;
+      }
+      .field-inline button {
+        padding: 6px 10px;
+        font-size: 0.8em;
+      }
+      .consent-row {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+      }
+      .consent-row input[type="checkbox"] {
+        margin-top: 3px;
+        width: 16px;
+        height: 16px;
+      }
     </style>
   </head>
   <body>
@@ -299,170 +378,22 @@
       <div id="doctor-meta"></div>
     </section>
 
-    <!-- 1. 사용자 온보딩 -->
+    <!-- 1. 사용자 온보딩 — **합류자(팀원)** 용.
+         ⚠️ 이 안의 안내·입력칸은 HTML 에 박아 두지 않는다. GET /api/onboarding/guide 가
+         스키마(app/user_schema.py) + 이 인스턴스 설정에서 렌더한 것을 그대로 그린다 —
+         forge 를 GitHub 으로 바꾸면 토큰 안내도 따라 바뀐다. -->
     <section id="onboard-section">
-      <h3>사용자 온보딩</h3>
+      <h3>팀 합류 — 사용자 온보딩</h3>
       <!-- 자가진단 차단 안내 — 서버(POST /onboard)도 같은 기준으로 409 를 낸다.
            UI 비활성화는 안내이지 게이트가 아니다(게이트는 서버에 있다). -->
       <div id="onboard-blocked-note" style="display: none"></div>
-      <div class="info-box">
-        💡 <b>Claude 인증(setup-token):</b> 각 사용자는 <b>본인 노트북</b> 터미널에서
-        <code>claude setup-token</code>(Max, long-lived)을 실행해 나온 토큰을 아래
-        <b>claude_setup_token</b> 칸에 붙여넣는다. worker가 이를
-        <code>CLAUDE_CODE_OAUTH_TOKEN</code>으로 사용한다. 권한 승인 단계는 없다 —
-        컨테이너 사전 인가(bypass)는 시스템이 자동 주입한다(SECURITY.md).
-      </div>
-      <div class="info-box">
-        🔒 등록된 사용자는 <b>안전을 위해 enabled=false로 시작</b>한다. 아래 표에서
-        운영자가 검토 후 <b>enable</b>하면 worker 컨테이너가 기동된다. 토큰 값은
-        서버에만 0600으로 저장되고 응답·로그에 노출되지 않는다.
-      </div>
+
+      <!-- 1a. 2단 절차(로컬 SETTER + 웹 등록) — 웹만 하면 절반만 끝난다. -->
+      <div id="join-steps"></div>
+
       <form id="onboard-form" onsubmit="return false;">
-        <div class="grid-form">
-          <div>
-            <label>username *</label>
-            <input
-              type="text"
-              name="username"
-              placeholder="<username>"
-              title="내부 식별자(공백 없이). 컨테이너·시크릿 폴더명에 쓰임."
-            />
-            <span class="hint">내부 식별자(공백 없이). 컨테이너·시크릿 폴더명에 쓰임.</span>
-          </div>
-          <div>
-            <label>display_name</label>
-            <input
-              type="text"
-              name="display_name"
-              placeholder="<username>"
-              title="표시용 이름(자유)."
-            />
-            <span class="hint">표시용 이름(자유).</span>
-          </div>
-          <div>
-            <label>jira_account_id *</label>
-            <input
-              type="text"
-              name="jira_account_id"
-              placeholder="<JIRA_ACCOUNT_ID>"
-              title="Jira 계정 ID. 발급/확인: Jira에서 GET /rest/api/2/myself 의 accountId, 또는 프로필 URL. 형식 xxxxxx:uuid."
-            />
-            <span class="hint"
-              >Jira 계정 ID. 발급/확인: <code>GET /rest/api/2/myself</code> 의
-              <code>accountId</code>, 또는 프로필 URL. 형식 <code>xxxxxx:uuid</code>.</span
-            >
-          </div>
-          <div>
-            <label>jira_email *</label>
-            <input
-              type="text"
-              name="jira_email"
-              placeholder="you@example.com"
-              title="Jira 로그인 이메일."
-            />
-            <span class="hint">Jira 로그인 이메일.</span>
-          </div>
-          <div>
-            <label>jira_token *</label>
-            <input
-              type="password"
-              name="jira_token"
-              placeholder="Jira API 토큰"
-              title="Jira API 토큰. 발급: https://id.atlassian.com/manage-profile/security/api-tokens → Create."
-            />
-            <span class="hint"
-              >Jira API 토큰. 발급:
-              <code>https://id.atlassian.com/manage-profile/security/api-tokens</code>
-              → Create.</span
-            >
-          </div>
-          <div>
-            <label>forge_token</label>
-            <input
-              type="password"
-              name="forge_token"
-              placeholder="GitLab PAT / GitHub PAT"
-              title="개인 코드호스팅 액세스 토큰. GitLab: 아바타 → Edit profile → Access Tokens(scope: api) / GitHub: Settings → Developer settings → Personal access tokens(scope: repo)."
-            />
-            <span class="hint"
-              >개인 코드호스팅(forge) 액세스 토큰 — 브랜치 push·MR/PR 작성자 귀속에
-              쓰인다. GitLab: 아바타 → Edit profile → Access Tokens(scope
-              <code>api</code>) / GitHub: Settings → Developer settings → Personal
-              access tokens(scope <code>repo</code>).</span
-            >
-          </div>
-          <div>
-            <label>claude_setup_token *</label>
-            <input
-              type="password"
-              name="claude_setup_token"
-              placeholder="claude setup-token 결과"
-              title="본인 터미널에서 claude setup-token(Max, 1년) 실행 후 나온 토큰. ⚠️재발급 시 기존 토큰 무효화되니 기존 값 재사용 가능."
-            />
-            <span class="hint"
-              >본인 터미널에서 <code>claude setup-token</code>(Max, 1년) 실행 후 나온
-              토큰. ⚠️재발급 시 기존 토큰이 무효화되니 기존 값 재사용 가능.</span
-            >
-          </div>
-          <div>
-            <label>autonomy_mode</label>
-            <select
-              name="autonomy_mode"
-              title="A=완전자율 MR초안 / B=경량 1차(로컬 완성). 최초 B 권장."
-            >
-              <option value="A">A — 완전자율 MR초안</option>
-              <option value="B" selected>B — 경량1차+로컬완성</option>
-            </select>
-            <span class="hint"
-              >A=완전자율 MR초안 / B=경량 1차(로컬 완성). 최초 B 권장.</span
-            >
-          </div>
-          <div>
-            <label>permission_level</label>
-            <select
-              name="permission_level"
-              title="기본 bypass(헤드리스 자율 필수)."
-            >
-              <option value="bypass" selected>bypass (기본 — 헤드리스 자율)</option>
-            </select>
-            <span class="hint">기본 bypass(헤드리스 자율 필수).</span>
-          </div>
-          <div>
-            <label>git_name</label>
-            <input
-              type="text"
-              name="git_name"
-              placeholder="<git-name>"
-              title="커밋 author 이름(GitLab 이름과 꼭 같을 필요 없음)."
-            />
-            <span class="hint">커밋 author 이름(GitLab 이름과 꼭 같을 필요 없음).</span>
-          </div>
-          <div>
-            <label>git_email</label>
-            <input
-              type="text"
-              name="git_email"
-              placeholder="you@example.com"
-              title="커밋 author 이메일 — ⚠️GitLab에 인증된 이메일이어야 커밋이 계정에 연결됨."
-            />
-            <span class="hint"
-              >커밋 author 이메일 — ⚠️<b>GitLab에 인증된 이메일</b>이어야 커밋이
-              계정에 연결됨.</span
-            >
-          </div>
-          <div>
-            <label>scope (projects, 쉼표구분)</label>
-            <input
-              type="text"
-              name="scope"
-              placeholder="<PROJECT_KEY>"
-              title="자동 트리거 대상 프로젝트 키(쉼표구분). 비우지 말 것."
-            />
-            <span class="hint"
-              >자동 트리거 대상 프로젝트 키(쉼표구분). 비우지 말 것.</span
-            >
-          </div>
-        </div>
+        <!-- 1b. 준비물 + 입력칸 — 스키마에서 렌더된다. -->
+        <div id="onboard-fields">준비물 안내를 불러오는 중…</div>
         <div class="flex-form">
           <button id="onboard-btn" type="submit">사용자 등록 (enabled=false)</button>
         </div>
@@ -634,20 +565,228 @@
         }
       });
 
-      // --- [온보딩 제출] (Phase 6) ---
+      // --- [합류 안내 + 온보딩 폼] ---
+      // 이 화면의 준비물 안내와 입력칸은 여기에 하드코딩돼 있지 않다.
+      // GET /api/onboarding/guide 가 per-user 스키마(app/user_schema.py)와 이 인스턴스
+      // 설정에서 렌더한 것을 그대로 그린다 — 설정이 바뀌면 안내가 따라간다
+      // (예: forge 가 GitHub 이면 GitHub PAT 안내만 보인다).
       const onboardForm = document.getElementById("onboard-form");
       const onboardBtn = document.getElementById("onboard-btn");
       const onboardMsg = document.getElementById("onboard-msg");
+      const onboardFields = document.getElementById("onboard-fields");
+      const joinSteps = document.getElementById("join-steps");
 
       // 제출 중 표시 — 자가진단 폴링(5초)이 버튼을 도중에 다시 켜지 않게 한다.
       let onboardBusy = false;
 
-      onboardBtn.addEventListener("click", async () => {
-        const fd = new FormData(onboardForm);
+      // 렌더된 입력칸의 모델(제출·오류표시가 이걸 보고 DOM 을 찾는다).
+      let guideFields = [];
+
+      // 링크는 서버가 만든 http(s) URL 만 허용한다(안내에 스킴을 지어내지 않는다).
+      function safeUrl(u) {
+        return /^https?:\/\//i.test(String(u || "")) ? String(u) : "";
+      }
+
+      function fieldInputHtml(f) {
+        const id = "f-" + f.key;
+        if (f.type === "bool") {
+          return (
+            '<input type="checkbox" id="' + esc(id) + '" name="' + esc(f.key) + '"' +
+            (f.default === true ? " checked" : "") + " />"
+          );
+        }
+        if (f.choices && f.choices.length) {
+          return (
+            '<select id="' + esc(id) + '" name="' + esc(f.key) + '">' +
+            f.choices
+              .map(
+                (c) =>
+                  '<option value="' + esc(c) + '"' +
+                  (c === f.default ? " selected" : "") + ">" + esc(c) + "</option>"
+              )
+              .join("") +
+            "</select>"
+          );
+        }
+        // 서버는 시크릿 필드에 예시를 넣지 않는다(값 유출 방지) — placeholder 도 그래서 빈다.
+        const ph =
+          f.example == null
+            ? ""
+            : Array.isArray(f.example)
+            ? f.example.join(", ")
+            : f.example;
+        return (
+          '<input type="' + (f.secret ? "password" : "text") + '" id="' + esc(id) +
+          '" name="' + esc(f.key) + '" placeholder="' + esc(ph) + '" />'
+        );
+      }
+
+      function fieldBlockHtml(f, guide) {
+        const link = safeUrl(f.link);
+        // accountId 는 사람이 가장 못 찾는 값이라 대신 조회해 준다(서버가 myself 를 호출).
+        const canLookup =
+          f.key === "jira_account_id" && !!(guide.jira && guide.jira.base_url);
+        const input = fieldInputHtml(f);
+        return (
+          "<div>" +
+          "<label>" + esc(f.key) +
+          (f.required ? ' <span class="field-req">*</span>' : "") + "</label>" +
+          (canLookup
+            ? '<div class="field-inline">' + input +
+              '<button type="button" data-act="whoami">내 accountId 조회</button></div>'
+            : input) +
+          '<span class="field-note">' + esc(f.description) +
+          (f.note ? " " + esc(f.note) : "") +
+          (link
+            ? ' <a class="field-link" href="' + esc(link) +
+              '" target="_blank" rel="noreferrer noopener">' +
+              esc(f.link_label || link) + "</a>"
+            : "") +
+          "</span>" +
+          '<span class="field-err" id="e-' + esc(f.key) + '"></span>' +
+          "</div>"
+        );
+      }
+
+      function consentBlockHtml(f) {
+        return (
+          '<div class="consent-row">' +
+          fieldInputHtml(f) +
+          '<label for="f-' + esc(f.key) + '" style="font-size:0.9em;color:#e6c66a">' +
+          esc(f.description) + "</label>" +
+          "</div>" +
+          '<span class="field-err" id="e-' + esc(f.key) + '"></span>'
+        );
+      }
+
+      function renderJoinSteps(steps) {
+        joinSteps.innerHTML = (steps || [])
+          .map(
+            (st) =>
+              '<div class="join-step">' +
+              '<span class="step-no">STEP ' + esc(st.order) + "</span> " +
+              "<b>" + esc(st.title) + "</b> " +
+              '<span class="step-where">(' + esc(st.where) + ")</span>" +
+              '<span class="step-why">' + esc(st.why) + "</span>" +
+              "<div>" + esc(st.how) + "</div>" +
+              "</div>"
+          )
+          .join("");
+      }
+
+      function renderGuide(guide) {
+        renderJoinSteps(guide.steps);
+        guideFields = [];
+        // 토큰 보관 규율은 필드 하나가 아니라 폼 전체에 걸린다 — 맨 위에 한 번.
+        const note = guide.secrets_note
+          ? '<div class="info-box">🔒 ' + esc(guide.secrets_note) + "</div>"
+          : "";
+        onboardFields.innerHTML = note + (guide.sections || [])
+          .map((sec) => {
+            const isConsent = sec.name === "consent";
+            const fields = (sec.fields || []).filter((f) => f.input !== false);
+            fields.forEach((f) => guideFields.push({ key: f.key, type: f.type }));
+            const body = isConsent
+              ? fields.map(consentBlockHtml).join("")
+              : '<div class="grid-form">' +
+                fields.map((f) => fieldBlockHtml(f, guide)).join("") +
+                "</div>";
+            return (
+              '<div class="form-section' + (isConsent ? " section-consent" : "") + '">' +
+              "<h4>" + esc(sec.title) + "</h4>" +
+              '<p class="section-desc">' + esc(sec.description) + "</p>" +
+              body +
+              "</div>"
+            );
+          })
+          .join("");
+      }
+
+      async function loadGuide() {
+        try {
+          const res = await fetch("/api/onboarding/guide");
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          renderGuide(await res.json());
+        } catch (e) {
+          // 안내를 못 받으면 폼을 지어내지 않는다 — 틀린 안내가 안내 없음보다 나쁘다.
+          guideFields = [];
+          onboardFields.innerHTML =
+            '<div class="info-box">온보딩 안내를 불러오지 못했습니다(' +
+            esc(e) + "). 새로고침하거나 운영자에게 문의하세요.</div>";
+        }
+      }
+
+      // 렌더된 입력칸에서 답변을 모은다(체크박스는 boolean 으로 — 서버가 타입에 엄격하다).
+      function collectAnswers() {
         const payload = {};
-        fd.forEach((v, k) => {
-          payload[k] = v;
+        guideFields.forEach((f) => {
+          const el = document.getElementById("f-" + f.key);
+          if (!el) return;
+          payload[f.key] = f.type === "bool" ? !!el.checked : el.value;
         });
+        return payload;
+      }
+
+      // 서버 findings(키 = 폼 필드 이름)를 입력칸 밑에 붙인다. 폼에 없는 키의 오류는
+      // 반환해 아래 메시지 줄로 흘려보낸다(조용히 삼키지 않는다).
+      function showFindings(findings) {
+        guideFields.forEach((f) => {
+          const box = document.getElementById("e-" + f.key);
+          if (box) {
+            box.innerText = "";
+            box.style.display = "none";
+          }
+        });
+        const orphan = [];
+        (findings || [])
+          .filter((f) => f.level === "error")
+          .forEach((f) => {
+            const box = document.getElementById("e-" + f.key);
+            const text = f.message + (f.hint ? " ↳ " + f.hint : "");
+            if (box) {
+              box.innerText = text;
+              box.style.display = "block";
+            } else {
+              orphan.push(f.key + ": " + text);
+            }
+          });
+        return orphan;
+      }
+
+      // accountId 대신 조회 — 이메일+토큰으로 서버가 Jira myself 를 호출한다.
+      onboardFields.addEventListener("click", async (ev) => {
+        const btn = ev.target.closest('button[data-act="whoami"]');
+        if (!btn) return;
+        const emailEl = document.getElementById("f-jira_email");
+        const tokenEl = document.getElementById("f-jira_token");
+        const target = document.getElementById("f-jira_account_id");
+        const errBox = document.getElementById("e-jira_account_id");
+        if (!emailEl || !tokenEl || !target) return;
+        btn.disabled = true;
+        const r = await post("/api/onboarding/whoami", {
+          jira_email: emailEl.value,
+          jira_token: tokenEl.value,
+        });
+        btn.disabled = false;
+        if (r.ok && r.data.account_id) {
+          target.value = r.data.account_id;
+          if (errBox) {
+            errBox.innerText = "";
+            errBox.style.display = "none";
+          }
+          onboardMsg.style.color = "#4ec9b0";
+          onboardMsg.innerText =
+            "accountId 조회 완료: " + (r.data.display_name || "");
+        } else if (errBox) {
+          errBox.innerText =
+            (r.data.error || "조회 실패(" + r.status + ")") +
+            (r.data.hint ? " ↳ " + r.data.hint : "");
+          errBox.style.display = "block";
+        }
+      });
+
+      onboardBtn.addEventListener("click", async () => {
+        const payload = collectAnswers();
         onboardBusy = true;
         onboardBtn.disabled = true;
         onboardMsg.style.color = "#9cdcfe";
@@ -660,17 +799,24 @@
           });
           const data = await res.json();
           if (res.ok) {
+            showFindings([]);              // 이전 오류 표시 지우기
             onboardMsg.style.color = "#4ec9b0";
             onboardMsg.innerText =
-              "등록 완료: " + data.username + " (enabled=false — 표에서 활성화하세요)";
-            onboardForm.reset();
+              "등록 완료: " + data.username + " (enabled=false — 표에서 활성화하세요)" +
+              (data.consent_accepted_at
+                ? " · 동의 기록 " + data.consent_accepted_at
+                : "");
+            if (onboardForm.reset) onboardForm.reset();
             loadUsers();
           } else {
+            // 400 = 입력값 검증 실패. 서버 findings 의 key 가 폼 필드 이름과 같으므로
+            // 입력칸 밑에 그대로 붙인다(검증 규칙은 서버 한 곳에만 있다).
+            const orphan = showFindings(data.findings);
             onboardMsg.style.color = "#f48771";
             onboardMsg.innerText =
               "실패: " +
               (data.error || res.status) +
-              (data.missing ? " [" + data.missing.join(", ") + "]" : "") +
+              (orphan.length ? " " + orphan.join(" / ") : "") +
               // 409 = 설정 자가진단 차단(서버가 낸 게이트). 무엇이 막았는지 그대로 보여 준다.
               (data.blocking ? " [" + data.blocking.join(", ") + "]" : "");
             if (data.blocking) loadDoctor();
@@ -1093,6 +1239,9 @@
       });
 
       // 초기 로드 + 주기 폴링.
+      // ⚠️ 안내/폼(loadGuide)은 **한 번만** 부른다 — 스키마와 인스턴스 설정은 런타임에
+      // 바뀌지 않고, 폴링으로 다시 그리면 사람이 입력하던 값이 날아간다.
+      loadGuide();
       loadDoctor();
       loadUsers();
       loadJobs();
