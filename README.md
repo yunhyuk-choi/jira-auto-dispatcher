@@ -20,6 +20,21 @@
 >
 > 위험 모델·보완 통제의 정본은 **[SECURITY.md](SECURITY.md)**, 설치는 **[INSTALL.md](INSTALL.md)**.
 
+## 설치 — 여기서 시작
+
+```bash
+python -m app.setup wizard      # 대화로 물어보고 config.yaml·시크릿·진단까지 이끈다
+```
+
+물어본 값은 `setup-answers.json` 에 계속 저장되므로 **중간에 그만두고 나중에 이어서**
+해도 된다. 검증·생성·판정은 전부 설치 관문 CLI(`python -m app.setup validate|render|
+doctor`)가 하고, 통과하지 못하면 `config.yaml` 이 만들어지지 않는다.
+
+`claude` 로 이 리포를 열었다면 프로젝트 스킬
+(`.claude/skills/install-jira-auto-dispatcher/`)이 같은 절차를 대화로 진행한다.
+마법사도 스킬도 **편의일 뿐** — 손으로 채우는 절차는 [INSTALL.md](INSTALL.md) 에
+그대로 유효하다.
+
 Jira(`jira.project` + `jira.projects` 로 지정, 사용자별로는 온보딩의 `scope` 로 좁힌다)
 티켓이 **등록 사용자**에게 새로 할당되면 이를 감지해, **그 사용자
 정체성으로** 오케스트레이터(`claude` CLI = ai-dlc-orchestrator)를 자율 실행해
@@ -106,7 +121,8 @@ Jira(jira.project)          │                                                 
 pip install -r requirements.txt
 
 # 설정 준비(시크릿 값은 넣지 말 것 — 파일 참조만)
-cp config/config.example.yaml config/config.yaml
+python -m app.setup wizard            # 대화로 채우기(권장)
+# 또는 손으로: cp config/config.example.yaml config/config.yaml
 
 # central (관리 콘솔 + 감시/디스패치)
 ROLE=central python -m app.main       # http://127.0.0.1:8787

@@ -190,6 +190,26 @@ def secret_dest(secrets_dir: str, ref: str) -> str:
     return os.path.join(secrets_dir, *rel.split("/"))
 
 
+def write_secret(secrets_dir: str, ref: str, value: str) -> str:
+    """시크릿 **값**을 ``<secrets_dir>/<ref>`` 에 0600(부모 0700)으로 쓰고 경로를 돌려준다.
+
+    "설정에는 참조만, 값은 0600 파일로" 규율의 **쓰기 쪽 단일 원천**이다. 워커 부팅의
+    :func:`materialize` 와 설치 마법사(:mod:`app.setup_wizard`)가 같은 함수를 쓴다 —
+    권한·인코딩 규칙이 두 벌이 되면 한쪽이 반드시 낡는다(마법사가 0644 로 쓰면
+    ``doctor --only secrets`` 가 그제서야 잡는다).
+
+    ⚠️ 값은 반환값·로그·예외 메시지 어디에도 싣지 않는다(경로만).
+
+    Raises:
+        InjectError: ``ref`` 가 시크릿 루트를 벗어날 때(경로 탈출 차단).
+    """
+    if not is_safe_ref(ref):
+        raise InjectError(f"시크릿 ref 가 시크릿 루트를 벗어납니다: {ref!r}")
+    path = secret_dest(secrets_dir, ref)
+    _write_text(path, value, file_mode=SECRET_FILE_MODE, dir_mode=SECRET_DIR_MODE)
+    return path
+
+
 def materialize(env: Optional[Mapping] = None, *,
                 config_dest: str = DEFAULT_CONFIG_DEST,
                 secrets_dir: str = "") -> dict:
@@ -230,12 +250,7 @@ def materialize(env: Optional[Mapping] = None, *,
     if raw_secrets:
         root = secrets_dir or str(env.get("SECRETS_DIR", "") or "") or DEFAULT_SECRETS_DIR
         for ref, content in decode_secrets(raw_secrets).items():
-            if not is_safe_ref(ref):
-                raise InjectError(f"주입 시크릿 ref 가 시크릿 루트를 벗어납니다: {ref!r}")
-            path = secret_dest(root, ref)
-            _write_text(path, content, file_mode=SECRET_FILE_MODE,
-                        dir_mode=SECRET_DIR_MODE)
-            out["secrets"].append(path)
+            out["secrets"].append(write_secret(root, ref, content))
         # 값은 로깅하지 않는다 — 개수만.
         log.info("주입 시크릿 materialize 완료 — %d개 (루트=%s)", len(out["secrets"]), root)
 

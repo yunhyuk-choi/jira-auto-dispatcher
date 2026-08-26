@@ -5,11 +5,14 @@
 > 코딩 에이전트를 헤드리스로 돌린다. 관리 UI(8787)와 worker 는 **RCE 표면**이므로
 > **인터넷에 노출하면 안 된다.** 무엇에 동의하는지의 정본은 [SECURITY.md](SECURITY.md).
 >
-> **⚠️ 이 문서는 "지금 실제로 동작하는 수동 절차"만 기술한다.** `config.example.yaml` 을
+> **⚠️ 이 문서는 "지금 실제로 동작하는 수동 절차"를 기술한다.** `config.example.yaml` 을
 > 복사해 손으로 채우는 절차는 그대로 유효하며, 그 위에 **설정 관문 CLI**
 > (`python -m app.setup` — 검증 / 생성 / 실측 진단, [§2.5](#25-설정-관문-cli--python--m-appsetup))가 있다.
-> **대화형 온보딩 마법사는 아직 없다** — 값을 캐묻는 대화형 진행은 후속이고, 그때도
-> 판정(검증·산출·진단)은 이 CLI 가 한다.
+>
+> **가장 쉬운 길은 `python -m app.setup wizard`** ([§2.6](#26-대화형-마법사--python--m-appsetup-wizard))
+> 다 — 대화로 값을 묻고 시크릿 파일을 0600 으로 만들고 위 CLI 를 순서대로 태운다.
+> 마법사는 **편의지 유일 경로가 아니다**: 판정(검증·산출·진단)은 여전히 이 CLI 가 하고,
+> 아래 수동 절차는 언제든 그대로 쓸 수 있다.
 
 ---
 
@@ -67,6 +70,9 @@
 ```bash
 git clone <이 저장소> jira-auto-dispatcher
 cd jira-auto-dispatcher
+
+python -m app.setup wizard            # 대화로 채우기(§2.6) — 아래 §2.1~§2.5 를 대신한다
+# 또는 손으로:
 cp config/config.example.yaml config/config.yaml
 ```
 
@@ -298,6 +304,46 @@ python -m app.setup discover --json > jira.json   # 기계용(후속 온보딩·
 - 이 CLI 는 **얇은 껍데기**다 — 조회·검증·렌더·진단 로직은 `app/setup_discover.py` ·
   `app/setup_validate.py` · `app/setup_render.py` · `app/setup_doctor.py` 에 있고, 후속 웹 온보딩·대화형 에이전트가
   **같은 함수**를 재사용한다(게이트가 두 벌이 되면 반드시 갈라진다).
+
+---
+
+### 2.6 대화형 마법사 — `python -m app.setup wizard`
+
+§2.5 의 네 명령을 **대화로** 태운다. 이 명령이 새로 만드는 게이트는 **없다** — 검증·산출·
+판정은 그대로 `validate`/`render`/`doctor` 가 쓰는 라이브러리가 하고, 통과하지 못하면
+`config.yaml` 은 생성되지 않고 종료코드도 non-zero 다.
+
+```bash
+python -m app.setup wizard
+```
+
+마법사가 대신 해 주는 것(= 설치 리허설에서 사람이 손으로 하던 것):
+
+| 리허설에서 손으로 하던 일 | 마법사 |
+|---|---|
+| `answers.json` 을 직접 작성 | 대화로 묻고 `setup-answers.json` 에 저장 |
+| `deploy.secrets_base_dir` 을 빠뜨려 `validate` 에 막힘 | 반드시 묻는다(프로파일이 채워 주지 않는 유일한 required) |
+| 시크릿 파일 3개를 손으로 생성 | 값을 받아 `secrets/<ref>` 에 **0600** 으로 저장 |
+| dlc-meta 클론 경로를 `--dlc-meta` 로 지정 | 자동 탐색 → 못 찾을 때만 묻는다 |
+| `discover` 출력을 눈으로 읽고 옮겨 적음 | 상태·전이·커스텀필드를 **목록에서 고르게** 한다 |
+| `validate`→`render`→`doctor`→`compose up` 순서를 스스로 앎 | 그 순서로 이끈다 |
+
+- **중단·재개**: 답은 매 질문마다 `setup-answers.json`(gitignore)에 저장된다. Ctrl-C /
+  Ctrl-D 로 그만둬도 같은 명령을 다시 실행하면 이어서 진행하며, 이미 답한 항목은
+  `[기본값]` 으로 제시된다. 그 파일은 §2.5 의 답변 JSON 과 **같은 형식**이라
+  `python -m app.setup validate setup-answers.json` 으로 언제든 수동 경로로 갈아탈 수 있다.
+- **시크릿**: 입력은 화면에 보이지 않고(`getpass`), 값은 `config.yaml`·답변 파일·표준
+  출력 어디에도 남지 않는다. 이미 파일이 있으면 **다시 묻지 않는다.** 웹훅 수신 토큰처럼
+  사람이 정할 이유가 없는 값은 아예 묻지 않고 무작위로 만든다.
+- **자동 선택은 확정이 아니다**: `discover` 가 확신한 값도 "이렇게 채웠습니다 — 맞습니까?"로
+  확인을 받고, 아니라고 하면 후보에서 다시 고를 수 있다.
+- 유용한 플래그: `--secrets-dir <경로>`(시크릿 파일을 쓸 호스트 디렉토리, 기본
+  `<project-dir>/secrets`) · `--no-discover`(오프라인) · `--no-doctor` · `--all`(프로파일
+  파생 항목까지 전부 질문) · `--answers <경로>`.
+
+> `claude` 로 이 리포를 열었다면 프로젝트 스킬 `install-jira-auto-dispatcher`
+> (`.claude/skills/`)가 같은 절차를 대화로 진행한다. 스킬도 마법사도 같은 CLI 를 부르므로
+> 게이트는 하나다.
 
 ---
 

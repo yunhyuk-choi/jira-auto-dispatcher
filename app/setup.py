@@ -6,6 +6,7 @@
     validate  :mod:`app.setup_validate`  답변이 스키마 선언을 만족하는가(종이 검사)
     render    :mod:`app.setup_render`    통과한 답변으로 config.yaml 생성(주석 보존)
     doctor    :mod:`app.setup_doctor`    그 설정으로 **실제로 붙는가**(실측 검사)
+    wizard    :mod:`app.setup_wizard`    위 넷을 **대화로** 태운다(값을 캐내는 인터페이스)
 
 왜 껍데기여야 하는가:
     같은 검증 로직을 **CLI 와 웹 온보딩(:mod:`app.onboarding` 후속 확장)이 함께** 쓴다.
@@ -13,9 +14,14 @@
     그래서 이 모듈은 인자 파싱 · 입출력 · 종료코드만 담당한다.
 
 그리고 왜 CLI 인가:
-    이후 붙을 대화형 온보딩 에이전트는 **값을 캐내는 인터페이스일 뿐**이다. 에이전트가
-    질문을 건너뛰거나 "대충 됐다"고 판단해도, 산출·검증·판정은 이 명령이 한다 — 통과하지
-    못하면 **non-zero 로 끝난다.** 강제성의 원천은 지시가 아니라 종료코드다.
+    대화형 온보딩(``wizard`` · 프로젝트 스킬 ``.claude/skills/install-jira-auto-dispatcher/``)은 **값을
+    캐내는 인터페이스일 뿐**이다. 대화가 질문을 건너뛰거나 "대충 됐다"고 판단해도,
+    산출·검증·판정은 이 명령이 한다 — 통과하지 못하면 **non-zero 로 끝난다.**
+    강제성의 원천은 지시가 아니라 종료코드다.
+
+사용 예(가장 쉬운 길)::
+
+    python -m app.setup wizard      # 대화로 물어보고 아래 순서를 그대로 태운다
 
 종료코드:
     0  통과
@@ -42,7 +48,7 @@
     python -m app.setup discover --only custom_fields --json > jira-fields.json
 
 POLICY-ENCODING: 이 파일은 UTF-8(BOM 없음)·LF. 출력도 **로케일과 무관하게** UTF-8 로
-고정한다(:func:`_force_utf8_stdout`) — 윈도우 콘솔 기본 코드페이지에서 한글 메시지가
+고정한다(:func:`_force_utf8_streams`) — 윈도우 콘솔 기본 코드페이지에서 한글이
 깨지거나 UnicodeEncodeError 로 죽는 것을 막는다.
 """
 
@@ -55,16 +61,22 @@ import sys
 from typing import Any, Optional
 
 from app import (setup_autofill, setup_discover, setup_doctor, setup_render,
-                 setup_validate)
+                 setup_validate, setup_wizard)
 
 EXIT_OK = 0
 EXIT_GATE_FAILED = 1
 EXIT_USAGE = 2
 
 
-def _force_utf8_stdout() -> None:
-    """표준 출력/에러를 UTF-8 로 고정(POLICY-ENCODING — 로케일 의존 출력 금지)."""
-    for stream in (sys.stdout, sys.stderr):
+def _force_utf8_streams() -> None:
+    """표준 입출력을 UTF-8 로 고정(POLICY-ENCODING — 로케일 의존 입출력 금지).
+
+    ⚠️ **입력도** 고정한다. 윈도우 콘솔의 기본 코드페이지로 stdin 을 읽으면 한글 답변
+    (``해야 할 일`` 같은 상태 이름·`wizard` 의 대화 입력·`validate -` 의 파이프 JSON)이
+    서러게이트로 깨져 들어오고, 그 값을 UTF-8 로 저장하는 순간 ``UnicodeEncodeError:
+    surrogates not allowed`` 로 죽는다 — 실제로 마법사 스모크에서 그렇게 터졌다.
+    """
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:
             try:
@@ -259,6 +271,31 @@ def cmd_discover(args: argparse.Namespace) -> int:
     return EXIT_OK if result.ok else EXIT_GATE_FAILED
 
 
+def cmd_wizard(args: argparse.Namespace) -> int:
+    """``wizard`` — 대화로 값을 캐내고 위 네 명령을 **순서대로** 태운다.
+
+    ⚠️ 이 명령은 게이트를 하나도 새로 만들지 않는다 — 검증·산출·판정은 그대로
+    ``validate``/``render``/``doctor`` 가 쓰는 라이브러리가 하고, 통과하지 못하면 여기서도
+    non-zero 로 끝난다(:mod:`app.setup_wizard`).
+    """
+    project_dir = args.project_dir or "."
+    options = setup_wizard.WizardOptions(
+        answers_path=(args.answers
+                      or os.path.join(project_dir, setup_wizard.DEFAULT_ANSWERS_PATH)),
+        project_dir=project_dir,
+        config_path=args.out,
+        template=args.template,
+        env_file=args.env_file,
+        dlc_meta=args.dlc_meta or "",
+        secrets_dir=args.secrets_dir or "",
+        autofill=not getattr(args, "no_autofill", False),
+        ask_all=args.all,
+        use_discover=not args.no_discover,
+        use_doctor=not args.no_doctor,
+    )
+    return setup_wizard.run_wizard(setup_wizard.WizardIO(), options)
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """``doctor`` — 설정이 **실제로 동작하는지** 실측(선언이 아니라 실측)."""
     from app.config import ConfigError, load_config
@@ -315,6 +352,36 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="종료코드: 0=통과 / 1=게이트 실패 / 2=사용 오류",
     )
     sub = parser.add_subparsers(dest="command", required=True)
+
+    # wizard 를 **맨 앞**에 선언한다 — `--help` 를 처음 본 사람이 "뭐부터 하지"에서
+    # 막히지 않게 하려는 것이다(발견 가능성이 설치 난이도의 절반이다).
+    p_wizard = sub.add_parser(
+        "wizard",
+        help="대화로 값을 받아 config.yaml 까지 만든다(중단·재개 가능 — 여기서 시작하세요)")
+    p_wizard.add_argument(
+        "--answers", default="",
+        help=f"답변 파일 경로(기본 <project-dir>/{setup_wizard.DEFAULT_ANSWERS_PATH}). "
+             f"이 파일이 곧 '이어서 하기'다 — 수동 경로(`validate <파일>`)와 같은 "
+             f"형식이라 언제든 갈아탈 수 있다")
+    _add_autofill_args(p_wizard)
+    p_wizard.add_argument("-o", "--out", default=setup_render.DEFAULT_OUTPUT_PATH,
+                          help=f"산출 경로(기본 {setup_render.DEFAULT_OUTPUT_PATH})")
+    p_wizard.add_argument("--template", default=setup_render.DEFAULT_TEMPLATE_PATH,
+                          help=f"템플릿(기본 {setup_render.DEFAULT_TEMPLATE_PATH})")
+    p_wizard.add_argument("--env-file", default=setup_autofill.DEFAULT_ENV_FILE,
+                          help=f"worker 공유 시크릿을 둘 env 파일(기본 "
+                               f"{setup_autofill.DEFAULT_ENV_FILE})")
+    p_wizard.add_argument("--secrets-dir", default="",
+                          help="시크릿 **파일**을 쓸 호스트 디렉토리"
+                               "(기본 <project-dir>/secrets — compose 가 그 자리를 "
+                               "deploy.secrets_base_dir 로 마운트한다)")
+    p_wizard.add_argument("--all", action="store_true",
+                          help="프로파일에서 파생되는 선택 항목까지 전부 묻는다")
+    p_wizard.add_argument("--no-discover", action="store_true",
+                          help="Jira 인스턴스 조회를 하지 않는다(오프라인 — 값을 직접 입력)")
+    p_wizard.add_argument("--no-doctor", action="store_true",
+                          help="마지막 실측 진단을 하지 않는다(나중에 `doctor` 로 돌린다)")
+    p_wizard.set_defaults(func=cmd_wizard)
 
     p_discover = sub.add_parser(
         "discover",
@@ -391,7 +458,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[list] = None) -> int:
     """진입점 — 파싱 후 서브커맨드로 위임한다."""
-    _force_utf8_stdout()
+    _force_utf8_streams()
     args = build_parser().parse_args(argv)
     return int(args.func(args))
 
