@@ -6,8 +6,6 @@
 # 계약 정합(반드시 유지 — spawner/config.example.yaml과 일치):
 #   image           jira-auto-dispatcher:latest   (config.spawn.image)
 #   network         jad-net                        (config.spawn.network)
-#   central DNS명    central                        (config.spawn.central_url=http://central:8787)
-#                    → 서비스 키가 'central' 이어야 worker가 http://central:8787 로 도달.
 #
 # ⚠️ 보안: 관리 UI/워커는 도구권한 자율 에이전트(RCE 표면). 신뢰 네트워크 한정, 인터넷 노출 금지.
 #          docker.sock 직결은 호스트 root 동치 → 기본은 socket-proxy 경유(최소 권한). SECURITY.md.
@@ -48,9 +46,11 @@ services:
     environment:
       ROLE: central
       SECRETS_DIR: /run/secrets              # config secrets.base_dir(${SECRETS_DIR})
-      CENTRAL_URL: http://central:8787       # worker→central 폴링 대상(spawn.central_url)
-      WORKER_SHARED_SECRET: ${WORKER_SHARED_SECRET:-}   # dispatch HTTP 인증(.env/호스트 env)
-      # ⚠️ HOST_DEPLOY_DIR 은 **더 이상 없다**(설치자가 틀리기 쉬운 값이라 제거).
+      # ⚠️ CENTRAL_URL · WORKER_SHARED_SECRET 은 **더 이상 없다**. 워커가 중앙의 dispatch
+      #    HTTP 를 폴링하던 시절의 값(폴링 대상 주소 · X-Worker-Secret 공유 시크릿)인데,
+      #    그 서빙 표면과 폴링 소비자가 프랙탈 seam(중앙 → docker exec 푸시)으로 대체되며
+      #    읽는 곳이 사라졌다. .env 에 남아 있어도 무시된다.
+      # ⚠️ HOST_DEPLOY_DIR 도 **더 이상 없다**(설치자가 틀리기 쉬운 값이라 제거).
       #    워커에 거는 마운트는 전부 named 볼륨이고, config·시크릿·알림 웹훅은 central 이
       #    컨테이너 스펙에 **주입**해 워커가 자기 안에 기록한다(app/inject.py). 그래서
       #    호스트 절대경로를 아무도 알 필요가 없다. .env 에 남아 있어도 무시된다.

@@ -25,8 +25,7 @@ from app.jira_client import JiraError
 def _no_ambient_env(monkeypatch):
     """호스트 env 가 검사 결과를 흔들지 않게 격리한다."""
     for name in ("HOST_DEPLOY_DIR", "SECRETS_DIR", "JIRA_WATCHER_EMAIL",
-                 "NOTIFIER_PROVIDER", "NOTIFIER_WEBHOOK_REF", "NOTIFY_ENABLED",
-                 "WORKER_SHARED_SECRET"):
+                 "NOTIFIER_PROVIDER", "NOTIFIER_WEBHOOK_REF", "NOTIFY_ENABLED"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -555,8 +554,8 @@ def test_run_checks_runs_every_check_and_keeps_going(tmp_path):
 
 def test_run_checks_subset(tmp_path):
     results = D.run_checks(make_cfg(), project_dir=str(tmp_path),
-                           only=("config", "worker_secret"))
-    assert [r.name for r in results] == ["config", "worker_secret"]
+                           only=("config", "secrets"))
+    assert [r.name for r in results] == ["config", "secrets"]
 
 
 def test_run_checks_rejects_unknown_names():
@@ -570,7 +569,7 @@ def test_a_crashing_check_does_not_kill_the_run(monkeypatch, tmp_path):
 
     monkeypatch.setattr(D, "check_config", boom)
     results = D.run_checks(make_cfg(), project_dir=str(tmp_path),
-                           only=("config", "worker_secret"))
+                           only=("config", "secrets"))
     assert results[0].status == D.STATUS_FAIL and "예외" in results[0].message
     assert len(results) == 2
 
@@ -650,36 +649,19 @@ def test_forge_token_skip_message_never_leaks_the_token(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# worker 공유 시크릿 — 존재만 본다(값은 절대 출력하지 않는다)
+# 은퇴한 검사 — worker 공유 시크릿
 # ---------------------------------------------------------------------------
 
 
-def test_worker_secret_present_in_config_passes(tmp_path):
-    cfg = make_cfg()
-    cfg.worker_shared_secret = "s3cr3t-value"
-    r = D.check_worker_secret(cfg, project_dir=str(tmp_path))
-    assert r.status == D.STATUS_PASS
-    assert "s3cr3t-value" not in r.message + r.hint      # 값 미노출
+def test_retired_worker_secret_check_is_gone_from_the_catalog():
+    """``worker_secret`` 검사는 **은퇴했다** — 아무것도 인증하지 않는 값이었다.
 
-
-def test_worker_secret_found_in_env_file_passes(tmp_path):
-    """호스트에서 돌리면 아직 env 에 없다 — compose 가 읽는 .env 를 봐야 한다."""
-    (tmp_path / ".env").write_text("WORKER_SHARED_SECRET=abc123\n",
-                                   encoding="utf-8", newline="")
-    r = D.check_worker_secret(make_cfg(), project_dir=str(tmp_path))
-    assert r.status == D.STATUS_PASS
-    assert "abc123" not in r.message + r.hint
-
-
-def test_missing_worker_secret_warns_but_does_not_fail(tmp_path):
-    """없다고 잡이 깨지지는 않는다(무인증으로 열릴 뿐) — 기존 배포를 FAIL 시키지 않는다."""
-    r = D.check_worker_secret(make_cfg(), project_dir=str(tmp_path))
-    assert r.status == D.STATUS_WARN
-    assert "무인증" in r.message
-    assert "바꾸지" in r.hint          # 이미 워커가 떠 있으면 바꾸지 말라는 경고
-
-
-def test_worker_secret_is_part_of_the_check_catalog():
-    assert "worker_secret" in D.CHECK_ORDER
-    results = D.run_checks(make_cfg(), only=("worker_secret",))
-    assert [r.name for r in results] == ["worker_secret"]
+    옛 모델에서 이 시크릿은 워커가 중앙의 dispatch HTTP 를 부를 때 쓰는
+    ``X-Worker-Secret`` 값이었다. 그 서빙 표면과 폴링 소비자가 프랙탈 seam(중앙 →
+    docker exec 푸시)으로 대체되며 읽는 곳이 사라졌으므로, 설치자에게 **왜 검사하는지
+    모르는 항목**을 보여 주지 않는다.
+    """
+    assert "worker_secret" not in D.CHECK_ORDER
+    assert not hasattr(D, "check_worker_secret")
+    with pytest.raises(ValueError):
+        D.run_checks(make_cfg(), only=("worker_secret",))

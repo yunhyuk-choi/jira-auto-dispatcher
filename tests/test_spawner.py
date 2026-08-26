@@ -31,7 +31,6 @@ def _cfg(base_dir: str, notify=None, config_path: str = ""):
         spawn=SimpleNamespace(
             image="jira-auto-dispatcher:latest",
             network="jad-net",
-            central_url="http://central:8787",
             mem_limit="4g",
             docker_host="unix:///var/run/docker.sock",
             run_as="1000:1000",
@@ -39,7 +38,6 @@ def _cfg(base_dir: str, notify=None, config_path: str = ""):
         ),
         run=SimpleNamespace(workspace_dir="/app/workspace"),
         secrets=SimpleNamespace(base_dir=base_dir),
-        worker_shared_secret="s3cr3t",
         # central 이 로드한 config.yaml 원문 위치(워커 주입 소스). 비면 기본 경로.
         config_path=config_path,
     )
@@ -147,8 +145,10 @@ def test_ensure_worker_run_args(tmp_path, isolated_state):
     env = kwargs["environment"]
     assert env["ROLE"] == "worker"
     assert env["DISPATCH_USER"] == "testuser"
-    assert env["CENTRAL_URL"] == "http://central:8787"
-    assert env["WORKER_SHARED_SECRET"] == "s3cr3t"
+    # 은퇴한 노브는 컨테이너 스펙에 실리지 않는다 — 워커 안에 읽는 곳이 없다
+    # (옛 worker→central 폴링 경로의 값). 쓰이지 않는 시크릿은 노출 표면만 늘린다.
+    assert "CENTRAL_URL" not in env
+    assert "WORKER_SHARED_SECRET" not in env
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "CLAUDE-XYZ"
     assert env["SECRETS_DIR"] == "/run/secrets"
     assert env["JIRA_TOKEN_FILE"] == "/run/secrets/testuser/jira-token"
@@ -219,7 +219,7 @@ def test_jira_gitlab_token_pointers_stay_paths_not_plain_env_values(tmp_path, is
     ⚠️ 계약 변화(정직한 기술): 예전엔 Jira/forge 토큰 값이 컨테이너 스펙에 아예 실리지
     않았다(호스트 디렉토리를 ro 바인드했으므로). bind 를 없애면서 값은 전용 주입 env
     (JAD_INJECT_SECRETS, base64)로 이동했다. 노출 수준은 이미 전부터 env 로 넘기던
-    CLAUDE_CODE_OAUTH_TOKEN·WORKER_SHARED_SECRET 과 같다(docker API 접근자 = 호스트
+    CLAUDE_CODE_OAUTH_TOKEN 과 같다(docker API 접근자 = 호스트
     root 동치라 어차피 호스트 secrets/ 를 읽을 수 있다). 여기서 지키는 것은
     **평문이 일반 env 키로 새지 않는다**는 것과 아래 격리 불변식이다.
     """

@@ -10,7 +10,7 @@
 #
 # 무엇을 안 하나:
 #   - 배포/기동/온보딩 등 쓰기·라이브 조작 없음(전부 GET).
-#   - 시크릿(토큰·WORKER_SHARED_SECRET)을 인자로 받지도, 출력하지도 않는다.
+#   - 시크릿(토큰)을 인자로 받지도, 출력하지도 않는다.
 #
 # 사용법:
 #   bash scripts/smoke-deployed.sh [BASE_URL]

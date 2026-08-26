@@ -257,7 +257,6 @@ class WizardOptions:
     project_dir: str = "."
     config_path: str = setup_render.DEFAULT_OUTPUT_PATH
     template: str = setup_render.DEFAULT_TEMPLATE_PATH
-    env_file: str = setup_autofill.DEFAULT_ENV_FILE
     dlc_meta: str = ""
     secrets_dir: str = ""          # 비면 <project_dir>/secrets
     autofill: bool = True
@@ -844,7 +843,7 @@ def _step_validate(s: _Session):
 
 
 def _step_render(s: _Session, result) -> Optional[str]:
-    """``setup_render`` 로 config.yaml 생성 + ``.env`` 공유 시크릿 확보(멱등)."""
+    """``setup_render`` 로 config.yaml 생성."""
     s.io.heading("10. config.yaml 생성 (python -m app.setup render)")
     out = s.options.config_path
     force = False
@@ -864,8 +863,6 @@ def _step_render(s: _Session, result) -> Optional[str]:
         return None
     s.io.say(f"  생성: {out}" + (f" (기존 파일 백업: {backup})" if backup else ""))
     s.io.say(rendered.format_text())
-    secret = setup_autofill.ensure_worker_shared_secret(s.options.env_file)
-    s.io.say(f"  worker 공유 시크릿: {secret.detail}")
     return out
 
 

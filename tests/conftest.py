@@ -49,7 +49,6 @@ def make_config(global_concurrency=3, concurrency_per_worker=1, statuses=None,
         repo_map=repo_map or {},
         webhook=SimpleNamespace(enabled=False, secret_ref="service/jira-webhook"),
         secrets=SimpleNamespace(base_dir=""),
-        worker_shared_secret="",
     )
 
 

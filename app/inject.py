@@ -32,10 +32,9 @@
 
 ⚠️ 노출 면(정직한 기술):
     주입된 값은 컨테이너 스펙에 들어가므로 ``docker inspect`` 로 보인다. 이는 이미
-    이 시스템의 전제와 같은 수준이다 — ``CLAUDE_CODE_OAUTH_TOKEN`` ·
-    ``WORKER_SHARED_SECRET`` 은 전부터 env 로 전달됐고, docker API 에 닿을 수 있는
-    주체는 이미 호스트 root 동치라 호스트의 secrets/ 를 직접 읽을 수 있다
-    (SECURITY.md). 대신 **디스크 잔류**는 줄었다: 워커 쪽 시크릿은 tmpfs(RAM)에만
+    이 시스템의 전제와 같은 수준이다 — ``CLAUDE_CODE_OAUTH_TOKEN`` 은 전부터 env 로
+    전달됐고, docker API 에 닿을 수 있는 주체는 이미 호스트 root 동치라 호스트의
+    secrets/ 를 직접 읽을 수 있다(SECURITY.md). 대신 **디스크 잔류**는 줄었다: 워커 쪽 시크릿은 tmpfs(RAM)에만
     materialize 되고 컨테이너가 죽으면 사라진다.
 
 POLICY-ENCODING: 기록 파일은 UTF-8(BOM 없음)·LF. 값은 바이트 그대로 왕복한다.

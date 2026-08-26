@@ -4,9 +4,6 @@
     - dlc-meta 원격 URL 은 **클론에서 읽어** 답변에 들어간다(사람이 옮겨 적지 않는다).
     - 그 URL 은 **설정에 적어도 되는 형태**여야 한다 — 토큰이 박힌 URL 이 config.yaml 로
       새면 이 리포의 제1 규율("값이 아니라 참조")이 깨진다.
-    - worker 공유 시크릿은 **없을 때만** 만들고, 있으면 절대 덮어쓰지 않는다(멱등).
-      재생성하면 떠 있는 워커가 전부 401 이 된다.
-    - 생성한 시크릿 **값**은 반환값·요약·JSON 어디에도 실리지 않는다.
 
 ⚠️ git 은 실제로 부르지 않는다 — ``runner`` 대역만 쓴다(CI: ubuntu, 네트워크 없음).
 """
@@ -15,8 +12,6 @@ from __future__ import annotations
 
 import os
 from types import SimpleNamespace
-
-import pytest
 
 from app import setup_autofill as A
 
@@ -195,94 +190,3 @@ def test_ambiguous_host_does_not_guess_forge_kind(tmp_path):
                                 env={},
                                 runner=_runner("https://git.corp.example/x/dlc-meta.git"))
     assert "forge.kind" not in report.answers
-
-
-# ---------------------------------------------------------------------------
-# worker 공유 시크릿 — 멱등 + 값 미노출
-# ---------------------------------------------------------------------------
-
-
-def _read_secret_value(path) -> str:
-    """테스트 전용: .env 에서 값을 직접 읽는다(프로덕션 코드는 값을 돌려주지 않는다)."""
-    for line in open(path, encoding="utf-8").read().splitlines():
-        if line.startswith(A.WORKER_SECRET_ENV + "="):
-            return line.split("=", 1)[1]
-    return ""
-
-
-def test_secret_is_generated_when_absent(tmp_path):
-    env_path = str(tmp_path / ".env")
-    out = A.ensure_worker_shared_secret(env_path, env={})
-    assert out.status == "generated" and out.ok
-    value = _read_secret_value(env_path)
-    assert len(value) == A.SECRET_BYTES * 2          # token_hex → 바이트의 2배
-    # ⚠️ 값이 결과 객체 어디에도 실리지 않는다.
-    assert value not in out.detail and value not in str(out.to_dict())
-
-
-def test_second_call_is_idempotent_and_keeps_the_same_value(tmp_path):
-    """재생성하면 떠 있는 워커가 전부 401 이 된다 — 절대 덮어쓰지 않는다."""
-    env_path = str(tmp_path / ".env")
-    A.ensure_worker_shared_secret(env_path, env={})
-    first = _read_secret_value(env_path)
-    out = A.ensure_worker_shared_secret(env_path, env={})
-    assert out.status == "kept_file"
-    assert _read_secret_value(env_path) == first
-
-
-def test_existing_host_env_wins_and_no_file_is_created(tmp_path):
-    env_path = str(tmp_path / ".env")
-    out = A.ensure_worker_shared_secret(env_path, env={A.WORKER_SECRET_ENV: "already"})
-    assert out.status == "kept_env"
-    assert not os.path.exists(env_path)
-
-
-def test_other_env_lines_are_preserved(tmp_path):
-    env_path = tmp_path / ".env"
-    env_path.write_text("HOST_DEPLOY_DIR=/srv/jad\nCLAUDE_CODE_OAUTH_TOKEN=x\n",
-                        encoding="utf-8", newline="")
-    A.ensure_worker_shared_secret(str(env_path), env={})
-    body = env_path.read_text(encoding="utf-8")
-    assert "HOST_DEPLOY_DIR=/srv/jad" in body
-    assert "CLAUDE_CODE_OAUTH_TOKEN=x" in body
-    assert A.WORKER_SECRET_ENV in body
-
-
-def test_empty_existing_key_is_filled_in_place_not_duplicated(tmp_path):
-    env_path = tmp_path / ".env"
-    env_path.write_text(f"{A.WORKER_SECRET_ENV}=\n", encoding="utf-8", newline="")
-    A.ensure_worker_shared_secret(str(env_path), env={})
-    body = env_path.read_text(encoding="utf-8")
-    assert body.count(A.WORKER_SECRET_ENV + "=") == 1
-    assert _read_secret_value(str(env_path))
-
-
-def test_generated_file_is_lf_and_utf8_without_bom(tmp_path):
-    """POLICY-ENCODING — 생성 파일은 UTF-8(BOM 없음)·LF."""
-    env_path = str(tmp_path / ".env")
-    A.ensure_worker_shared_secret(env_path, env={})
-    raw = open(env_path, "rb").read()
-    assert b"\r\n" not in raw and not raw.startswith(b"\xef\xbb\xbf")
-
-
-@pytest.mark.skipif(os.name != "posix", reason="윈도우는 chmod 가 사실상 무시된다")
-def test_generated_file_is_0600(tmp_path):
-    env_path = str(tmp_path / ".env")
-    A.ensure_worker_shared_secret(env_path, env={})
-    assert (os.stat(env_path).st_mode & 0o077) == 0
-
-
-def test_unwritable_path_reports_failure_instead_of_raising(tmp_path):
-    """설치 편의 기능이 설치를 세우면 안 된다 — 실패도 결과로 말한다."""
-    target = tmp_path / "afile"
-    target.write_text("x", encoding="utf-8")
-    out = A.ensure_worker_shared_secret(str(target / "nested" / ".env"), env={})
-    assert out.status == "failed" and not out.ok
-    assert "openssl" in out.detail          # 손으로 만드는 법을 알려준다
-
-
-def test_read_env_file_secret_reports_presence_not_value(tmp_path):
-    env_path = str(tmp_path / ".env")
-    assert A.read_env_file_secret(env_path) is False
-    A.ensure_worker_shared_secret(env_path, env={})
-    assert A.read_env_file_secret(env_path) is True

@@ -35,7 +35,7 @@ DLC_URL = "https://git.corp.example/acme/dlc-meta.git"
 def _no_ambient_env(monkeypatch):
     """호스트 env 가 답을 대신 채워 테스트가 거짓 통과하지 않게."""
     for name in ("HOST_DEPLOY_DIR", "SECRETS_DIR", "JIRA_WATCHER_EMAIL",
-                 "DLC_META_DIR", "WORKER_SHARED_SECRET"):
+                 "DLC_META_DIR"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -206,7 +206,6 @@ def make_options(tmp_path, **overrides):
         project_dir=str(tmp_path),
         config_path=str(tmp_path / "config.yaml"),
         template=TEMPLATE,
-        env_file=str(tmp_path / ".env"),
         secrets_dir=str(tmp_path / "secrets"),
         use_discover=True,
         use_doctor=True,
@@ -254,18 +253,19 @@ def test_wizard_walks_from_nothing_to_a_loadable_config(tmp_path):
     assert cfg.secrets.base_dir == "/run/secrets"
 
 
-def test_worker_shared_secret_lands_in_env_not_in_config(tmp_path):
-    """공유 시크릿은 .env 로 가고 config.yaml 에는 값이 없다."""
+def test_wizard_does_not_create_a_retired_worker_shared_secret(tmp_path):
+    """마법사는 **아무것도 인증하지 않는 시크릿**을 만들지 않는다(은퇴한 노브).
+
+    옛 ``WORKER_SHARED_SECRET`` 은 워커→중앙 dispatch HTTP 의 ``X-Worker-Secret``
+    값이었다. 그 경로가 프랙탈 seam(중앙 → docker exec 푸시)으로 대체되며 읽는 곳이
+    사라졌으므로, 온보딩이 의미 없는 것을 챙기지 않는다.
+    """
     code, _responder, out = run(tmp_path)
     assert code == W.EXIT_OK
-    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
-    assert "WORKER_SHARED_SECRET=" in env_text
-    value = env_text.split("WORKER_SHARED_SECRET=", 1)[1].split("\n", 1)[0].strip()
-    assert len(value) >= 32
-    assert value not in (tmp_path / "config.yaml").read_text(encoding="utf-8")
-    assert value not in out.text
-
-
+    assert not (tmp_path / ".env").exists()
+    assert "WORKER_SHARED_SECRET" not in out.text
+    assert "WORKER_SHARED_SECRET" not in (tmp_path / "config.yaml").read_text(
+        encoding="utf-8")
 def test_status_names_come_from_the_instance_not_from_typing(tmp_path):
     """상태는 **조회 목록에서 고른다** — id 와 이름이 함께 박힌다."""
     code, _responder, _out = run(tmp_path)

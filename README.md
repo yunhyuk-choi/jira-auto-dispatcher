@@ -69,9 +69,10 @@ Jira(`jira.project` + `jira.projects` 로 지정, 사용자별로는 온보딩�
   티켓 담당자를 등록 사용자에 매핑 → 그 사용자 worker에 잡 배포. + 사용자
   레지스트리/온보딩/관리 UI + 사용자 worker 컨테이너 동적 spawn(Docker SDK).
 - **worker** (사용자별 동적 컨테이너, `ROLE=worker DISPATCH_USER=<user>`): Jira를
-  직접 보지 않는다. 중앙을 HTTP 폴링 → 잡 수신 → 그 사용자 정체성(Claude 계정·
-  Jira 토큰·forge 토큰·git author)으로 `claude -p` 실행 → 상태/로그 회신.
-  토큰 한도 감지 시 interrupted + reset_at으로 회신하고 재개한다.
+  직접 보지 않고, **중앙에 아무것도 요청하지 않는다**. 그냥 살아 있는 실행 자리다 —
+  중앙이 `docker exec` 로 그 컨테이너 안에 세션을 **밀어 넣고**, 그 사용자 정체성
+  (Claude 계정·Jira 토큰·forge 토큰·git author)으로 `claude -p` 가 돈다.
+  토큰 한도 감지 시 interrupted + reset_at 으로 기록되고 재개한다.
 
 베이스는 `claude-web-wrapper`(claude-hacker): Flask로 `claude` CLI를 감싼 웹 래퍼
 (브라우저 로그인 + `claude -p` 스트리밍)에서 재사용 자산을 이식했다.
@@ -104,32 +105,39 @@ Jira(jira.project)          │                                                 
                         │    ▼ (2) 담당자 account_id → registry 매핑(enabled만)         │
                         │  registry ── 등록 사용자 CRUD(state/registry.json)            │
                         │    │                                                         │
-                        │    ▼ (3) dispatch.enqueue(user, job)                          │
-                        │  dispatch ── 사용자별 잡 큐 + HTTP                            │
-                        │    │  GET /dispatch/<user>/next   POST /dispatch/<u>/<job>/status
+                        │    ▼ (3) dispatch.enqueue(user, job) → scheduler              │
+                        │  central_session ── 상주 라이브 세션(사용자별 서브 스폰)      │
                         │  spawner ── 온보딩 시 worker 컨테이너 동적 spawn(Docker SDK)  │
                         └────┼─────────────────────────────────────────────────────────┘
-                             │ (4) HTTP (worker가 폴링/회신)
+                             │ (4) docker exec — 중앙이 워커 안으로 **밀어 넣는다**
               ┌──────────────┼──────────────┐  ...사용자마다 1개
         ┌─────▼─────┐  ┌─────▼─────┐   worker (동적, ROLE=worker DISPATCH_USER=<u>)
-        │ worker A  │  │ worker B  │   ── central 폴링 → agent_runner → claude -p → 회신
+        │ worker A  │  │ worker B  │   ── 상주만 한다(/healthz) → 주입된 claude -p 실행
         └───────────┘  └───────────┘      토큰 한도 감지 → interrupted(reset_at) → 재개
 ```
 
 - **영속(state/)**: jobs·watermark·dedup·registry를 JSON으로 영속(central만).
   worker는 무상태 실행체다.
+- **디스패치 seam 은 하나뿐**: 중앙 → `docker exec`(프랙탈 푸시). 워커가 중앙을 폴링하던
+  옛 HTTP 경로(`app/worker.py::worker_loop` + `GET /dispatch/<user>/next` 계열)는 프랙탈
+  경로와 **이중 실행**(같은 티켓 두 번 → 중복 MR·브랜치·Jira 코멘트)을 일으켜 삭제됐다.
 - **웹훅-레디**: 폴러가 기본. 웹훅은 켜면 동일 게이트/매핑으로 수렴(중복 안전).
 - **재개**: 중앙이 interrupted 잡을 reset_at에 사용자 큐로 재-enqueue → 그 worker가
   `claude -p --resume`로 이어간다(야간 드레인 / UI "지금 재개" 동일 경로).
 
-## central ↔ worker HTTP 프로토콜
+## HTTP 표면
 
 | 메서드 | 경로 | 방향 | 내용 |
 |---|---|---|---|
-| GET | `/dispatch/<user>/next` | worker→central | 다음 잡 1건(JSON) 수신, running 전이. 없으면 204 |
-| POST | `/dispatch/<user>/<job>/status` | worker→central | `{status, log?, reset_at?, branch?, session_id?, mr_url?, error?}` 회신 |
-| GET | `/healthz` | 프로브 | 역할/사용자 헬스 |
-| POST | `/onboard` | UI→central | 사용자 등록 + worker spawn (Phase 3) |
+| GET | `/healthz` | 프로브 | 역할/사용자 헬스 (워커 컨테이너의 **유일한** 서빙 표면) |
+| POST | `/webhook/jira` | Jira→central | 이벤트 구동 단일 티켓 트리거(헤더 토큰 인증, 폴링은 백스톱) |
+| POST | `/onboard` | UI→central | 사용자 등록 + worker spawn |
+
+> ⚠️ **은퇴**: `GET /dispatch/<user>/next` · `POST /dispatch/<user>/<job>/status` ·
+> `GET /dispatch/<user>/<job>/control` 과 그 `X-Worker-Secret` 인증은 레거시 워커 폴링
+> 프로토콜이었고, 이중 실행의 원인이라 소비자(`app/worker.py`)와 함께 제거됐다. 그래서
+> `WORKER_SHARED_SECRET` 과 `CENTRAL_URL`(`spawn.central_url`)도 함께 은퇴했다 — 옛
+> `.env`·`config.yaml` 에 남아 있어도 조용히 무시된다.
 
 ## 실행
 
@@ -144,7 +152,8 @@ python -m app.setup wizard            # 대화로 채우기(권장)
 ROLE=central python -m app.main       # http://127.0.0.1:8787
 
 # worker (보통 central이 동적 spawn; 수동 기동 시)
-ROLE=worker DISPATCH_USER=<username> CENTRAL_URL=http://central:8787 \
+# ⚠️ 워커는 중앙 주소를 알 필요가 없다 — 중앙이 docker exec 로 밀어 넣는다.
+ROLE=worker DISPATCH_USER=<username> \
   CLAUDE_CODE_OAUTH_TOKEN=... python -m app.main
 ```
 

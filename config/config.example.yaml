@@ -158,12 +158,14 @@ resume: { work_hours: "08:00-18:00", timezone: Asia/Seoul, nightly_drain: "01:00
 
 # worker 컨테이너 기동 파라미터. ⚠️ docker_host·workspace_volume 은 위 deploy 섹션으로
 # 옮겼다(레거시로 여기 둬도 계속 읽지만, 새 설정은 deploy 를 쓴다).
+# ⚠️ 예전의 spawn.central_url 은 **은퇴했다**(env CENTRAL_URL 도 마찬가지). 워커가 중앙을
+# 폴링하던 시절의 대상 주소인데, 지금 워커는 HTTP 로 중앙에 말하지 않는다(중앙이
+# docker exec 로 밀어 넣는다). 옛 config 에 남아 있어도 조용히 무시된다.
 # ⚠️ run_as 는 워커의 실행 uid 이자 **주입 시크릿 tmpfs(/run/secrets)의 소유 uid** 다
 # — spawner 가 이 값에서 파생하므로 둘이 어긋날 수 없다(app/spawner.py secrets_tmpfs).
 spawn:
   image: jira-auto-dispatcher:latest
   network: jad-net
-  central_url: http://central:8787
   mem_limit: 4g
   run_as: "1000:1000"                         # worker 컨테이너 비-root 실행(특권 축소)
 

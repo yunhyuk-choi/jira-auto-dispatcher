@@ -65,7 +65,7 @@ log = logging.getLogger("jad.doctor")
 #:     - ``forge_token``·``dlc_meta`` — central 자신의 git 경로다. 깨지면 사이클로그 push·
 #:       REPO-MAP 갱신이 degrade 되지만 잡은 돌고 MR/PR 도 나온다. 그리고 사설망/방화벽
 #:       조합에서 오탐이 나기 쉬운 자리라, 여기서 막으면 정상 배포가 설치 불가가 된다.
-#:     - ``worker_secret``·``notifier`` — 애초에 FAIL 이 아니라 WARN/SKIP 으로만 난다.
+#:     - ``notifier`` — 애초에 FAIL 이 아니라 WARN/SKIP 으로만 난다.
 #:
 #: ⚠️ 목록에 **관리 UI 로 고칠 수 있는 것은 없다** — 전부 config.yaml·시크릿 파일·호스트
 #: 환경이라 UI 밖에서 고친다. 그래서 "고칠 방법이 UI 뿐인데 UI 를 막는" 자충수가 아니다.

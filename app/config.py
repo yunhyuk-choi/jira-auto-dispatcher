@@ -32,8 +32,6 @@
 env 오버라이드(런타임 우선):
     - ``ROLE``                → role
     - ``SECRETS_DIR``         → secrets.base_dir 의 ``${SECRETS_DIR}`` 치환값
-    - ``CENTRAL_URL``         → spawn.central_url (worker→central 폴링 대상)
-    - ``WORKER_SHARED_SECRET``→ worker_shared_secret (dispatch HTTP 인증)
     - ``NOTIFIER_PROVIDER``   → notifier.provider (신규·중립)
     - ``NOTIFIER_WEBHOOK_REF``→ notifier.webhook_ref (신규·중립. 레거시
       ``GOOGLE_CHAT_WEBHOOK_REF``·``NOTIFY_ENABLED`` 도 계속 받는다)
@@ -268,11 +266,17 @@ class ResumeConfig:
 
 @dataclass
 class SpawnConfig:
-    """[spawn] 섹션 — 사용자 worker 컨테이너 동적 기동 파라미터."""
+    """[spawn] 섹션 — 사용자 worker 컨테이너 동적 기동 파라미터.
+
+    ⚠️ 예전에 있던 ``central_url`` 은 **없어졌다.** 워커가 중앙을 폴링하던 시절
+    (``app/worker.py``)의 폴링 대상이었는데, 그 소비자가 프랙탈 seam 으로 대체되며
+    제거됐다 — 지금 워커는 HTTP 로 중앙에 말하지 않는다(중앙이 ``docker exec`` 로 밀어
+    넣는다). 기존 config.yaml 의 ``spawn.central_url`` 과 env ``CENTRAL_URL`` 은 남아
+    있어도 **조용히 무시**된다(로더가 모르는 키를 그냥 넘긴다 — 무해).
+    """
 
     image: str = "jira-auto-dispatcher:latest"
     network: str = "jad-net"
-    central_url: str = "http://central:8787"
     mem_limit: str = "4g"
     docker_host: str = "unix:///var/run/docker.sock"
     run_as: str = "1000:1000"  # worker 컨테이너 비-root 실행 사용자(특권 축소)
@@ -492,8 +496,12 @@ class AppConfig:
     notifier: NotifierConfig = field(default_factory=NotifierConfig)
     deploy: DeployConfig = field(default_factory=DeployConfig)
     consent: ConsentConfig = field(default_factory=ConsentConfig)
-    # dispatch HTTP(worker→central) 공유 시크릿. env WORKER_SHARED_SECRET 우선.
-    worker_shared_secret: str = ""
+    # ⚠️ 예전에 있던 ``worker_shared_secret`` 은 **없어졌다.** 워커가 중앙의 dispatch
+    # HTTP 엔드포인트를 부르던 시절의 ``X-Worker-Secret`` 인증용이었는데, 그 서빙 표면과
+    # 폴링 소비자가 프랙탈 seam(중앙 → docker exec 푸시)으로 대체되며 사라졌다 — 지금
+    # 이 값은 **아무것도 인증하지 않는다**. 기존 배포의 ``.env``·config.yaml 에 남아
+    # 있어도 조용히 무시된다(무해).
+
     # 티켓 components/labels → 레포 매핑(REPO-MAP). {키: [repo,...]} 또는 {키: repo}.
     repo_map: dict = field(default_factory=dict)
     # 이 설정이 로드된 파일 경로(:func:`load_config` 가 채운다). spawner 가 워커에
@@ -862,7 +870,6 @@ def _build_config(raw: dict) -> AppConfig:
         spawn=SpawnConfig(
             image=str(spawn.get("image", "jira-auto-dispatcher:latest")),
             network=str(spawn.get("network", "jad-net")),
-            central_url=str(spawn.get("central_url", "http://central:8787")),
             mem_limit=str(spawn.get("mem_limit", "4g")),
             run_as=str(spawn.get("run_as", "1000:1000")),
             # docker_host·workspace_volume 은 deploy 가 정본이다
@@ -917,7 +924,6 @@ def _build_config(raw: dict) -> AppConfig:
             # 알아야 경고를 띄울 수 있기 때문이다.
             fractal_central=bool(run.get("fractal_central", True)),
         ),
-        worker_shared_secret=str(raw.get("worker_shared_secret", "")),
         repo_map=dict(raw.get("repo_map", {}) or {}),
         forge=_build_forge(forge, run),
         notifier=_build_notifier(notifier, notify),
@@ -1021,13 +1027,13 @@ def _apply_env_overrides(cfg: AppConfig) -> None:
     if secrets_dir and (not cfg.secrets.base_dir or "${SECRETS_DIR}" in cfg.secrets.base_dir):
         cfg.secrets.base_dir = cfg.secrets.base_dir.replace("${SECRETS_DIR}", secrets_dir) or secrets_dir
 
-    central_url = os.environ.get("CENTRAL_URL")
-    if central_url:
-        cfg.spawn.central_url = central_url
-
-    worker_secret = os.environ.get("WORKER_SHARED_SECRET")
-    if worker_secret:
-        cfg.worker_shared_secret = worker_secret
+    # ⚠️ ``CENTRAL_URL`` · ``WORKER_SHARED_SECRET`` env 는 **더 이상 읽지 않는다.**
+    # 둘 다 워커가 중앙의 dispatch HTTP 를 폴링하던 시절의 값이었고(폴링 대상 주소 ·
+    # ``X-Worker-Secret`` 공유 시크릿), 그 서빙 표면과 폴링 소비자가 프랙탈 seam
+    # (중앙 → ``docker exec`` 푸시)으로 대체되며 소비자가 하나도 남지 않았다.
+    # ``HOST_DEPLOY_DIR`` 과 같은 처리 — 기존 배포의 ``.env``·compose 에 남아 있어도
+    # **조용히 무시**된다(값이 아무 동작도 바꾸지 않으므로 경고할 사용자 의도가 없다.
+    # 동작이 달라지는 ``fractal_central`` 은퇴와는 다른 경우다).
 
     # 완료 알림 웹훅 참조(시크릿 파일 참조) env 폴백 — YAML보다 우선. 값이 아니라 참조.
     # ⚠️ 정본은 cfg.notifier 이므로 거기에 적용하고 레거시 cfg.notify 로 미러한다.

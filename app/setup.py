@@ -206,7 +206,6 @@ def cmd_render(args: argparse.Namespace) -> int:
     if args.stdout:
         # 표준 출력은 **파일 본문 전용**이다(파이프로 그대로 받을 수 있게).
         # 요약은 표준 에러로 보낸다 — 본문에 섞이면 둘 다 파싱할 수 없다.
-        # ⚠️ ``--stdout`` 은 "파일을 건드리지 않는다"는 약속이라 .env 시크릿도 만들지 않는다.
         if args.json:
             stdout_payload = rendered.to_dict()
             if report is not None:
@@ -225,26 +224,15 @@ def cmd_render(args: argparse.Namespace) -> int:
     except setup_render.RenderError as exc:
         _die(str(exc))
 
-    # central↔worker 공유 시크릿 — 사람이 정할 이유가 없는 랜덤값이라 여기서 확보한다.
-    # ⚠️ config.yaml 이 아니라 .env 로 간다(값이 아니라 참조 규율). **이미 있으면 그대로**
-    #    둔다(재생성하면 떠 있는 워커가 전부 401). 값은 어떤 출력에도 싣지 않는다.
-    secret = None
-    if not args.no_env_secret:
-        secret = setup_autofill.ensure_worker_shared_secret(args.env_file)
-
     payload = rendered.to_dict()
     payload.update({"path": args.out, "backup": backup,
                     "warnings": [f.to_dict() for f in result.warnings]})
     if report is not None:
         payload["autofill"] = report.to_dict()
-    if secret is not None:
-        payload["worker_secret"] = secret.to_dict()
     text_lines = _autofill_lines(report) + [f"생성: {args.out}"]
     if backup:
         text_lines.append(f"기존 파일 백업: {backup}")
     text_lines.append(rendered.format_text())
-    if secret is not None:
-        text_lines.append(f"worker 공유 시크릿: {secret.detail}")
     if result.warnings:
         text_lines.append("")
         text_lines.append(result.format_text())
@@ -290,7 +278,6 @@ def cmd_wizard(args: argparse.Namespace) -> int:
         project_dir=project_dir,
         config_path=args.out,
         template=args.template,
-        env_file=args.env_file,
         dlc_meta=args.dlc_meta or "",
         secrets_dir=args.secrets_dir or "",
         autofill=not getattr(args, "no_autofill", False),
@@ -406,9 +393,6 @@ def build_parser() -> argparse.ArgumentParser:
                           help=f"산출 경로(기본 {setup_render.DEFAULT_OUTPUT_PATH})")
     p_wizard.add_argument("--template", default=setup_render.DEFAULT_TEMPLATE_PATH,
                           help=f"템플릿(기본 {setup_render.DEFAULT_TEMPLATE_PATH})")
-    p_wizard.add_argument("--env-file", default=setup_autofill.DEFAULT_ENV_FILE,
-                          help=f"worker 공유 시크릿을 둘 env 파일(기본 "
-                               f"{setup_autofill.DEFAULT_ENV_FILE})")
     p_wizard.add_argument("--secrets-dir", default="",
                           help="시크릿 **파일**을 쓸 호스트 디렉토리"
                                "(기본 <project-dir>/secrets — compose 가 그 자리를 "
@@ -455,14 +439,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_render.add_argument("answers", nargs="?", default="-",
                           help="답변 JSON 파일 경로(생략하거나 '-' 이면 표준 입력)")
     _add_autofill_args(p_render)
-    p_render.add_argument("--env-file", default=setup_autofill.DEFAULT_ENV_FILE,
-                          help=f"worker 공유 시크릿을 둘 env 파일"
-                               f"(기본 {setup_autofill.DEFAULT_ENV_FILE} — compose 가 읽는다). "
-                               f"⚠️ 이미 값이 있으면 **덮어쓰지 않는다**(재생성하면 떠 있는 "
-                               f"워커가 전부 401)")
-    p_render.add_argument("--no-env-secret", action="store_true",
-                          help="worker 공유 시크릿 자동 생성을 하지 않는다"
-                               "(직접 관리하는 경우)")
     p_render.add_argument("-o", "--out", default=setup_render.DEFAULT_OUTPUT_PATH,
                           help=f"산출 경로(기본 {setup_render.DEFAULT_OUTPUT_PATH})")
     p_render.add_argument("--template", default=setup_render.DEFAULT_TEMPLATE_PATH,

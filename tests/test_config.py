@@ -75,8 +75,6 @@ admission: { min_free_mem_mb: 2048, per_job_mem_reserve_mb: 1536, max_load_per_c
 
 def test_env_overrides(tmp_path, monkeypatch):
     monkeypatch.setenv("SECRETS_DIR", "/run/secrets")
-    monkeypatch.setenv("WORKER_SHARED_SECRET", "s3cr3t")
-    monkeypatch.setenv("CENTRAL_URL", "http://central:9999")
     monkeypatch.setenv("ROLE", "central")
     cfg = C.load_config(_write(tmp_path, """
 role: worker
@@ -84,9 +82,31 @@ jira: { base_url: https://x, project: PROJ, watcher_token_file: t }
 secrets: { base_dir: "${SECRETS_DIR}" }
 """))
     assert cfg.role == "central"          # env ROLE 우선
-    assert cfg.worker_shared_secret == "s3cr3t"
-    assert cfg.spawn.central_url == "http://central:9999"
     assert cfg.secrets.base_dir == "/run/secrets"
+
+
+def test_retired_worker_polling_knobs_are_ignored_without_breaking_boot(tmp_path,
+                                                                       monkeypatch):
+    """은퇴한 노브(spawn.central_url · worker_shared_secret)가 남아 있어도 부팅은 깨지지 않는다.
+
+    둘 다 워커가 중앙의 dispatch HTTP 를 폴링하던 시절의 값이다(폴링 대상 주소 ·
+    ``X-Worker-Secret`` 공유 시크릿). 그 서빙 표면과 폴링 소비자가 프랙탈 seam 으로
+    대체되며 읽는 곳이 사라졌으므로 **조용히 무시**한다 — 값이 아무 동작도 바꾸지
+    않아 왜곡할 사용자 의도가 없다(동작이 달라지는 fractal_central 은퇴와는 다르다).
+    """
+    monkeypatch.setenv("SECRETS_DIR", "/run/secrets")
+    monkeypatch.setenv("WORKER_SHARED_SECRET", "s3cr3t")
+    monkeypatch.setenv("CENTRAL_URL", "http://central:9999")
+    cfg = C.load_config(_write(tmp_path, """
+role: central
+jira: { base_url: https://x, project: PROJ, watcher_token_file: t }
+secrets: { base_dir: "${SECRETS_DIR}" }
+worker_shared_secret: leftover-value
+spawn: { image: jira-auto-dispatcher:latest, central_url: http://central:8787 }
+"""))
+    assert cfg.spawn.image == "jira-auto-dispatcher:latest"   # 같은 섹션의 현역 키는 그대로
+    assert not hasattr(cfg, "worker_shared_secret")
+    assert not hasattr(cfg.spawn, "central_url")
 
 
 def test_tier2_pilot_user_defaults_off(tmp_path, monkeypatch):

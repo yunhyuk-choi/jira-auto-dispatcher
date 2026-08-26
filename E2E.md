@@ -30,7 +30,7 @@
 ### 0.1 사전 조건
 
 - INSTALL.md(또는 온프렘이면 DEPLOY.md 1~5단계) 완료 — 이미지 빌드 → `config.yaml` →
-  시크릿(`service/jira-token`, `.env` 의 `WORKER_SHARED_SECRET`) → `docker compose up -d`.
+  시크릿(`service/jira-token`, `.env` 의 `CLAUDE_CODE_OAUTH_TOKEN`) → `docker compose up -d`.
 - 서버 SSH 접근(`<deploy-user>@<서버>`). 로컬(갈래 A)이면 SSH 없이 그냥 로컬 셸이다.
 - 관리 UI는 **신뢰 네트워크 한정**이므로 SSH 터널로 연다:
 
@@ -462,7 +462,7 @@ grep MemAvailable /proc/meminfo ; cat /proc/loadavg ; nproc
 | 서버 자원 | `grep MemAvailable /proc/meminfo` · `cat /proc/loadavg` | 어드미션 입력(호스트 메모리·부하) |
 | central admit | `GET /api/jobs` | 자원 여유 시 다른-레포 잡 다수 동시 `running`(사용자 무관) |
 | central queue | central 로그 | 압박 시 `queue: mem pressure` / `queue: load pressure` |
-| worker fetch | `GET /dispatch/Y/next?exclude=<처리중 티켓>` | 처리 중 잡을 뺀 **다른** running 잡 반환 |
+| worker 주입 | `docker logs jad-central | grep -i "docker exec"` | 처리 중 잡과 **다른** 잡이 같은 워커로 추가 주입 |
 | 동시 실행 | `docker logs jad-worker-Y` | 여러 잡의 `진행중`이 겹쳐서 관측 |
 | 예약 회수 | 한 잡 `완료` 후 | 대기분이 다음 tick에 `running`으로 |
 
@@ -620,7 +620,5 @@ ssh <deploy-user>@<서버> 'docker ps --filter name=jad-worker-'
 | 루프 | 기본 주기 | 출처 |
 |---|---|---|
 | Jira 폴러/상태 워처 | 60s | `config.jira.poll_interval_sec` |
-| worker 잡 폴링 | 5s | `WORKER_POLL_INTERVAL_SEC` |
-| worker 취소 제어 폴링 | 3s | `WORKER_CONTROL_POLL_SEC` |
 | 스케줄러 tick(재개 재적격) | 30s | `start_central_background(tick_interval_sec)` |
 | 재개 버퍼 | 120s | `config.resume.reset_buffer_sec` |

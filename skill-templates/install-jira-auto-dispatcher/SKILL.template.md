@@ -81,7 +81,6 @@ python --version && docker compose version && ls config/config.example.yaml
 - `run.dlc_meta_repo_url` — 로컬 dlc-meta 클론의 `origin` 에서 읽는다.
   `--dlc-meta <경로>` 로 주거나 생략하면 흔한 위치를 탐색한다.
 - `deploy.docker_host` · `deploy.workspace_volume` — `deploy.profile` 에서 파생된다.
-- `WORKER_SHARED_SECRET` — `render` 가 `.env` 에 만든다(멱등). 사람이 정할 값이 아니다.
 
 독립적이고 무관한 질문을 한꺼번에 던지지 마라. 2~3개씩 맥락으로 묶어라.
 

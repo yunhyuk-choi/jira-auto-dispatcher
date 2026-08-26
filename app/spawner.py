@@ -17,8 +17,6 @@
     env:
         ROLE=worker
         DISPATCH_USER=<username>
-        CENTRAL_URL=<spawn.central_url>          # 예: http://central:8787
-        WORKER_SHARED_SECRET=<주입>              # (은퇴) 옛 worker→central HTTP 인증
         CLAUDE_CODE_OAUTH_TOKEN=<주입>            # setup-token(값은 시크릿 참조에서)
         SECRETS_DIR=/run/secrets                  # 컨테이너 내부 시크릿 루트(tmpfs)
         JIRA_TOKEN_FILE / FORGE_TOKEN_FILE        # per-user 토큰 "파일경로"(값 아님)
@@ -210,7 +208,7 @@ class Spawner:
         """의존성 주입(설정·레지스트리) + (선택) docker 클라이언트.
 
         Args:
-            config: AppConfig(또는 유사 객체). spawn/secrets/worker_shared_secret 참조.
+            config: AppConfig(또는 유사 객체). spawn/secrets 참조.
             registry: 컨테이너 상태 갱신용(없으면 상태 갱신 no-op).
             client: docker.DockerClient(테스트 mock). None이면 최초 사용 시 지연 생성.
         """
@@ -386,9 +384,8 @@ class Spawner:
         옛 이름을 읽는 것들(기존 에이전트 지시문·사용자 스크립트·이전 이미지)이 그대로
         동작해야 하기 때문이다 — 옛 이름 제거는 별도 사이클의 몫이다.
 
-        시크릿 값(CLAUDE_CODE_OAUTH_TOKEN·WORKER_SHARED_SECRET)은 read_secret/config로만
-        읽고, Jira/forge 토큰은 값이 아니라 **참조**(상대 ref)와 **파일경로**(마운트
-        경로) 포인터로만 넘긴다. 이 dict는 절대 로깅하지 않는다(identity 이름·이메일은
+        시크릿 값(CLAUDE_CODE_OAUTH_TOKEN)은 read_secret/config로만 읽고, Jira/forge
+        토큰은 값이 아니라 **참조**(상대 ref)와 **파일경로**(마운트 경로) 포인터로만 넘긴다. 이 dict는 절대 로깅하지 않는다(identity 이름·이메일은
         시크릿 값이 아니라 로깅해도 무해하나, dict 통째 로깅은 여전히 금지).
         """
         cfg = self.config
@@ -396,7 +393,6 @@ class Spawner:
         env: dict = {
             "ROLE": "worker",
             "DISPATCH_USER": user.username,
-            "CENTRAL_URL": cfg.spawn.central_url,
             "SECRETS_DIR": SECRETS_MOUNT,
         }
 
@@ -413,9 +409,11 @@ class Spawner:
         if wc > 0:
             env["WORKER_CONCURRENCY"] = str(wc)
 
-        # dispatch HTTP 인증 공유 시크릿(값). 미설정이면 생략(신뢰 네트워크 전제).
-        if getattr(cfg, "worker_shared_secret", ""):
-            env["WORKER_SHARED_SECRET"] = cfg.worker_shared_secret
+        # ⚠️ ``CENTRAL_URL`` · ``WORKER_SHARED_SECRET`` 은 **더 이상 주입하지 않는다.**
+        # 워커가 중앙을 폴링하던 시절의 값이었고(폴링 대상 주소 · ``X-Worker-Secret``
+        # 공유 시크릿), 그 서빙 표면과 폴링 소비자가 프랙탈 seam(중앙 → docker exec
+        # 푸시)으로 대체되며 컨테이너 안에 읽는 곳이 하나도 남지 않았다. 쓰이지 않는
+        # 시크릿을 컨테이너 스펙에 실어 두는 것은 노출 표면만 늘린다(docker inspect).
 
         # git author 정체성(값이지만 시크릿 아님 — from_env DISPATCH_GIT_*).
         identity = getattr(user, "identity", None)

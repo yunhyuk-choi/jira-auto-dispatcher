@@ -3,12 +3,11 @@
 # 하나의 이미지를 두 역할로 재사용한다. ENTRYPOINT는 `python -m app.main` 이며,
 # 앱이 env ROLE(central|worker)을 읽어 분기한다(app/main.py).
 #   central: 관리 UI + Jira 감시/디스패치 + worker 컨테이너 spawn(Docker SDK)
-#   worker : 중앙 HTTP 폴링 → `claude -p` 자율 실행 → 상태 회신
+#   worker : 상주(/healthz)만 하고, 중앙이 `docker exec` 로 밀어 넣는 `claude -p` 를 실행
 #
 # 계약 정합(반드시 유지):
 #   image   = jira-auto-dispatcher:latest  (config.spawn.image / compose image)
 #   network = jad-net                       (config.spawn.network / compose networks)
-#   central = http://central:8787           (config.spawn.central_url / compose 서비스명)
 #   claude  = /home/app/.claude             (spawner CLAUDE_CONFIG_DIR = $HOME/.claude)
 #   claude bin은 비-root 유저(uid 1000) PATH에 있어야 한다(run.claude_bin=claude).
 #

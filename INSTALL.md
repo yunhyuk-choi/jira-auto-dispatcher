@@ -52,7 +52,6 @@
 | **dlc-meta 레포 원격 URL** | 당신이 만든 레포(비어 있어도 된다). ⚠️ **손으로 적지 않는다** — 설치 관문이 그 클론의 `origin` 에서 읽어 채운다(§2.5) | `run.dlc_meta_repo_url` |
 | **오케스트레이터 프레임워크 레포 URL** | 공개 프레임워크 | `run.orchestrator_repo_url` |
 | **설계 문서 레포 URL** *(선택)* | 없으면 비운다 → 조용히 skip | `run.docs_repo_url` |
-| **worker 공유 시크릿** | ⚠️ **직접 만들지 않는다** — `python -m app.setup render` 가 없으면 생성한다(§2.5). 직접 하려면 `openssl rand -hex 32` | `.env` 의 `WORKER_SHARED_SECRET` |
 | **사용자별 `claude setup-token`** | 각 사용자가 자기 PC 에서 `claude setup-token`(Max 구독) | **관리 UI 온보딩 폼**(설치 시점 아님) |
 | **사용자별 Jira accountId·토큰·forge 토큰** | 각 사용자 | **관리 UI 온보딩 폼** |
 
@@ -201,7 +200,7 @@ run:
 |---|---|---|
 | `discover` | **이 Jira 인스턴스에 실제로 있는 값**을 조회(커스텀필드 후보·프로젝트 상태·전이 id/name·라벨·`accountId`). 설정에 적힌 id·상태 이름이 **이 인스턴스에 실재하는지**까지 검증한다 | `config.yaml`(base_url·watcher_email·토큰만 있으면 됨) → 후보 목록 + 붙여넣을 `jira:` 블록 / `--json` |
 | `validate` | 수집한 답변을 `app/setup_schema.py` 선언에 대고 검증(누락·조건부 필수·허용값·타입·시크릿 값 혼입을 **전부 모아서** 보고) | 답변 JSON(파일 또는 stdin) → 사람용 출력 / `--json` |
-| `render` | 검증을 통과한 답변으로 `config.yaml` 생성. **`config/config.example.yaml` 을 템플릿으로 써서 주석(=이 안내)을 그대로 물려준다.** 덤으로 `.env` 의 `WORKER_SHARED_SECRET` 을 **없으면** 만든다(멱등 — 있으면 손대지 않는다) | 답변 JSON → `config/config.yaml`(`-o` 로 변경, 기존 파일은 `--force` + 자동 `.bak-*` 백업) + `.env` |
+| `render` | 검증을 통과한 답변으로 `config.yaml` 생성. **`config/config.example.yaml` 을 템플릿으로 써서 주석(=이 안내)을 그대로 물려준다.** | 답변 JSON → `config/config.yaml`(`-o` 로 변경, 기존 파일은 `--force` + 자동 `.bak-*` 백업) |
 | `doctor` | 그 설정으로 **실제로 붙는지** 실측: Jira 자격·JQL 경로, forge 토큰 권한, dlc-meta 원격 도달성, docker 접속, 알림 웹훅 참조 | `config/config.yaml` → 검사별 PASS/FAIL/WARN/SKIP + 고치는 법 |
 | `skill` | (선택 · 게이트 아님) 리포가 추적하는 스킬 템플릿을 **내 로컬** `.claude/skills/` 로 펼친다 — `claude` 를 쓸 때만 의미 있다([§2.7](#27-선택-프로젝트-스킬--python--m-appsetup-skill)) | `skill-templates/` → `.claude/skills/<이름>/SKILL.md`(멱등, 덮어쓰기는 `--force`) |
 
@@ -223,20 +222,22 @@ JSON
 # ↑ run.dlc_meta_repo_url 이 없다 — 아래 --dlc-meta 가 채운다(사람이 적을 값이 아니다).
 
 python -m app.setup validate answers.json --dlc-meta ../dlc-meta   # 통과 못 하면 non-zero
-python -m app.setup render   answers.json --dlc-meta ../dlc-meta   # → config/config.yaml + .env
+python -m app.setup render   answers.json --dlc-meta ../dlc-meta   # → config/config.yaml
 python -m app.setup discover                       # 인스턴스 조회(아래 참조)
 python -m app.setup doctor                         # 실측 진단
 ```
 
-#### 자동으로 채워지는 두 값 — 묻지 않는다
+#### 자동으로 채워지는 값 — 묻지 않는다
 
 | 값 | 어디서 오나 | 어디로 가나 |
 |---|---|---|
 | `run.dlc_meta_repo_url` | dlc-meta 클론의 `git remote get-url origin`. `--dlc-meta <경로>` 로 주거나 생략하면 흔한 위치(배포 디렉토리·그 상위·cwd·홈의 `dlc-meta`)를 탐색한다. env `DLC_META_DIR` 도 본다 | `config.yaml` (+ 호스트가 GitHub/GitLab 임을 스스로 밝히면 `forge.kind` 도 함께) |
-| `WORKER_SHARED_SECRET` | `secrets.token_hex(32)` — 사람이 정할 이유가 없는 랜덤값 | **`.env`**(`config.yaml` 이 아니다 — 이 리포는 설정에 값이 아니라 참조만 둔다). `--env-file` 로 경로 변경, `--no-env-secret` 으로 끔 |
 
-- ⚠️ **공유 시크릿은 이미 있으면 덮어쓰지 않는다.** 재생성하면 떠 있는 워커가 전부
-  `X-Worker-Secret` 401 로 죽는다. 값은 로그·표준출력·`--json` 어디에도 실리지 않는다.
+> ⚠️ 예전에는 `render` 가 `.env` 에 `WORKER_SHARED_SECRET` 도 만들었다. **은퇴했다** —
+> 그 값은 워커가 중앙의 dispatch HTTP 를 부를 때 쓰는 `X-Worker-Secret` 인증용이었는데,
+> 그 경로가 프랙탈 seam(중앙 → `docker exec` 푸시)으로 대체되며 읽는 곳이 사라졌다.
+> 옛 `.env` 에 값이 남아 있어도 무시되므로 지워도 되고 그냥 둬도 된다.
+
 - 원격 URL 에 토큰이 박혀 있으면(`https://oauth2:glpat-…@…`) **자격정보를 떼고** 적는다.
   SSH 원격(`git@host:…`)은 https 로 바꿔 적고 그 사실을 알린다 — central 은 SSH 키가 아니라
   forge 토큰을 http(s) URL 에 실어 인증한다.
@@ -394,11 +395,9 @@ printf '%s' '<JIRA_API_TOKEN>'  > secrets/service/jira-token
 printf '%s' '<FORGE_PAT>'       > secrets/service/forge-token
 chmod -R go-rwx secrets && find secrets -type f -exec chmod 600 {} \;
 
-# (3) worker 공유 시크릿(dispatch HTTP 인증) + central 자기 claude 토큰
+# (3) central 자기 claude 토큰 — .env 가 담는 값은 이것 하나뿐이다.
 #     ⚠️ HOST_DEPLOY_DIR 은 더 이상 필요 없다 — 워커 마운트가 전부 named 볼륨이다(§2.2).
-# WORKER_SHARED_SECRET 은 `python -m app.setup render`(§2.5)가 이미 넣었다(멱등).
-# 그 명령을 쓰지 않았다면:
-#   printf 'WORKER_SHARED_SECRET=%s\n' "$(openssl rand -hex 32)" >> .env
+#     ⚠️ WORKER_SHARED_SECRET 도 더 이상 필요 없다(은퇴 — §2.5). 옛 .env 에 남아 있어도 무시된다.
 printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' '<claude setup-token 값>' >> .env
 chmod 600 .env
 
@@ -462,9 +461,7 @@ git clone <이 저장소> ~/jira-auto-dispatcher && cd ~/jira-auto-dispatcher
 cp config/config.example.yaml config/config.yaml   # → §2 대로 채운다
 
 # ⚠️ 호스트 절대경로를 적을 항목은 없다(§2.2).
-# WORKER_SHARED_SECRET 은 `python -m app.setup render`(§2.5)가 이미 넣었다(멱등).
-# 그 명령을 쓰지 않았다면:
-#   printf 'WORKER_SHARED_SECRET=%s\n' "$(openssl rand -hex 32)" >> .env
+# ⚠️ WORKER_SHARED_SECRET 은 은퇴했다(§2.5) — .env 가 담는 값은 아래 하나뿐이다.
 printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' '<claude setup-token 값>' >> .env
 chmod 600 .env
 

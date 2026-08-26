@@ -101,7 +101,7 @@ consent:
 worker 는 config·per-user 시크릿·알림 웹훅을 **컨테이너 스펙(env)** 으로 받는다. 즉 그
 값들은 `docker inspect jad-worker-<user>` 로 보인다. 이 트레이드오프를 감수한 이유:
 
-- **이미 같은 수준이다.** `CLAUDE_CODE_OAUTH_TOKEN`·`WORKER_SHARED_SECRET` 은 전부터 env 로
+- **이미 같은 수준이다.** `CLAUDE_CODE_OAUTH_TOKEN` 은 전부터 env 로
   전달됐고, 워커 안에서는 `claude` 프로세스 env 에 사용자 forge 토큰이 주입된다(설계상
   push/PR 을 하려면 필요하다 — `app/agent_runner.py`).
 - **공격자 비용이 달라지지 않는다.** docker API 에 닿을 수 있는 주체는 이미 호스트 root

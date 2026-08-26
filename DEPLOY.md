@@ -107,13 +107,13 @@ deploy:
 spawn:
   image: jira-auto-dispatcher:latest
   network: jad-net
-  central_url: http://central:8787
   run_as: "1000:1000"
 ```
 
 > 레거시 키(`spawn.docker_host`·`spawn.workspace_volume`·`secrets.base_dir`)도 계속 읽으므로
 > 기존 `config.yaml` 은 그대로 둬도 동작한다. 제거된 `host_deploy_dir`(과 env
-> `HOST_DEPLOY_DIR`)이 남아 있어도 **무시**된다 — 지우지 않아도 무해하다.
+> `HOST_DEPLOY_DIR`)·`spawn.central_url`(과 env `CENTRAL_URL`)이 남아 있어도 **무시**된다
+> — 지우지 않아도 무해하다.
 
 `config/config.yaml`은 compose가 `/app/config:ro` 로 마운트한다(gitignore·이미지 미포함).
 
@@ -154,22 +154,11 @@ chmod -R go-rwx secrets
 find secrets -type f -exec chmod 600 {} \;
 ```
 
-- **worker 공유시크릿**(`WORKER_SHARED_SECRET`)은 파일이 아니라 **env**로 주입한다.
-  ⚠️ **직접 만들지 않는 것이 기본이다** — `python -m app.setup render`(INSTALL.md §2.5)가
-  `.env`에 없으면 만들고(0600), **이미 있으면 손대지 않는다**(멱등).
-  ⚠️ 이 값이 인증하던 worker→central HTTP 디스패치 프로토콜은 **은퇴했다**(워커가 더
-  이상 중앙을 폴링하지 않는다 — `docker exec` 주입). 값은 설치 흐름 호환을 위해 남아
-  있을 뿐 현재 아무것도 인증하지 않으므로, 바꾸든 두든 실행에 영향이 없다.
-  그 명령을 쓰지 않는 배포라면 손으로:
-
-  ```bash
-  # /opt/jira-auto-dispatcher/.env  (compose가 자동 로드; 0600 권장)
-  echo "WORKER_SHARED_SECRET=$(openssl rand -hex 32)" >> .env   # ⚠️ >> (기존 .env 보존)
-  chmod 600 .env
-  ```
-
-  값이 있는지는 `python -m app.setup doctor --only worker_secret` 이 확인한다(값은 출력하지
-  않는다). 없으면 dispatch 엔드포인트가 **무인증으로 열린다**는 경고가 뜬다.
+- ⚠️ **worker 공유시크릿(`WORKER_SHARED_SECRET`)은 은퇴했다** — 만들지 않는다.
+  이 값이 인증하던 worker→central HTTP 디스패치 프로토콜(`X-Worker-Secret`)이 프랙탈
+  seam(중앙 → `docker exec` 푸시)으로 대체되며 사라졌고, 지금은 **아무것도 인증하지
+  않는다**. 설치 관문(`render`)도 더 이상 만들지 않고, `doctor` 도 더 이상 검사하지
+  않는다. 기존 배포의 `.env` 에 남아 있어도 무시되므로 지워도 되고 그냥 둬도 된다.
 
 - **per-user 시크릿**(각자 Jira/forge 토큰·claude setup-token)은 여기서 손으로 만들지
   않는다 — **온보딩(5단계)**에서 관리 UI가 `secrets/<username>/` 하위에 0600으로 기록한다.

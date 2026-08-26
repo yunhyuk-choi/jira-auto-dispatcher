@@ -36,17 +36,13 @@ NO_CONSENT = {**GOOD_ANSWERS, "consent": {"full_permissions": False}}
 @pytest.fixture(autouse=True)
 def _no_ambient_env(monkeypatch):
     for name in ("HOST_DEPLOY_DIR", "SECRETS_DIR", "JIRA_WATCHER_EMAIL",
-                 "DLC_META_DIR", "WORKER_SHARED_SECRET"):
+                 "DLC_META_DIR"):
         monkeypatch.delenv(name, raising=False)
 
 
 def _render_args(tmp_path) -> list:
-    """render 의 부수효과를 tmp 안에 가둔다.
-
-    ⚠️ ``render`` 는 worker 공유 시크릿을 ``.env`` 에 만든다(app/setup_autofill.py). 기본값은
-    **cwd 의 .env** 라, 격리하지 않으면 테스트가 이 레포의 실제 .env 를 건드린다.
-    """
-    return ["--env-file", str(tmp_path / ".env"), "--project-dir", str(tmp_path)]
+    """render 의 부수효과(dlc-meta 자동 탐색 기준점)를 tmp 안에 가둔다."""
+    return ["--project-dir", str(tmp_path)]
 
 
 def _write_json(tmp_path, name, payload) -> str:
@@ -250,7 +246,7 @@ def test_doctor_reports_failures_with_exit_one(tmp_path, capsys):
         "https://gitlab.example.com/<your-group>/dlc-meta.git")
     open(path, "w", encoding="utf-8", newline="").write(text)
     code = CLI.main(["doctor", "--config", path, "--project-dir", str(tmp_path),
-                     "--only", "config,worker_secret"])
+                     "--only", "config,secrets"])
     assert code == CLI.EXIT_GATE_FAILED
     out = capsys.readouterr().out
     assert "[FAIL] config" in out          # dlc_meta_repo_url 자리표시자가 되살아났다
@@ -259,9 +255,9 @@ def test_doctor_reports_failures_with_exit_one(tmp_path, capsys):
 def test_doctor_json_output(tmp_path, capsys):
     path = _rendered_config(tmp_path, capsys)
     CLI.main(["doctor", "--config", path, "--project-dir", str(tmp_path),
-              "--only", "worker_secret", "--json"])
+              "--only", "secrets", "--json"])
     payload = json.loads(capsys.readouterr().out)
-    assert payload["checks"][0]["name"] == "worker_secret"
+    assert payload["checks"][0]["name"] == "secrets"
     assert set(payload["counts"]) == {"pass", "fail", "warn", "skip"}
 
 
@@ -471,41 +467,31 @@ def test_no_autofill_flag_turns_the_injection_off(tmp_path, capsys, monkeypatch)
     assert code == CLI.EXIT_GATE_FAILED           # 채우지 않았으니 필수 누락으로 막힌다
 
 
-def test_render_creates_the_worker_shared_secret_without_printing_it(tmp_path, capsys):
-    from app import setup_autofill as A
+def test_render_no_longer_creates_a_worker_shared_secret(tmp_path, capsys):
+    """설치 관문은 **아무것도 인증하지 않는 시크릿**을 더 이상 만들지 않는다.
 
-    env_file = tmp_path / ".env"
+    옛 ``WORKER_SHARED_SECRET`` 은 워커가 중앙의 dispatch HTTP 를 부를 때 쓰는
+    ``X-Worker-Secret`` 값이었다. 그 서빙 표면과 폴링 소비자가 프랙탈 seam(중앙 →
+    docker exec 푸시)으로 대체되며 읽는 곳이 사라졌으므로, 설치자가 **왜 만드는지 모르는
+    값**을 만들게 하지 않는다. ``.env`` 자체는 여전히 쓰인다(CLAUDE_CODE_OAUTH_TOKEN) —
+    다만 이 명령이 거기에 쓰지 않는다.
+    """
     out = str(tmp_path / "config.yaml")
-    assert CLI.main(["render", _write_json(tmp_path, "a.json", GOOD_ANSWERS), "-o", out]
-                    + _render_args(tmp_path)) == 0
+    assert CLI.main(["render", _write_json(tmp_path, "a.json", GOOD_ANSWERS), "-o", out,
+                     "--json"] + _render_args(tmp_path)) == 0
     captured = capsys.readouterr()
-    assert "worker 공유 시크릿" in captured.out
-
-    body = env_file.read_text(encoding="utf-8")
-    value = body.split("WORKER_SHARED_SECRET=", 1)[1].strip()
-    assert len(value) == A.SECRET_BYTES * 2
-    # ⚠️ 값이 표준출력·표준에러 어디에도 실리지 않는다.
-    assert value not in captured.out and value not in captured.err
-
-    # 두 번째 render 는 같은 값을 유지한다(멱등 — 재생성하면 워커가 전부 401).
-    CLI.main(["render", _write_json(tmp_path, "a.json", GOOD_ANSWERS), "-o", out,
-              "--force"] + _render_args(tmp_path))
-    assert env_file.read_text(encoding="utf-8") == body
-
-
-def test_render_json_summary_carries_autofill_and_secret_status(tmp_path, capsys):
-    out = str(tmp_path / "config.yaml")
-    CLI.main(["render", _write_json(tmp_path, "a.json", GOOD_ANSWERS), "-o", out,
-              "--json"] + _render_args(tmp_path))
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["worker_secret"]["status"] == "generated"
-    assert "value" not in payload["worker_secret"]         # 값은 담지 않는다
+    assert "WORKER_SHARED_SECRET" not in captured.out + captured.err
+    assert not os.path.exists(str(tmp_path / ".env"))
+    payload = json.loads(captured.out)
+    assert "worker_secret" not in payload
     assert payload["autofill"]["filled"] == []             # 답변에 이미 있었다
 
 
-def test_render_stdout_does_not_create_the_env_secret(tmp_path, capsys):
-    """``--stdout`` 은 '파일을 건드리지 않는다'는 약속이다."""
+def test_retired_env_secret_flags_are_gone(tmp_path):
+    """``--env-file``·``--no-env-secret`` 은 공유 시크릿 전용이었다 — 함께 은퇴했다."""
     out = str(tmp_path / "config.yaml")
-    CLI.main(["render", _write_json(tmp_path, "a.json", GOOD_ANSWERS), "-o", out,
-              "--stdout"] + _render_args(tmp_path))
-    assert not os.path.exists(str(tmp_path / ".env"))
+    answers = _write_json(tmp_path, "a.json", GOOD_ANSWERS)
+    for flag in (["--env-file", str(tmp_path / ".env")], ["--no-env-secret"]):
+        with pytest.raises(SystemExit) as exc:
+            CLI.main(["render", answers, "-o", out] + flag + _render_args(tmp_path))
+        assert exc.value.code == 2                          # argparse: 모르는 인자

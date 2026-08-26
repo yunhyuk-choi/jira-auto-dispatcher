@@ -25,13 +25,11 @@ def _cfg(base_dir: str):
         spawn=SimpleNamespace(
             image="jira-auto-dispatcher:latest",
             network="jad-net",
-            central_url="http://central:8787",
             mem_limit="4g",
             docker_host="unix:///var/run/docker.sock",
             run_as="1000:1000",
         ),
         secrets=SimpleNamespace(base_dir=base_dir),
-        worker_shared_secret="s3cr3t",
     )
 
 

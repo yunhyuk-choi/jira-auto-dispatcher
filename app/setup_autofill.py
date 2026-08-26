@@ -4,38 +4,27 @@
     :mod:`app.setup_schema` 가 "무엇을 묻는가"를 선언하고 :mod:`app.setup_validate` 가
     "그 답이 맞는가"를 강제한다면, 이 모듈은 그 앞자리에서 **애초에 묻지 않아도 되는
     항목을 답으로 만들어** 준다. 설치자가 손으로 옮겨 적는 값은 그 자체가 오설정의
-    원천이고(이 리포에서 가장 자주 재발한 실패 모드), 특히 아래 둘은 사람이 정할 근거가
+    원천이고(이 리포에서 가장 자주 재발한 실패 모드), 아래 값은 사람이 정할 근거가
     전혀 없다:
 
-    1. ``run.dlc_meta_repo_url`` — 이 시스템의 설치는 ``ai-dlc-orchestrator`` 프레임워크의
-       SETTER 가 dlc-meta 레포를 만들어 원격에 push 한 **직후**에 이어진다. 즉 설치 시점에
-       그 클론이 이미 로컬에 있고, 원격 URL 은 ``git -C <클론> remote get-url origin``
-       한 줄이면 알 수 있다. 예전에는 이 값을 채우지 않으면 예시 파일의
-       ``https://gitlab.example.com/<your-group>/dlc-meta.git`` 이 **그대로 남았다** —
-       비어 있는 것도 아니라 형식상 유효해 보여 눈으로 넘어간다.
-    2. ``WORKER_SHARED_SECRET`` — central↔worker HTTP 인증의 공유 시크릿. 사람이 고를
-       이유가 없는 **랜덤값**이다(``secrets.token_hex``).
+    - ``run.dlc_meta_repo_url`` — 이 시스템의 설치는 ``ai-dlc-orchestrator`` 프레임워크의
+      SETTER 가 dlc-meta 레포를 만들어 원격에 push 한 **직후**에 이어진다. 즉 설치 시점에
+      그 클론이 이미 로컬에 있고, 원격 URL 은 ``git -C <클론> remote get-url origin``
+      한 줄이면 알 수 있다. 예전에는 이 값을 채우지 않으면 예시 파일의
+      ``https://gitlab.example.com/<your-group>/dlc-meta.git`` 이 **그대로 남았다** —
+      비어 있는 것도 아니라 형식상 유효해 보여 눈으로 넘어간다.
 
-두 값의 성격이 다르고, 그래서 **가는 곳이 다르다**:
-    - dlc-meta URL 은 시크릿이 아니라 설정이다 → 답변에 채워 ``config.yaml`` 로 간다.
-    - 공유 시크릿은 **값**이다 → 이 리포의 규율("config 에는 값이 아니라 참조")대로
-      ``config.yaml`` 에 **절대 쓰지 않는다.** 지금 이 값이 실제로 흐르는 경로는
-      ``.env`` → compose ``environment.WORKER_SHARED_SECRET`` → :mod:`app.config` env
-      오버라이드 → :mod:`app.spawner` 가 워커에 재주입이므로, 그 경로의 시작점인
-      ``.env`` 에 쓴다.
+    이 값은 시크릿이 아니라 설정이다 → 답변에 채워 ``config.yaml`` 로 간다.
 
-멱등성(중요):
-    공유 시크릿은 **이미 있으면 절대 덮어쓰지 않는다.** 재생성하면 떠 있는 워커가 전부
-    ``X-Worker-Secret`` 401 로 죽는다. 그래서 판정은 "값이 있는가"이고, 있으면 아무 것도
-    하지 않는다(호스트 env 가 이미 갖고 있어도 마찬가지).
-
-시크릿 규율(절대 규칙):
-    생성한 시크릿 **값은 반환값·로그·표준출력·JSON 출력 어디에도 싣지 않는다.** 이 모듈이
-    돌려주는 것은 "만들었는가 / 어디에 있는가"뿐이다.
+⚠️ 예전에 여기 있던 ``WORKER_SHARED_SECRET`` 생성(``ensure_worker_shared_secret``)은
+    **없어졌다.** 그 값은 워커가 중앙의 dispatch HTTP 를 부르던 시절의
+    ``X-Worker-Secret`` 인증용이었는데, 그 서빙 표면과 폴링 소비자가 프랙탈 seam
+    (중앙 → ``docker exec`` 푸시)으로 대체되며 읽는 곳이 하나도 남지 않았다. 설치자가
+    **왜 만드는지 모르는 시크릿을 만들게 하지 않는다** — 그것이 이 모듈의 목적과 정반대다.
 
 의존성 주입:
-    git 호출(``runner``)·난수 생성기(``generator``)·환경(``env``)은 전부 주입 가능하다 —
-    CI(ubuntu, 네트워크 없음)에서 대역만으로 전 경로를 테스트한다.
+    git 호출(``runner``)·환경(``env``)은 전부 주입 가능하다 — CI(ubuntu, 네트워크 없음)
+    에서 대역만으로 전 경로를 테스트한다.
 
 POLICY-ENCODING: 이 파일과 이 모듈이 만드는 파일은 UTF-8(BOM 없음)·LF.
 """
@@ -44,7 +33,6 @@ from __future__ import annotations
 
 import os
 import re
-import secrets as _secrets
 import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional
@@ -59,15 +47,6 @@ DLC_META_DIRNAME = "dlc-meta"
 
 #: 명시 경로 대신 볼 수 있는 env(컨테이너/CI 배선용).
 DLC_META_ENV = "DLC_META_DIR"
-
-#: worker 공유 시크릿이 사는 env 이름(compose·spawner·config 가 공유하는 계약).
-WORKER_SECRET_ENV = "WORKER_SHARED_SECRET"
-
-#: 그 값을 담는 파일(compose 프로젝트 디렉토리 기준).
-DEFAULT_ENV_FILE = ".env"
-
-#: 생성 시 바이트 수(hex 로 그 2배 길이가 된다 — 32바이트 = 64자).
-SECRET_BYTES = 32
 
 #: ``<your-group>`` 같은 예시 자리표시자(:mod:`app.setup_validate` 와 같은 정의).
 _PLACEHOLDER = re.compile(r"<[^<>\s][^<>]*>")
@@ -140,30 +119,6 @@ class AutofillReport:
         for note in self.notes:
             lines.append(f"  ⚠️ {note}")
         return "\n".join(lines)
-
-
-@dataclass(frozen=True)
-class SecretOutcome:
-    """worker 공유 시크릿 확보 결과. ⚠️ **값은 담지 않는다.**
-
-    Attributes:
-        status: ``generated``(새로 만들어 파일에 씀) · ``kept_file``(파일에 이미 있음) ·
-            ``kept_env``(호스트 env 가 이미 갖고 있음) · ``failed``(쓸 수 없었음).
-        path: 값이 사는 파일 경로(``kept_env`` 면 "").
-        detail: 사람이 읽는 한 줄.
-    """
-
-    status: str
-    path: str = ""
-    detail: str = ""
-
-    @property
-    def ok(self) -> bool:
-        """이 배포에 공유 시크릿이 존재하는가."""
-        return self.status in ("generated", "kept_file", "kept_env")
-
-    def to_dict(self) -> dict:
-        return {"status": self.status, "path": self.path, "detail": self.detail}
 
 
 # ---------------------------------------------------------------------------
@@ -373,115 +328,3 @@ def autofill_answers(flat: Mapping, *, dlc_meta_path: Optional[str] = None,
                 "dlc-meta URL 의 호스트에서 판정"))
 
     return report
-
-
-# ---------------------------------------------------------------------------
-# worker 공유 시크릿(.env)
-# ---------------------------------------------------------------------------
-
-
-def _parse_env_file(path: str) -> tuple:
-    """``.env`` 를 줄 목록으로 읽고 대상 키의 줄 인덱스·값을 찾는다.
-
-    Returns:
-        ``(줄 목록, 대상 줄 인덱스 또는 None, 그 줄의 값)``. 파일이 없으면 ``([], None, "")``.
-    """
-    if not os.path.exists(path):
-        return [], None, ""
-    with open(path, "r", encoding="utf-8", errors="replace") as fh:
-        lines = fh.read().replace("\r\n", "\n").split("\n")
-    for idx, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("#") or "=" not in stripped:
-            continue
-        key, _, value = stripped.partition("=")
-        if key.strip() != WORKER_SECRET_ENV:
-            continue
-        value = value.strip().strip("'\"")
-        return lines, idx, value
-    return lines, None, ""
-
-
-def read_env_file_secret(path: str = DEFAULT_ENV_FILE) -> bool:
-    """그 ``.env`` 에 **비어 있지 않은** worker 공유 시크릿이 있는가.
-
-    ⚠️ 값을 돌려주지 않는다 — 존재 여부만 말한다(:mod:`app.setup_doctor` 가 이걸 쓴다).
-    """
-    _lines, idx, value = _parse_env_file(path)
-    return idx is not None and bool(value)
-
-
-def _write_env_file(path: str, lines: list) -> None:
-    """``.env`` 를 0600 으로 쓴다(UTF-8·LF — POLICY-ENCODING).
-
-    ⚠️ 시크릿 **값**이 들어 있는 파일이므로 권한을 조인다. 윈도우는 chmod 가 사실상
-    무시되지만(INSTALL §2.3) 실패로 보지 않는다.
-    """
-    parent = os.path.dirname(os.path.abspath(path))
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-
-    def _opener(p, flags):
-        return os.open(p, flags, 0o600)
-
-    body = "\n".join(lines)
-    if not body.endswith("\n"):
-        body += "\n"
-    with open(path, "w", encoding="utf-8", newline="", opener=_opener) as fh:
-        fh.write(body)
-    try:
-        os.chmod(path, 0o600)
-    except OSError:  # 윈도우 등 — 무해
-        pass
-
-
-def ensure_worker_shared_secret(env_path: str = DEFAULT_ENV_FILE, *,
-                                env: Optional[Mapping] = None,
-                                generator: Optional[Callable] = None) -> SecretOutcome:
-    """central↔worker 공유 시크릿을 **없을 때만** 만들어 ``.env`` 에 둔다(멱등).
-
-    판정 순서(있으면 아무 것도 하지 않는다 — 재생성하면 떠 있는 워커가 전부 401):
-        1. 호스트 env 에 이미 값이 있다 → ``kept_env``. compose 가 그 값을 그대로 넘긴다.
-        2. ``.env`` 에 비어 있지 않은 값이 있다 → ``kept_file``.
-        3. 없다 → ``secrets.token_hex`` 로 만들어 그 파일에 쓴다 → ``generated``.
-           (키는 있는데 값이 비어 있으면 **그 줄을 채운다** — 중복 줄을 만들지 않는다.)
-
-    Args:
-        env_path: ``.env`` 경로(compose 프로젝트 디렉토리 기준).
-        env: 환경 매핑(기본 ``os.environ``).
-        generator: 난수 hex 생성기 ``(bytes:int) -> str``(테스트 주입).
-
-    Returns:
-        :class:`SecretOutcome`. ⚠️ **값은 담기지 않는다.**
-    """
-    environ = os.environ if env is None else env
-    if str(environ.get(WORKER_SECRET_ENV, "") or "").strip():
-        return SecretOutcome("kept_env", "",
-                             f"호스트 env {WORKER_SECRET_ENV} 에 이미 값이 있어 "
-                             f"파일을 만들지 않았습니다.")
-
-    lines, idx, value = _parse_env_file(env_path)
-    if idx is not None and value:
-        return SecretOutcome("kept_file", env_path,
-                             f"{env_path} 에 이미 값이 있어 그대로 둡니다"
-                             f"(재생성하면 떠 있는 워커가 전부 401 이 됩니다).")
-
-    gen = generator if generator is not None else _secrets.token_hex
-    line = f"{WORKER_SECRET_ENV}={gen(SECRET_BYTES)}"
-    if idx is not None:
-        lines[idx] = line
-    else:
-        while lines and not lines[-1].strip():
-            lines.pop()
-        if lines:
-            lines.append("# central↔worker dispatch HTTP 인증 공유 시크릿(설치 관문이 생성)")
-        lines.append(line)
-    try:
-        _write_env_file(env_path, lines)
-    except OSError as exc:
-        return SecretOutcome("failed", env_path,
-                             f"{env_path} 에 쓸 수 없습니다({exc.strerror}) — "
-                             f"직접 만드세요: {WORKER_SECRET_ENV}=$(openssl rand -hex 32)")
-    return SecretOutcome("generated", env_path,
-                         f"{WORKER_SECRET_ENV} 를 새로 생성해 {env_path} 에 저장했습니다"
-                         f"(값은 출력하지 않습니다).")

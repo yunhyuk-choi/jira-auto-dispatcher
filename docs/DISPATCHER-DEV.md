@@ -91,6 +91,12 @@ worker가 잡 실행 직전 그 사용자 정체성을 주입한다(`app/agent_r
 > **은퇴**: `GET /dispatch/<user>/next` · `POST /dispatch/<user>/<job>/status` ·
 > `GET /dispatch/<user>/<job>/control` (그리고 `X-Worker-Secret` 인증)은 레거시 워커
 > 폴링 프로토콜이었고 이중 실행의 원인이라 제거됐다.
+>
+> 그 프로토콜의 설정 노브 두 개도 함께 은퇴했다 — **`WORKER_SHARED_SECRET`**(그
+> `X-Worker-Secret` 공유 시크릿)과 **`CENTRAL_URL` / `spawn.central_url`**(워커가 폴링할
+> 중앙 주소). 코드 어디에도 읽는 곳이 없고, 설치 관문(`render`·`wizard`)도 만들지 않으며
+> `doctor` 도 검사하지 않는다. 옛 `.env`·`config.yaml` 에 남아 있어도 조용히 무시된다
+> (`fractal_central` 처럼 동작이 달라지는 값이 아니라 단순 미사용 값이라 경고도 없다).
 
 ## 레지스트리 스키마 (state/registry.json)
 
