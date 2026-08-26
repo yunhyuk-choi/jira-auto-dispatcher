@@ -8,18 +8,18 @@
       Jira를 감시해 담당자를 등록 사용자에 매핑하고, 사용자별 worker에 잡을
       배포하며, 온보딩 시 worker 컨테이너를 동적으로 spawn한다.
     - **worker** (사용자별 동적 컨테이너): Flask UI 없이 최소 헬스 엔드포인트만
-      두고, worker 폴링 루프(CENTRAL_URL → 잡 → claude 실행 → 상태 회신)를
-      기동한다.
+      두고 상주한다. **실행은 센트럴 라이브 세션이 ``docker exec`` 로 밀어 넣는다**
+      (worker_dispatch.py) — 워커가 중앙을 폴링해 잡을 당겨오던 레거시 루프는
+      이중 실행(중복 변경요청)을 유발해 은퇴했다.
 
 구현 Phase:
     - ROLE 분기 골격 + 로그인/인덱스/헬스: **Phase 0**(지금).
     - central 컴포넌트 조립·관리 API·poller/scheduler 기동: Phase 1~5.
-    - worker 루프 기동(agent_runner): Phase 5.
     - 프로덕션 기동(gunicorn 등) + 컨테이너: Phase 6.
 
 실행:
     ROLE=central  python -m app.main      # 중앙(관리 UI + 감시/디스패치)
-    ROLE=worker   python -m app.main      # 사용자 worker(무 UI, 폴링 루프)
+    ROLE=worker   python -m app.main      # 사용자 worker(무 UI, docker exec 대상 상주)
 
 ⚠️ 보안: worker는 도구권한 자율 에이전트를 실행하는 RCE 표면이다.
     신뢰 네트워크 한정. 인터넷 노출 금지. 자세한 내용은 README/SECURITY.md.
@@ -119,26 +119,32 @@ def build_central_components(config_path: str = "config/config.yaml") -> dict:
     scheduler = Scheduler(cfg, job_queue, gate=gate, on_dispatch=_freshen_after_dispatch)
     # dlc-meta 단일 라이터(central 전용): 잡 완료 시 공유 클론의 사이클로그를 커밋·push.
     dlc_meta_writer = DlcMetaWriter(cfg)
-    dispatcher = Dispatcher(registry, scheduler, worker_secret=cfg.worker_shared_secret,
-                            dlc_meta_writer=dlc_meta_writer)
+    dispatcher = Dispatcher(registry, scheduler, dlc_meta_writer=dlc_meta_writer)
 
-    # 프랙탈 P2(센트럴 계층) 신경로 — run.fractal_central ON 일 때만 상주 센트럴 라이브
-    # 세션을 조립해 poller 에 주입한다(설계 §3.1·§9 P2). OFF(기본)면 central_session 은
-    # 아예 인스턴스화되지 않고 poller 는 dispatcher.enqueue 로 오늘과 byte-for-byte 동일
-    # 하게 방출한다(무동작변경). 세션 프로세스 자체는 첫 이벤트 주입 때 lazy 스폰된다.
+    # 프랙탈(센트럴 계층) 실행 경로 — 상주 센트럴 라이브 세션을 조립해 방출 seam 에
+    # 주입한다(설계 §3.1·§9 P2). 세션 프로세스 자체는 첫 이벤트 주입 때 lazy 스폰된다.
+    # ⚠️ 이것이 **유일 실행 경로**다. 지속(양방향 stream-json) 세션이 성립하지 않는
+    # 오설정 배포에서만 None 이 되고, 그 경우 방출은 건너뛰어진다(레거시 폴백 없음) —
+    # 부팅 자가진단이 그 상태를 드러낸다.
     central_session = None
     from app.central_session import CentralSession, central_fractal_enabled
 
     if central_fractal_enabled(cfg):
         central_session = CentralSession(cfg)
-        log.info("프랙탈 P2 센트럴 신경로 ON — 상주 CentralSession 조립(라이브 이벤트 주입 seam)")
+        log.info("프랙탈 센트럴 경로 — 상주 CentralSession 조립(라이브 이벤트 주입 seam)")
+    else:
+        log.error(
+            "⚠️ 프랙탈 센트럴 세션이 성립하지 않습니다(run.persistent_session / "
+            "stream-json 포맷 확인) — 티켓이 감지돼도 **실행되지 않습니다**. "
+            "레거시 워커 폴링 경로는 은퇴했습니다(이중 실행 근본 차단).")
 
     # job_queue 를 프랙탈 경로에 넘긴다(관측성 뼈대 A.1) — 프랙탈 잡을 같은 JobQueue store 에
     # queued 로 기록해 대시보드에 뜨게 한다(meta.fractal 표식 → 구 경로 스케줄러는 제외).
     poller = Poller(cfg, jira, gate, registry, dispatcher,
                     central_sink=central_session, job_queue=job_queue)
     # 상태 감시축(취소/외부완료/재오픈) — 전진축 폴러와 별개 루프(§10.2).
-    status_watcher = StatusWatcher(cfg, jira, gate, registry, dispatcher)
+    status_watcher = StatusWatcher(cfg, jira, gate, registry, dispatcher,
+                                   central_sink=central_session, job_queue=job_queue)
     # 스포너: docker 클라이언트는 지연 생성(최초 컨테이너 조작 시). 신뢰 네트워크 전제.
     spawner = Spawner(cfg, registry)
 
@@ -189,8 +195,9 @@ def build_central_components(config_path: str = "config/config.yaml") -> dict:
 def create_central_app(config_path: str = "config/config.yaml") -> Flask:
     """central Flask 앱을 조립해 반환한다(app factory).
 
-    설정 로드 → 컴포넌트 조립 → 로그인/인덱스/헬스 + 관리 API + dispatch_bp +
+    설정 로드 → 컴포넌트 조립 → 로그인/인덱스/헬스 + 관리 API +
     (enabled 시)webhook 배선. 백그라운드(poller/scheduler)는 start_central_background.
+    (레거시 worker-facing dispatch 블루프린트는 프랙탈 경로 전환으로 제거됐다.)
     """
     app = Flask(__name__, template_folder=_TEMPLATE_DIR, static_folder=_STATIC_DIR)
     app.register_blueprint(auth_bp)
@@ -207,10 +214,10 @@ def create_central_app(config_path: str = "config/config.yaml") -> Flask:
 
     comps = build_central_components(config_path)
 
-    from app.dispatch import DISPATCHER_KEY, dispatch_bp
-
-    app.config[DISPATCHER_KEY] = comps["dispatcher"]
-    app.register_blueprint(dispatch_bp)
+    # ⚠️ 레거시 worker-facing dispatch 서빙(GET /next·POST /status·GET /control)은
+    # 제거됐다(워커가 더 이상 폴링하지 않음 → 이중 실행 근본 차단). dispatcher 는
+    # 관측(/api/jobs list_jobs)·완료 상태머신(report_status)·Tier-2 pending 용으로만
+    # 남고, HTTP 블루프린트는 배선하지 않는다.
 
     # Jira 웹훅 수신(이벤트 구동) — 신규/담당자-변경 티켓을 폴링 주기를 기다리지 않고
     # 즉시 트리거한다. 폴러와 동일 게이트/매핑 수렴점(poller.trigger_ticket)을 재사용
@@ -293,10 +300,15 @@ def register_jira_webhook(app: Flask, poller, config) -> None:
 
 def _register_admin_api(app: Flask, comps: dict) -> None:
     """사용자/잡 현황 조회 관리 API 배선(온보딩·라이프사이클은 onboarding.py)."""
+    from app import central_dispatch
+
     registry = comps["registry"]
     dispatcher = comps["dispatcher"]
     scheduler = comps["scheduler"]
     doctor = comps.get("doctor")
+    config = comps["config"]
+    gate = comps["gate"]
+    job_queue = comps["queue"]
 
     @app.route("/api/doctor", methods=["GET"])
     def api_doctor():
@@ -348,11 +360,27 @@ def _register_admin_api(app: Flask, comps: dict) -> None:
     def api_rerun(ticket):
         # 종결(failed/interrupted/done/cancelled) 잡을 사람이 수동 재실행 —
         # queued로 리셋 후 재-dispatch(세션/중단 잔재 초기화).
-        try:
-            dispatched = scheduler.rerun(ticket)
-        except KeyError:
+        job = scheduler.jobs.get(ticket)
+        if job is None:
             return jsonify({"error": "unknown job", "job": ticket}), 404
-        return jsonify({"ok": True, "dispatched": dispatched})
+        central_session = comps.get("central_session")
+        # ⚠️ fractal-OFF 폴백 은퇴 완료: 레거시 구 경로 재실행(scheduler.rerun = reopen + tick)
+        # 은 제거됐다 — 그 잡을 집어 실행할 워커 폴링 소비자가 없다. 정상 폴링 티켓과 동일
+        # seam 으로 센트럴 세션에 주입한다. dedup 은 취소로 풀렸을 수 있어 재확보하고,
+        # 리셋~주입 윈도우 방지로 fractal 표식을 먼저 찍는다.
+        if central_dispatch.central_active(config, central_session):
+            gate.claim(ticket)
+            central_dispatch.mark_fractal(job_queue, ticket)
+            scheduler.jobs.reopen(job)
+            fresh = scheduler.jobs.get(ticket) or job
+            try:
+                central_dispatch.emit_to_central(config, central_session, job_queue, gate, fresh)
+            except central_dispatch.CentralInjectFailed:
+                # 주입 실패 — claim 은 seam 이 되돌렸다. 다음 재시도 가능하도록 503.
+                return jsonify({"error": "central inject failed, retry", "job": ticket}), 503
+            return jsonify({"ok": True, "dispatched": [ticket], "fractal": True})
+        # 센트럴 세션이 성립하지 않는 오설정 배포 — 레거시 실행 경로가 없으므로 거부한다.
+        return jsonify({"error": "fractal central inactive", "job": ticket}), 409
 
     @app.route("/scheduler/state", methods=["GET"])
     def scheduler_state():
@@ -366,7 +394,7 @@ def _register_admin_api(app: Flask, comps: dict) -> None:
 def start_central_background(tick_interval_sec: int = 30) -> None:
     """central 백그라운드 — poller 스레드 + 스케줄러 tick 루프(데몬).
 
-    - Poller.run_forever: Jira 폴링(전진축) → claim → 매핑 → enqueue.
+    - Poller.run_forever: Jira 폴링(전진축) → claim → 매핑 → 센트럴 세션 주입.
     - StatusWatcher.run_forever: 상태 감시축 → 취소/외부완료/재오픈(§10).
     - scheduler tick 루프: interrupted+reset_at 도래분을 주기적으로 재-dispatch
       (완료-구동 외의 시간 기반 재적격 반영).
@@ -387,13 +415,11 @@ def start_central_background(tick_interval_sec: int = 30) -> None:
     if doctor is not None:
         doctor.start()
 
-    # 프랙탈 P2 센트럴 신경로 게이트(worker 의 _fractal_enabled 게이트와 대칭) — ON 일 때만
-    # 상주 센트럴 세션 경로가 활성이다. 세션 프로세스는 첫 Jira 이벤트 주입 때 lazy 스폰되며
-    # (유휴=프로세스 없음, 설계 §4), 방출 seam(poller._emit)이 enqueue 대신 주입으로 라우팅
-    # 한다. 여기선 경로 활성만 로그로 남긴다(부팅을 막지 않는다). OFF면 이 블록은 no-op.
+    # 프랙탈 센트럴 경로 — 세션 프로세스는 첫 Jira 이벤트 주입 때 lazy 스폰된다
+    # (유휴=프로세스 없음, 설계 §4). 여기선 경로 활성만 로그로 남긴다(부팅을 막지 않는다).
     central_session = _components.get("central_session")
     if central_session is not None:
-        log.info("프랙탈 P2 센트럴 라이브 세션 경로 활성 — 이벤트 주입 대기(첫 이벤트에 lazy 스폰)")
+        log.info("프랙탈 센트럴 라이브 세션 경로 활성 — 이벤트 주입 대기(첫 이벤트에 lazy 스폰)")
 
     t_poll = threading.Thread(target=poller.run_forever, name="jad-poller", daemon=True)
     t_poll.start()
@@ -488,8 +514,10 @@ def reconcile_worker_images(components: Optional[dict] = None) -> Optional[dict]
 def create_worker_app() -> Flask:
     """worker 최소 Flask 앱(헬스 엔드포인트 전용, UI 없음).
 
-    TODO(Phase 5~6): 헬스만 노출. 실제 작업은 worker 루프 스레드가 담당.
-    (컨테이너 헬스체크/오케스트레이션 프로브용)
+    ⚠️ 이 앱이 워커 컨테이너의 **유일한 서빙 표면**이다 — Dockerfile HEALTHCHECK 가
+    ``/healthz`` 를 프로브하므로 이것이 없으면 컨테이너가 unhealthy 로 떨어지고 docker
+    exec 주입 대상에서 밀려난다. 실제 작업은 센트럴이 ``docker exec`` 로 이 컨테이너 안에
+    직접 주입한다(워커는 스스로 잡을 당겨오지 않는다).
     """
     app = Flask(__name__)
 
@@ -570,21 +598,29 @@ def run_worker(
     *,
     serve: bool = True,
     config=None,
-    worker_loop_fn=None,
 ):
-    """worker 진입 — 설정 로드 → worker_loop를 데몬 스레드로 기동 + 헬스 서빙.
+    """worker 진입 — 주입 materialize + 사전 인가 settings 복사 + 헬스 서빙(상주).
 
-    worker 폴링 루프(CENTRAL_URL → 잡 → claude 실행 → 상태 회신)는 백그라운드
-    스레드에서 돌고, 메인 스레드는 컨테이너 헬스 프로브용 최소 Flask(/healthz)를
-    서빙한다. ``serve=False``면 헬스 앱을 띄우지 않고 루프 스레드만 반환한다
-    (테스트/임베드용).
+    ⚠️ 워커는 더 이상 중앙을 폴링하지 않는다(레거시 ``worker_loop`` 은퇴). 실행은 센트럴
+    라이브 세션이 ``docker exec jad-worker-<user> claude -p …``(:mod:`worker_dispatch`)로
+    **직접 주입**한다 — 워커 컨테이너의 PID1(이 프로세스)은 docker exec 대상으로서 **살아
+    있기만** 하면 된다. 그 상주를 위해 이 함수는 세 가지만 한다:
 
-    Returns:
-        기동한 worker 루프 스레드(threading.Thread).
+    1. **주입 materialize**(:mod:`app.inject`) — 마운트 없이 env 로 실려 온 config.yaml·
+       per-user 시크릿·알림 웹훅을 이 컨테이너 안의 파일로 되살린다. bind 마운트를 없앤
+       구조라 이것이 워커가 설정·시크릿을 받는 **유일 경로**다. 반드시 가장 먼저 돈다.
+    2. **사전 인가 settings 복사** — docker exec 로 뜨는 claude 세션이 승인 프롬프트 없이
+       헤드리스 자율 실행되도록 ``~/.claude/settings.json`` 을 채운다.
+    3. **/healthz 서빙** — Dockerfile HEALTHCHECK 가 이 엔드포인트를 프로브한다. 서빙하지
+       않으면 컨테이너가 unhealthy 로 떨어져 docker exec 대상에서 밀려난다.
+
+    ``serve=False`` 면 서빙하지 않고 반환한다(테스트/임베드용).
+
+    레거시 GET /next → run_job → 상태 회신 폴링 루프는 프랙탈 경로와 **이중 실행**(같은
+    티켓을 두 번 처리 → 중복 브랜치/변경요청/코멘트)을 유발했으므로 제거됐다.
     """
     from app.config import load_config
     from app import inject
-    from app import worker as worker_mod
 
     # 0) **스폰 시 주입 materialize** — load_config 보다 반드시 먼저 한다.
     # central 이 config.yaml · per-user 시크릿 · 알림 웹훅을 컨테이너 env 로 실어
@@ -596,29 +632,23 @@ def run_worker(
     if config is None:
         inject.materialize(config_dest=os.path.abspath(config_path))
 
-    cfg = config if config is not None else load_config(config_path)
-    loop = worker_loop_fn or worker_mod.worker_loop
+    # 주입으로 되살린 설정이 실제로 파싱되는지 이 시점에 확인한다 — 깨진 설정으로
+    # 상주하면 docker exec 시점에야 엉뚱하게 죽는다(주입 실패는 위에서 이미 raise).
+    if config is None:
+        load_config(config_path)
 
-    # worker_loop 기동 전, 사전 인가 settings.json을 명명 볼륨(~/.claude)으로 복사한다.
-    # (두 번째 spawn 버그 픽스: settings.json 파일 바인드 제거 → 부팅 복사로 대체.)
-    # 소스가 없어도 죽지 않는다(경고만) — 헤드리스 생존 우선.
+    # 사전 인가 settings.json 을 명명 볼륨(~/.claude)으로 복사한다(두 번째 spawn 버그
+    # 픽스: settings.json 파일 바인드 제거 → 부팅 복사로 대체). 소스가 없어도 죽지
+    # 않는다(경고만) — 헤드리스 생존 우선.
     try:
         copy_worker_settings()
     except Exception:  # noqa: BLE001 — 복사 실패가 worker 기동을 막지 않게 격리.
         log.exception("worker 사전 인가 settings 복사 중 오류(무시하고 계속)")
 
-    stop = threading.Event()
-    t = threading.Thread(
-        target=loop, args=(cfg,), kwargs={"stop_event": stop},
-        name="jad-worker-loop", daemon=True,
-    )
-    t.start()
-    _components["_worker"] = {"thread": t, "stop": stop}
-
     if serve:
         app = create_worker_app()
         app.run(host="0.0.0.0", port=8787)
-    return t
+    return None
 
 
 # =========================================================================
@@ -630,13 +660,13 @@ def main() -> None:
     """개발용 진입점 — ROLE로 분기.
 
     central: create_central_app → (Phase 4~5) start_central_background → 내장 서버.
-    worker : (Phase 5) run_worker (+ 선택적 헬스 앱).
+    worker : run_worker (docker exec 대상 상주 + 헬스 앱).
     TODO(Phase 6): 프로덕션 central은 gunicorn 등 WSGI로 대체.
     """
     role = os.environ.get("ROLE", "central").strip().lower()
 
     if role == "worker":
-        # worker: 폴링 루프(데몬 스레드) + 최소 헬스 앱 서빙.
+        # worker: 주입 materialize + 사전 인가 settings 복사 + 최소 헬스 앱 서빙(상주).
         run_worker()
         return
 

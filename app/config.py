@@ -453,18 +453,21 @@ class RunConfig:
     # FRACTAL_WORKER 가 있으면 그게 우선(스포너/운영 토글). 지속 세션이 꺼져 있으면
     # (persistent_session False) 이 플래그가 켜져도 신경로는 성립하지 않아 무시된다.
     fractal_worker: bool = False
-    # --- 프랙탈 P2(센트럴 계층) 신경로 피처 플래그(기본 ON — 승격됨) ---
-    # True 면 central 이 신규/갱신 티켓을 **스케줄러 큐(dispatcher.enqueue)** 로 넣는
-    # 대신 **상주 센트럴 라이브 세션**(app/central_session.CentralSession)에 이벤트로
-    # 주입한다(설계 §3.1·§9 P2). 센트럴 세션(=ai-dlc-orchestrator 에이전트)이 사용자별
-    # 서브에이전트를 네이티브로 스폰해 각 워커 컨테이너로 위임하고, 리치 완료-리포트를
-    # 관찰해 설정된 알림 채널(notifier.provider)로 상신한다.
-    # **기본 ON 으로 승격**(라이브 검증 완료 — 티켓 552 클린 완주): 예전엔 비영속 env
-    # FRACTAL_CENTRAL=1 override 로만 켜져 배포마다 꺼졌으나, 이제 config/코드 기본이
-    # True 라 **override 없이 배포만으로 fractal ON** 이 유지된다. env FRACTAL_CENTRAL
-    # 이 명시되면 여전히 그게 우선(운영 토글 — 명시 falsy 로 끌 수도 있음). 지속 세션이
-    # 꺼져 있으면(persistent_session False / 스트림 포맷 불일치) 이 플래그가 켜져도 신경로는
-    # 성립하지 않아 무시된다(central_fractal_enabled 게이트가 함께 요구).
+    # --- 프랙탈 센트럴 실행 경로(**항상 ON — 토글 은퇴**) ---
+    # central 은 신규/갱신 티켓을 **상주 센트럴 라이브 세션**(app/central_session.
+    # CentralSession)에 이벤트로 주입한다(설계 §3.1·§9 P2). 센트럴 세션이 사용자별 서브를
+    # 스폰해 각 워커 컨테이너로 위임하고, 리치 완료-리포트를 관찰해 설정된 알림 채널
+    # (notifier.provider)로 상신한다.
+    #
+    # ⚠️ **이 필드는 더 이상 사용자 토글이 아니다.** 예전엔 False 로 두면 스케줄러 큐 →
+    # 워커 HTTP 폴링(구 경로)으로 돌았지만, 그 소비자(app/worker.py)가 이중 실행(같은
+    # 티켓 두 번 → 중복 변경요청·중복 완료알림)의 원인이라 제거됐다. 따라서 OFF 는
+    # "레거시 경로로 돈다"가 아니라 **"아무것도 실행되지 않는다"** 를 뜻한다 —
+    # :func:`_retire_fractal_central` 가 명시 False 를 경고와 함께 무시하고 True 로 되돌린다
+    # (기존 config.yaml·env 를 깨지 않으면서 조용한 무실행을 막는 하위호환 처리).
+    #
+    # 필드 자체는 남긴다 — central_session.central_fractal_enabled 가 이 값과 지속 세션
+    # 성립 여부(persistent_session + 양방향 stream-json)를 함께 읽어 경로 성립을 판정한다.
     fractal_central: bool = True
 
 
@@ -909,8 +912,9 @@ def _build_config(raw: dict) -> AppConfig:
             ai_cooldown_max_sec=int(run.get("ai_cooldown_max_sec", 900)),
             tier2_pilot_user=str(run.get("tier2_pilot_user", "")).strip(),
             fractal_worker=bool(run.get("fractal_worker", False)),
-            # 승격됨: 키 부재 → 기본 True(override 없이 배포만으로 fractal ON). env
-            # FRACTAL_CENTRAL 명시 시 _apply_env_overrides 가 여전히 우선(끌 수도 있음).
+            # 은퇴한 토글 — 값과 무관하게 항상 True 로 수렴한다(_retire_fractal_central).
+            # 여기서 raw 값을 그대로 읽는 이유는 "사용자가 명시적으로 껐는가"를 그 함수가
+            # 알아야 경고를 띄울 수 있기 때문이다.
             fractal_central=bool(run.get("fractal_central", True)),
         ),
         worker_shared_secret=str(raw.get("worker_shared_secret", "")),
@@ -1064,10 +1068,12 @@ def _apply_env_overrides(cfg: AppConfig) -> None:
     if fractal is not None and fractal.strip():
         cfg.run.fractal_worker = fractal.strip().lower() in ("1", "true", "yes", "on")
 
-    # 프랙탈 P2 센트럴 신경로 토글 env 폴백(YAML보다 우선). 명시된 truthy/falsy 만 반영.
+    # 프랙탈 센트럴 경로 env 토글(은퇴) — 명시 falsy 는 아래 _retire_fractal_central 가
+    # 경고와 함께 무시한다. 값을 일단 반영해 두는 이유는 그 함수가 "껐다"를 감지하기 위해서다.
     fractal_central = os.environ.get("FRACTAL_CENTRAL")
     if fractal_central is not None and fractal_central.strip():
         cfg.run.fractal_central = fractal_central.strip().lower() in ("1", "true", "yes", "on")
+    _retire_fractal_central(cfg)
 
     # ⚠️ ``HOST_DEPLOY_DIR`` env 와 ``deploy.host_deploy_dir`` 키는 **제거됐다**.
     # 워커에 거는 마운트가 전부 named 볼륨이 되어(나머지는 스폰 시 주입 —
@@ -1079,6 +1085,38 @@ def _apply_env_overrides(cfg: AppConfig) -> None:
     cfg.deploy.docker_host = cfg.spawn.docker_host
     cfg.deploy.workspace_volume = cfg.spawn.workspace_volume
     cfg.deploy.secrets_base_dir = cfg.secrets.base_dir
+
+
+def _retire_fractal_central(cfg: AppConfig) -> None:
+    """``run.fractal_central: false`` (또는 ``FRACTAL_CENTRAL=0``)를 **무시**하고 경고한다.
+
+    fractal-OFF 모드는 은퇴했다. 예전에 OFF 는 "스케줄러 큐 → 워커 HTTP 폴링(구 경로)로
+    돈다"는 뜻이었지만, 그 폴링 소비자(``app/worker.py``)가 프랙탈 경로와 **이중 실행**
+    (같은 티켓 두 번 → 중복 브랜치·변경요청·완료알림)을 일으켜 제거됐다. 소비자가 없는
+    지금 OFF 는 **"티켓이 감지돼도 아무것도 실행되지 않는다"** 를 뜻한다.
+
+    선택지는 두 가지였다 — (a) 부팅 거부, (b) 무시 + 경고. **(b)** 를 택한다:
+
+    - 이 값은 남의 배포에 이미 적혀 있을 수 있는 옛 키다(예전 기본이 OFF 였다). 부팅을
+      거부하면 업그레이드가 곧 장애가 된다 — 설정을 고칠 관리 UI 조차 뜨지 않는다.
+    - 무시해서 잃는 것이 없다. OFF 로 얻을 수 있는 동작이 더 이상 존재하지 않기 때문이다
+      (구 경로는 코드가 없다). 즉 "무시"가 사용자 의도를 왜곡하는 경우가 없다.
+    - 조용히 무시하지는 않는다 — ERROR 로 남겨 왜 값이 안 먹었는지 추적 가능하게 한다.
+
+    ⚠️ 이 함수가 True 로 되돌려도 **경로 성립은 별개**다. 지속 세션(``persistent_session``
+    + 양방향 stream-json)이 꺼져 있으면 ``central_fractal_enabled`` 가 여전히 False 이고,
+    그 경우 main 이 부팅 로그로, 부팅 자가진단이 ``/api/doctor`` 로 그 사실을 드러낸다.
+    """
+    run = getattr(cfg, "run", None)
+    if run is None or bool(getattr(run, "fractal_central", True)):
+        return
+    log.error(
+        "⚠️ run.fractal_central: false 는 **무시됩니다**(항상 ON). 프랙탈 센트럴 세션이 "
+        "유일 실행 경로이며, 예전의 OFF 경로(스케줄러 큐 → 워커 HTTP 폴링)는 이중 실행"
+        "(중복 변경요청·중복 완료알림) 때문에 제거됐습니다. config.yaml 의 run."
+        "fractal_central 키와 env FRACTAL_CENTRAL 은 지워도 됩니다."
+    )
+    run.fractal_central = True
 
 
 def _validate(cfg: AppConfig) -> None:

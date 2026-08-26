@@ -26,6 +26,7 @@ import threading
 from datetime import datetime
 from typing import Optional
 
+from app import central_dispatch
 from app import queue as q
 from app import scope as scope_mod
 from app.poller import build_job
@@ -64,14 +65,26 @@ class StatusWatcher:
                      "labels", "project"]
 
     def __init__(self, config, jira_client, gate, registry, dispatcher,
-                 now_provider=None) -> None:
-        """의존성 주입(설정·Jira·게이트·레지스트리·디스패처)."""
+                 now_provider=None, *, central_sink=None, job_queue=None) -> None:
+        """의존성 주입(설정·Jira·게이트·레지스트리·디스패처).
+
+        ``central_sink``(프랙탈, 기본 None): 상주 센트럴 라이브 세션 핸들. **재오픈**은
+        재-디스패치이므로 정상 폴링 티켓과 동일 seam(센트럴 세션 주입)으로 라우팅한다 —
+        구 ``scheduler.reopen`` → tick → running 은 실행자가 없어 스턱나던 경로라 은퇴했다.
+        미주입(오설정 배포)이면 재오픈 방출을 조용히 건너뛴다(다음 주기 재시도).
+        ``job_queue``(관측성): 프랙탈 재오픈 잡을 같은 store 에 fractal 표식으로 기록하는
+        핸들. 미주입이면 ``dispatcher.scheduler.jobs`` 로 폴백한다(같은 인스턴스).
+        """
         self.config = config
         self.jira = jira_client
         self.gate = gate
         self.registry = registry
         self.dispatcher = dispatcher
         self.scheduler = dispatcher.scheduler
+        self._central_sink = central_sink
+        self._job_queue = job_queue
+        if self._job_queue is None:
+            self._job_queue = getattr(self.scheduler, "jobs", None)
         self._stop = threading.Event()
         self._now = now_provider
         from app import state
@@ -281,13 +294,34 @@ class StatusWatcher:
             # 취소 확정 시 dedup가 풀렸으므로 재-claim(멱등; 결과 무시).
             self.gate.claim(key)
             job = build_job(self.config, key, issue, user)
-            self.scheduler.reopen(job)
+            self._reopen_dispatch(job)
             result["reopened"] += 1
-            log.info("재오픈 → 재-enqueue: %s → user=%s", key, user.username)
+            log.info("재오픈 → 재-dispatch: %s → user=%s", key, user.username)
 
         if max_updated and max_updated != self.reopen_watermark:
             self.reopen_watermark = max_updated
             self._state.save_reopen_watermark(self.reopen_watermark)
+
+    def _reopen_dispatch(self, job) -> None:
+        """재오픈된 티켓 슬롯을 재작업으로 방출 — 정상 폴링 티켓과 동일 프랙탈 seam 으로 통일.
+
+        취소 확정 잡의 store 레코드에 **먼저 fractal 표식**을 찍어(mark_fractal — 리셋~주입
+        윈도우에서 구 tick 이 running 으로 dispatch 하지 못하게) 슬롯을 새 실행으로
+        리셋(``jobs.reopen``)한 뒤, 정상 폴링과 동일한 ``emit_to_central`` 로 센트럴 세션에
+        주입한다(센트럴이 워커 spawn/inject → 실행 + Jira 코멘트 등 정상 작동). 주입 실패는
+        :class:`app.central_dispatch.CentralInjectFailed` 로 전파돼 상위 루프가 다음 주기에
+        재시도한다.
+
+        ⚠️ fractal-OFF 폴백 은퇴 완료: 레거시 ``scheduler.reopen``(리셋 + tick) 경로는
+        삭제됐다 — 그 잡을 실행할 워커 폴링 소비자가 더 이상 없다.
+        """
+        if central_dispatch.central_active(self.config, self._central_sink):
+            # 리셋(queued) 전에 fractal 표식을 확정해 tick 이 이 잡을 집지 못하게 한다.
+            central_dispatch.mark_fractal(self._job_queue, job.ticket)
+            self.scheduler.jobs.reopen(job)
+            fresh = self.scheduler.jobs.get(job.ticket) or job
+            central_dispatch.emit_to_central(
+                self.config, self._central_sink, self._job_queue, self.gate, fresh)
 
     # ------------------------------------------------------------------
     # 백그라운드 루프

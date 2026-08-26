@@ -106,8 +106,8 @@ def test_reassign_park_records_reassigned(isolated_state):
     assert j.cancel_reason == q.CANCEL_REASSIGNED
 
 
-def test_rerun_clears_stale_cancel_reason(isolated_state):
-    # 재실행(reopen)으로 되살린 잡은 이전 취소 사유를 남기지 않는다.
+def test_reopen_clears_stale_cancel_reason(isolated_state):
+    # 재실행(프랙탈 seam = jobs.reopen + tick)으로 되살린 잡은 이전 취소 사유를 남기지 않는다.
     gate = DedupGate()
     gate.claim("PROJ-1")
     sch = _sch(gate=gate)
@@ -116,7 +116,9 @@ def test_rerun_clears_stale_cancel_reason(isolated_state):
     sch.report("PROJ-1", "취소됨")
     assert sch.jobs.get("PROJ-1").cancel_reason == q.CANCEL_STATUS_CANCELLED
 
-    sch.rerun("PROJ-1")
+    # 프랙탈 재실행 경로가 쓰는 슬롯 리셋 프리미티브(JobQueue.reopen) + 파이썬 tick.
+    sch.jobs.reopen(sch.jobs.get("PROJ-1"))
+    sch.tick()
     j = sch.jobs.get("PROJ-1")
     assert j.status == q.RUNNING
     assert j.cancel_reason is None

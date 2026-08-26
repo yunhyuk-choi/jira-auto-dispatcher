@@ -1,13 +1,17 @@
 """완료 알림 — incoming webhook 발송(provider 어댑터, best-effort).
 
 역할:
-    worker가 자율 실행 pass를 끝낸 **터미널 결과**(done/failed) 또는 짧은 상태
-    전이(interrupted/cancelled)에서, 팀 채널 웹훅으로 마무리 멘트 + 다음 할 일을
-    POST한다. 담당자를 채널 문법으로 @멘션해 개인 알림 효과를 낸다(사용자 id가 없으면
-    display_name 텍스트로 degrade — 하드 핑 없음).
+    설정된 알림 채널(provider)로 텍스트 한 건을 보내는 **단일 관문**(:func:`send_text`)
+    을 제공한다 — provider 분기(페이로드 모양)·웹훅 참조 조회·POST 가 전부 여기 모인다.
+    소비자는 프랙탈 센트럴 세션의 완료-리포트 상신기(리포 루트 ``notify_report.py``)와
+    설치 진단의 테스트 발송(:mod:`app.setup_doctor`)이다.
 
-역할 소속: **worker**(오케스트레이터 실행 뒤 이어짐). 프랙탈 경로의 완료-리포트 상신은
-    리포 루트 ``notify_report.py`` 가 이 모듈을 재사용한다(재발명 금지).
+    ⚠️ 과거 이 모듈에는 **워커 잡-종료 통지자**(``notify_job_end``/``build_message``/
+    ``format_mention`` 등)가 있었으나, 레거시 old-path 은퇴로 제거됐다 — 완료 통지는
+    프랙탈 센트럴 세션이 ``notify_report.py`` 로 **단일 발송**한다(완료 티켓당 채팅 2건
+    이던 이중-통지의 근본 제거). 워커는 더 이상 통지자가 아니다.
+
+역할 소속: **central**(프랙탈 센트럴 세션이 관찰한 완료-리포트를 상신).
 
 provider 어댑터(:data:`NOTIFIER_PROVIDERS` — 정본은 ``config.notifier.provider``):
     ``none``            알림 없음(**기본**). 아무것도 보내지 않는다.
@@ -31,18 +35,18 @@ generic_webhook 페이로드 계약(수신 측이 파싱할 수 있도록 **키�
     }
 
 설계:
-    - **팀 웹훅 1개**(사용자별 아님). 멘션으로 개인화.
-    - **best-effort**: 알림 실패가 런을 죽이면 안 된다 — :func:`notify_job_end` 는
-      어떤 예외도 삼키고 bool을 반환한다(발송 여부).
-    - 메시지는 단순 ``text``(마무리 멘트가 길 수 있어 카드/blocks 대신 text로 충분).
+    - **팀 웹훅 1개**(사용자별 아님). 개인화가 필요하면 호출자가 본문에 멘션을 싣고,
+      기계용 사용자 id 는 ``mention_id`` 필드로 따로 나간다(generic_webhook).
+    - **best-effort**: 알림 실패가 상위(센트럴)를 죽이면 안 된다 — 예외 경계는 호출자가
+      감싼다(:func:`send_text` 는 게이팅만 하고 예외를 삼키지 않는다).
+    - 메시지는 단순 ``text``(리포트 본문이 길고 자유형이라 카드/blocks 대신 text로 충분).
       Google Chat·Slack 모두 최소 공통 형태 ``{"text": ...}`` 로 수용한다.
-    - 링크(MR URL 등)는 그대로 URL 텍스트로 싣는다.
+    - 링크(변경요청 URL 등)는 그대로 URL 텍스트로 싣는다.
 
 ⚠️ 시크릿 규율:
     웹훅 URL은 **시크릿**이다. 값이 아니라 참조(secrets.base_dir 상대)로만 다루고
     (:attr:`config.notifier.webhook_ref` → :func:`app.config.read_secret`), 로그·예외
-    메시지에 절대 남기지 않는다(웹훅 URL·토큰 미노출). 메시지 본문은 agent_runner가
-    이미 시크릿을 마스킹(:func:`app.agent_runner._redact`)한 필드에서만 조립한다.
+    메시지에 절대 남기지 않는다(웹훅 URL·토큰 미노출).
 """
 
 from __future__ import annotations
@@ -50,13 +54,6 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Optional
 
-from app.agent_runner import (
-    STATUS_CANCELLED,
-    STATUS_DONE,
-    STATUS_FAILED,
-    STATUS_INTERRUPTED,
-)
-from app import forge
 from app.config import read_secret
 from app.setup_schema import NOTIFIER_PROVIDERS
 
@@ -73,25 +70,6 @@ GENERIC_SOURCE = "jira-auto-dispatcher"
 
 # 웹훅 POST 타임아웃(초). 알림은 부수적이므로 짧게 클램프.
 NOTIFY_TIMEOUT_SEC = 10
-
-# 사이클로그 핸드오프 라인 접두(고정 — central이 커밋한 dlc-meta 상대경로를 싣는다).
-# ⚠️ 기계 생성 라인이다(파싱 대상). 로컬 오케스트레이터가 dlc-meta를 pull해 이 경로를
-# 읽는다(로컬 측은 별도 구현). 위쪽 자유 서술(마무리 멘트)은 에이전트 산출·자유형이고,
-# 이 라인만 기계적으로 덧붙인다.
-CYCLE_LOG_PREFIX = "사이클로그: "
-
-# 브랜치 라인 접두(작업이 master가 아닌 브랜치에 있을 때만 덧붙인다).
-BRANCH_PREFIX = "브랜치: "
-
-
-# 상태 → 사람이 읽는 라벨(메시지 헤더).
-_STATUS_LABEL = {
-    STATUS_DONE: "완료(리뷰 대기)",
-    STATUS_FAILED: "실패",
-    STATUS_INTERRUPTED: "일시 중단",
-    STATUS_CANCELLED: "취소됨",
-}
-
 
 # --- provider 해석(정본 notifier ← 레거시 notify 미러) -----------------------
 
@@ -126,144 +104,6 @@ def _notifier_attr(config: Any, name: str, default: Any) -> Any:
         if val is not None and val != "":   # False·0 은 유효한 답(빈 값만 폴백)
             return val
     return default
-
-
-# --- 순수 조립 유틸(단위테스트 대상) ----------------------------------------
-
-
-def _job_get(job: Any, name: str, default: Any = None) -> Any:
-    """job(dict 또는 객체)에서 필드 접근(worker는 dict, 테스트는 객체 가능)."""
-    if isinstance(job, dict):
-        return job.get(name, default)
-    return getattr(job, name, default)
-
-
-def notify_user_id(creds: Any) -> str:
-    """담당자의 **채널 사용자 id**(멘션용). 없으면 빈 문자열.
-
-    정본 필드는 provider 중립 이름 ``notify_user_id`` 이고, 레거시
-    ``google_chat_user_id`` 를 계속 읽는다(하위호환 — 레지스트리·env 계약이 그 이름으로
-    남아 있는 배포가 있다). 값 자체는 시크릿이 아니다.
-    """
-    for name in ("notify_user_id", "google_chat_user_id"):
-        val = str(getattr(creds, name, "") or "").strip()
-        if val:
-            return val
-    return ""
-
-
-def format_mention(
-    user_id: Optional[str],
-    display_name: Optional[str],
-    provider: str = PROVIDER_GOOGLE_CHAT,
-) -> str:
-    """provider별 @멘션 텍스트 조립.
-
-    사용자 id가 있으면 채널 문법으로 실제 핑을 만든다:
-        - ``google_chat``     → ``<users/{id}>``
-        - ``slack``           → ``<@{id}>``
-        - 그 밖(``generic_webhook``·미상) → **문법을 지어내지 않는다.** 사람이 읽는
-          텍스트(display_name, 없으면 id)만 싣고, 기계용 id는 페이로드의 ``mention_id``
-          필드로 따로 나간다(:func:`build_payload`).
-
-    id가 없으면 display_name만 텍스트로 싣는다(하드 핑 없이 degrade). 둘 다 없으면 "".
-    """
-    uid = (user_id or "").strip()
-    name = (display_name or "").strip()
-    p = (provider or "").strip().lower()
-    if uid:
-        if p == PROVIDER_GOOGLE_CHAT:
-            return f"<users/{uid}>"
-        if p == PROVIDER_SLACK:
-            return f"<@{uid}>"
-        return name or uid
-    return name
-
-
-def build_message(*, result: Any, job: Any, creds: Any,
-                  provider: str = PROVIDER_GOOGLE_CHAT,
-                  forge_kind: Any = None) -> str:
-    """알림 메시지 텍스트(순수) — 마무리 멘트 + 티켓/상태 + 다음 할 일.
-
-    A일 때 MR URL, B일 때 브랜치명(auto/<ticket>) + runs/<ticket>/ 저널 위치를 싣고,
-    "다음 할 일" 한 줄을 모드별로 분기한다(A=로컬 MR 리뷰·머지 / B=브랜치 fetch해
-    이어서 완성). interrupted/cancelled는 짧은 메시지.
-
-    ``provider`` 는 **멘션 문법에만** 영향한다(본문 구조는 채널 무관 — 어느 채널이든
-    같은 정보를 같은 순서로 읽는다). ``forge_kind`` 는 변경요청 용어(MR/PR)에만 영향한다
-    — 주지 않으면 기본 forge 의 용어(MR)를 쓴다(옛 호출자 동작 유지).
-    """
-    cr = forge.change_abbr(forge_kind)   # "MR" | "PR"
-    ticket = str(_job_get(job, "ticket", "") or "")
-    mode = str(_job_get(job, "autonomy_mode", "B") or "B").upper()
-    status = getattr(result, "status", "") or ""
-    branch = _job_get(job, "branch", None) or (f"auto/{ticket}" if ticket else "")
-
-    mention = format_mention(
-        notify_user_id(creds),
-        getattr(creds, "git_name", "") or getattr(creds, "user", ""),
-        provider,
-    )
-    label = _STATUS_LABEL.get(status, status)
-    header = " ".join(p for p in (mention, f"[{ticket}]", f"오케스트레이터 자율 실행 {label}") if p)
-
-    lines = [header]
-
-    # interrupted / cancelled → 짧은 알림(마무리 멘트/다음 할 일 생략).
-    if status == STATUS_INTERRUPTED:
-        reset = getattr(result, "reset_at", None)
-        if reset:
-            lines.append(f"토큰 한도로 멈춤 — {reset}에 재개 예정")
-        else:
-            lines.append("토큰 한도로 멈춤 — 한도 리셋 후 재개 예정")
-        return "\n".join(lines)
-    if status == STATUS_CANCELLED:
-        lines.append("취소됨 — 진행 중이던 산출은 롤백됩니다.")
-        return "\n".join(lines)
-
-    # 터미널(done/failed) → 마무리 멘트 + 산출 위치 + 다음 할 일.
-    final = (getattr(result, "final_text", "") or "").strip()
-    if final:
-        lines.append(final)
-
-    if mode == "A":
-        mr = getattr(result, "mr_url", None)
-        if mr:
-            lines.append(f"{cr}: {mr}")
-        lines.append(f"다음 할 일: 로컬에서 {cr}을 리뷰·머지하세요.")
-    else:
-        if branch:
-            lines.append(f"브랜치: {branch}")
-        if ticket:
-            lines.append(f"저널: runs/{ticket}/")
-        nxt = f"{branch} 브랜치를 fetch해" if branch else "브랜치를 fetch해"
-        lines.append(f"다음 할 일: {nxt} 로컬에서 이어서 완성하세요.")
-
-    # --- dlc-meta 사이클로그 핸드오프 라인(Phase 3a) ---
-    # central이 공유 dlc-meta 클론에 그 잡의 사이클로그를 커밋하고, 커밋한 상대경로를
-    # 채널 F 회신으로 돌려준다. 워커가 그 경로를 job/result에 실어 넘기면 여기서 **고정
-    # 라인**을 기계적으로 덧붙인다(위 자유 서술은 그대로). 작업이 master가 아닌 브랜치에
-    # 있으면 브랜치 ref도 함께 싣는다(리뷰어가 fetch 대상을 알도록).
-    cycle_log = _cycle_log_path(result, job)
-    if cycle_log:
-        lines.append(f"{CYCLE_LOG_PREFIX}{cycle_log}")
-        if branch and str(branch).strip() and str(branch).strip() != "master":
-            lines.append(f"{BRANCH_PREFIX}{branch}")
-
-    return "\n".join(lines)
-
-
-def _cycle_log_path(result: Any, job: Any) -> str:
-    """central이 커밋한 사이클로그 상대경로를 result/job에서 꺼낸다(없으면 "").
-
-    워커가 채널 F 회신(``cycle_log_path``)을 받아 job dict(또는 result)에 실어 둔다.
-    result 우선, 없으면 job.
-    """
-    val = getattr(result, "cycle_log_path", None)
-    if val:
-        return str(val).strip()
-    val = _job_get(job, "cycle_log_path", "")
-    return str(val).strip() if val else ""
 
 
 # --- 발송(부수효과) ----------------------------------------------------------
@@ -382,46 +222,3 @@ def send_text(
     payload = build_payload(text, provider=provider, ticket=ticket,
                             status=status, mention_id=mention_id, event=event)
     return _post(webhook, text, http=http, http_factory=http_factory, payload=payload)
-
-
-def notify_job_end(
-    config: Any,
-    result: Any,
-    job: Any,
-    creds: Any,
-    *,
-    http=None,
-    http_factory: Optional[Callable] = None,
-) -> bool:
-    """잡 종료(터미널/상태 전이)에 완료 알림을 발송(best-effort → 발송 여부 bool).
-
-    ⚠️ 어떤 예외도 삼킨다(알림 실패가 런을 죽이면 안 된다). 비활성(``provider: none``)/
-    알 수 없는 provider/웹훅 미설정/비대상 상태면 조용히 False. 웹훅 URL·토큰은 로그에
-    절대 남기지 않는다. 페이로드·멘션 문법은 provider 어댑터가 고른다(:func:`send_text`).
-    """
-    try:
-        provider = resolve_provider(config)
-        if provider == PROVIDER_NONE:
-            return False
-
-        status = getattr(result, "status", "") or ""
-        if status == STATUS_INTERRUPTED and not _notifier_attr(config, "notify_interrupted", True):
-            return False
-        if status == STATUS_CANCELLED and not _notifier_attr(config, "notify_cancelled", True):
-            return False
-
-        # 알 수 없는 provider 면 메시지 조립조차 하지 않는다 — send_text 가 거부·경고한다.
-        text = build_message(result=result, job=job, creds=creds, provider=provider,
-                             forge_kind=forge.resolve_kind(config))
-        return send_text(
-            config, text,
-            ticket=str(_job_get(job, "ticket", "") or ""),
-            status=status,
-            mention_id=notify_user_id(creds),
-            event="job_end",
-            http=http, http_factory=http_factory,
-        )
-    except Exception:  # noqa: BLE001 — best-effort: 알림 실패는 런에 영향 주지 않는다
-        # 예외 메시지에 웹훅 URL이 섞일 수 있어 트레이스백을 남기지 않는다.
-        log.warning("완료 알림 발송 실패(무시)")
-        return False

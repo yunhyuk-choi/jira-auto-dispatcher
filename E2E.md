@@ -141,7 +141,7 @@ curl -sS -X POST http://localhost:8787/users/<username>/enable
   ```bash
   ssh <deploy-user>@<서버> 'docker ps --filter name=jad-worker-'
   ```
-- worker 로그에 폴링 루프 기동(및 claude 준비):
+- worker 로그에 상주 기동(주입 materialize·사전 인가 settings 복사·헬스 서빙):
 
   ```bash
   ssh <deploy-user>@<서버> 'docker logs jad-worker-<username> --tail=50'
@@ -173,9 +173,15 @@ curl -sS -X POST http://localhost:8787/users/<username>/enable
 
 ## 2. 정상 플로우 — 티켓 생성 → 감지 → 디스패치 → 실행 → 완료
 
-> 전진축(§2·§4): central 폴러가 신규 티켓을 감지 → dedup claim → 담당자 매핑 →
-> 스케줄러가 레포락 판단 후 dispatch → worker가 `GET /dispatch/<user>/next`로 수령 →
-> `claude -p`(오케스트레이터) 자율 실행 → 채널 F(`POST .../status`)로 회신.
+> 전진축(§2·§4): central 폴러가 신규 티켓을 감지 → dedup claim → 담당자 매핑
+> (+ per-user 프로젝트 범위 게이트) → **상주 센트럴 라이브 세션에 이벤트 주입** →
+> 센트럴 에이전트가 레포락을 consult 하고 사용자별 서브로 위임 →
+> `docker exec jad-worker-<user> claude -p …` 로 워커 안에서 자율 실행 →
+> 완료-리포트를 센트럴이 관찰해 알림 채널로 상신(`notify_report.py`).
+>
+> ⚠️ 워커가 `GET /dispatch/<user>/next` 로 잡을 **당겨오던** 레거시 경로는 은퇴했다
+> (같은 티켓을 두 번 실행해 중복 브랜치·중복 변경요청이 났다). 워커는 이제 밀어
+> 넣어지는 대상이다.
 
 ### 2.1 조작 — 테스트 티켓 생성(사용자 직접)
 
@@ -194,7 +200,7 @@ curl -sS -X POST http://localhost:8787/users/<username>/enable
 | 감지·claim | `docker compose logs central | grep -i poll` | 폴링 주기(기본 60s)·티켓 claim 흔적 |
 | 매핑 | central 로그 | assignee accountId → 등록 사용자 매핑(enabled만) |
 | enqueue·dispatch | `GET /api/jobs` | 잡이 `queued` → `running`(레포락 획득) |
-| 수령 | `docker logs jad-worker-<user>` | `GET /dispatch/<user>/next` 200 수신 + `claude -p` 실행 |
+| 주입 | `docker logs jad-worker-<user>` | 센트럴이 `docker exec` 로 밀어 넣은 `claude -p` 실행 흔적 |
 | Jira 착수 전이 | Jira 티켓 | `해야 할 일` → `진행 중` (worker 안 오케스트레이터가 사용자 토큰으로 전이) |
 | 산출 | forge | 브랜치 `auto/<TICKET>` 생성(커밋 author = 사용자 identity) |
 | MR/PR(A모드만) | forge | MR/PR 초안 생성(사용자 forge 토큰). **B모드는 MR 없음**(1차 산출+저널) |
@@ -227,11 +233,15 @@ bash scripts/observe-job.sh <TICKET> <user> http://localhost:8787   # /api/jobs 
   ```
   - assignee accountId 불일치 / 사용자 `enabled=false` / 상태가 `해야 할 일`이 아님 /
     프로젝트가 `config.jira.project` 와 다름 중 하나. 폴링 주기(60s) 대기했는지 확인.
-- 잡이 `running`인데 worker가 안 받음:
+- 잡이 `queued`인데 워커에서 아무 일도 안 일어남:
   ```bash
   ssh <deploy-user>@<서버> 'docker logs jad-worker-<user> --tail=100'
+  ssh <deploy-user>@<서버> 'docker compose logs central | grep -i central-inject'
   ```
-  - `X-Worker-Secret` 불일치(401) → central `.env`와 worker env의 `WORKER_SHARED_SECRET` 정합 확인.
+  - 센트럴 세션 미성립 → central 부팅 로그의 "프랙탈 센트럴 세션이 성립하지 않습니다"
+    경고 + `GET /api/doctor` 확인(`run.persistent_session`·stream-json 포맷). 이 경우
+    티켓이 감지돼도 **실행되지 않는다** — 레거시 폴백 경로는 없다.
+  - 워커 컨테이너가 `unhealthy` → `/healthz` 서빙 실패. `docker exec` 대상에서 밀려난다.
   - claude 인증 실패 → setup-token 재발급/재온보딩(1.4).
 - Jira 전이 실패(진행 중/완료로 안 넘어감):
   - **필수필드 누락**이 가장 흔함(duedate·10015 착수 / 10186·10187 완료). worker 로그의
@@ -292,10 +302,12 @@ bash scripts/observe-job.sh <TICKET> <user>    # reset_at·status 추적
 
 - **큐 대기(queued/interrupted)였던 잡** → 즉시 `cancelled`(드롭) + 레포락 해제 + dedup 해제.
   롤백 대상 없음(아직 산출 없음).
-- **실행 중(running)이던 잡** → central이 worker에 **취소 플래그** 세팅(제어 채널
-  `GET /dispatch/<user>/<job>/control`이 `{"cancel":true}`) → worker의 claude subprocess **abort**
-  → worker **롤백**(best-effort): 로컬/원격 `auto/<TICKET>` 브랜치 삭제 + MR 있으면 close →
-  `cancelled` 회신 → central이 레포락 해제 + dedup 해제로 확정.
+- **실행 중(running)이던 잡** → central 이 잡에 **취소 플래그**를 세우고 센트럴 세션이
+  그 사용자 서브에게 중단을 지시한다 → 워커 안의 claude 세션이 멈추고, 되돌릴 산출
+  (브랜치·변경요청)이 있으면 **그 에이전트가 자기 토큰으로** 되돌린다 → `cancelled` 확정
+  시 central 이 레포락 + dedup 을 해제한다.
+  ⚠️ 파이썬 워커 루프가 롤백하던 레거시 경로(`app/worker.py::rollback_job` + 제어 채널
+  `GET /dispatch/<user>/<job>/control`)는 그 루프와 함께 삭제됐다.
 - `/api/jobs`에서 잡 `status=cancelling`(잠시) → `cancelled`. `audit_refs`에
   `branch_deleted`/`mr_closed` 흔적.
 
@@ -358,10 +370,10 @@ match.statuses 밖이지만 **웹훅 경로는 상태 게이트와 무관하게 
 
 - **큐 대기(queued/interrupted, WIP 없음)** → X 슬롯을 **Y로 재-소유**하고 즉시 재-dispatch
   (Y 미가용이면 드롭 + park). 롤백/체크포인트 없음(아직 산출 없음).
-- **실행 중(running, WIP 존재)** → central이 worker에 **핸드오프 플래그**(제어 채널
-  `GET /dispatch/<user>/<job>/control` 이 `{"cancel":false,"action":"handoff"}`) → worker의
-  claude subprocess abort → worker **checkpoint**(롤백 아님): `git add -A` + commit(비면 스킵)
-  + `git push <branch>` + 이관 저널 노트 → `handed_off` 회신 → central이 **롤백 없이** 레포락
+- **실행 중(running, WIP 존재)** → central 이 잡에 **핸드오프 플래그**
+  (`control_action=handoff` + `status=handing_off`)를 세우고 센트럴 세션이 그 사용자
+  서브에게 **checkpoint**(롤백 아님)를 지시한다: `git add -A` + commit(비면 스킵)
+  + `git push <branch>` + 이관 저널 노트 → `handed_off` 확정 시 central 이 **롤백 없이** 레포락
   해제 후, 같은 티켓/브랜치로 **Y에게 continue 잡을 dispatch**(continue_from_wip 힌트로
   "이전 담당자 WIP 리뷰 후 이어서 완성"). dedup은 이관이므로 유지.
 - **Y가 enabled 사용자가 아님** → X는 **checkpoint로 WIP 보존**하되 dispatch하지 않고
@@ -412,12 +424,12 @@ match.statuses 밖이지만 **웹훅 경로는 상태 게이트와 무관하게 
   부하가 오르기 전 버스트를 과다 admit하기 쉬운데, **메모리 예약**이 이를 선제 차단한다.
   → 메모리는 즉각·PRIMARY, loadavg-per-core는 2차 거친 상한.
 - **정확성은 별개** — 전역 **레포락**(같은 레포 = 전 사용자 직렬)은 그대로다. 이는 잡 수
-  cap이 아니라 **공유 워크스페이스 충돌 방지**다. dedup 게이트·`next_for_user(exclude=)`도 유지.
+  cap이 아니라 **공유 워크스페이스 충돌 방지**다. dedup 게이트도 그대로 유지된다.
 - **토큰/레이트는 central 관심사 아님** — 각 per-user worker 컨테이너의 오케스트레이터가
   자기 계정의 토큰/레이트를 스스로 관리한다. central은 이를 모델링하지 않는다.
-- **worker**: central이 dispatch한 잡을 **모두** 동시에 스레드 풀로 실행한다(진짜 스로틀은
-  위 자원 어드미션). worker는 runaway 방지용 **안전 상한**(`worker_max_concurrency`, 기본 64
-  — 정책 cap 아님)만 둔다. 각 잡은 기존 `_process_job` 경로 그대로(자기 상태회신·제어/취소/
+- **worker**: 센트럴이 `docker exec` 로 밀어 넣는 잡을 동시에 굴린다(진짜 스로틀은
+  위 자원 어드미션). runaway 방지용 **안전 상한**(`worker_max_concurrency`, 기본 64
+  — 정책 cap 아님)만 둔다. 각 잡은 워커 안의 claude 세션 그대로(자기 상태회신·제어/취소/
   핸드오프·재개·completed 캐시). 잡이 하나뿐일 때의 동작은 단일 잡 경로와 동치다.
 
 ### 4C.2 조작 — 서로 다른 레포 티켓 여러 개를 한 사용자에게
@@ -587,12 +599,11 @@ ssh <deploy-user>@<서버> 'docker ps --filter name=jad-worker-'
 | `/users/<user>/disable` | POST | 비활성화 + worker stop | 없음 |
 | `/users/<user>/autonomy` | POST | A\|B 전환 | 없음 |
 | `/users/<user>/container/<start\|stop>` | POST | worker 컨테이너 제어 | 없음 |
-| `/dispatch/<user>/next` | GET | (worker) 다음 잡 수령 | `X-Worker-Secret` |
-| `/dispatch/<user>/<job>/status` | POST | (worker) 채널 F 회신 | `X-Worker-Secret` |
-| `/dispatch/<user>/<job>/control` | GET | (worker) 제어 폴링 `{"cancel":bool,"action":"none\|cancel\|handoff"}` | `X-Worker-Secret` |
 
-> ⚠️ `/dispatch/*`는 worker 전용(공유 시크릿 필요) — E2E 검증은 UI/관리 API와 관측으로 하고,
-> dispatch 라우트를 사람이 직접 호출하지 않는다(worker가 담당).
+> ⚠️ **은퇴**: `/dispatch/<user>/next`(GET) · `/dispatch/<user>/<job>/status`(POST) ·
+> `/dispatch/<user>/<job>/control`(GET) 과 그 `X-Worker-Secret` 인증은 레거시 워커 폴링
+> 프로토콜이었고, 프랙탈 경로와 **이중 실행**(같은 티켓 두 번 → 중복 브랜치·변경요청)을
+> 일으켜 제거됐다. central→worker 는 이제 `docker exec` 주입 한 방향뿐이다.
 
 ## 부록 B — 잡 상태 & Jira 상태 대응
 

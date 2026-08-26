@@ -154,10 +154,12 @@ chmod -R go-rwx secrets
 find secrets -type f -exec chmod 600 {} \;
 ```
 
-- **worker 공유시크릿**(`WORKER_SHARED_SECRET`, dispatch HTTP 인증)은 파일이 아니라
-  **env**로 주입한다. ⚠️ **직접 만들지 않는 것이 기본이다** — `python -m app.setup render`
-  (INSTALL.md §2.5)가 `.env`에 없으면 만들고(0600), **이미 있으면 손대지 않는다**(멱등).
-  재생성하면 떠 있는 워커가 전부 `X-Worker-Secret` 401로 죽으므로 바꾸지 않는다.
+- **worker 공유시크릿**(`WORKER_SHARED_SECRET`)은 파일이 아니라 **env**로 주입한다.
+  ⚠️ **직접 만들지 않는 것이 기본이다** — `python -m app.setup render`(INSTALL.md §2.5)가
+  `.env`에 없으면 만들고(0600), **이미 있으면 손대지 않는다**(멱등).
+  ⚠️ 이 값이 인증하던 worker→central HTTP 디스패치 프로토콜은 **은퇴했다**(워커가 더
+  이상 중앙을 폴링하지 않는다 — `docker exec` 주입). 값은 설치 흐름 호환을 위해 남아
+  있을 뿐 현재 아무것도 인증하지 않으므로, 바꾸든 두든 실행에 영향이 없다.
   그 명령을 쓰지 않는 배포라면 손으로:
 
   ```bash
@@ -320,7 +322,7 @@ docker inspect jad-central --format '{{json .Mounts}}'   # docker.sock 바인드
 
 # (4) 온보딩·활성화 후 worker 컨테이너 기동
 docker ps --filter name=jad-worker-               # jad-worker-<user> 가 Up
-docker logs jad-worker-<user> --tail=50           # 폴링 루프·claude 준비 로그
+docker logs jad-worker-<user> --tail=50           # 워커 상주·주입 실행 로그
 
 # (5) worker 헬스(내부망)
 docker exec jad-worker-<user> curl -fsS http://localhost:8787/healthz

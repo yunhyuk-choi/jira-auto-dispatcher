@@ -83,18 +83,38 @@ def _issue(key, account_id="a1", status="해야 할 일",
     }
 
 
+class _FakeCentralSink:
+    """CentralSession 대역 — inject_event 를 성공 처리(프랙탈-ON 배선)."""
+
+    def __init__(self):
+        self.events = []
+
+    def inject_event(self, job):
+        self.events.append(job)
+        return True
+
+
 def _wire(issues, *, jira=None, loader=None, runner=None, repo_map=None):
-    """LLM 리졸버 배선(라이브 없음). jira 미지정 시 FakeJira(issues)."""
+    """LLM 리졸버 배선(라이브 없음). jira 미지정 시 FakeJira(issues).
+
+    이 배포는 영구 프랙탈-ON — poller 는 센트럴 sink 로 방출한다(record_fractal_job 이 같은
+    JobQueue store 에 queued 로 기록). fractal-OFF(sink 없는) 배선은 은퇴했다.
+    """
     reg = Registry()
     reg.upsert(UserRecord(username="u1", jira_account_id="a1", enabled=True))
     cfg = make_config(repo_map=repo_map or {})
     cfg.run.repo_resolution = "llm"
+    cfg.run.fractal_central = True
+    cfg.run.persistent_session = True
+    cfg.run.output_format = "stream-json"
+    cfg.run.input_format = "stream-json"
     sch = Scheduler(cfg, JobQueue())
     disp = Dispatcher(reg, sch)
     gate = DedupGate()
     jira = jira if jira is not None else FakeJira(issues)
     poller = Poller(cfg, jira, gate, reg, disp, clock=_fixed_clock,
-                    repo_map_loader=loader or (lambda: _REPO_MAP_MD), llm_runner=runner)
+                    repo_map_loader=loader or (lambda: _REPO_MAP_MD), llm_runner=runner,
+                    central_sink=_FakeCentralSink())
     return reg, sch, disp, gate, poller
 
 

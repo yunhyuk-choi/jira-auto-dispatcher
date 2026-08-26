@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
 
+import pytest
+
 from app import state
 from app import queue as q
 from app.dispatch import Dispatcher
@@ -65,17 +67,31 @@ class RoutingFakeJira:
         return {"issues": issues, "total": len(issues)}
 
 
+def _fractalize(cfg):
+    """이 배포는 영구 프랙탈-ON — poller 는 항상 센트럴 sink 로 방출한다(fractal-OFF 은퇴).
+
+    ``central_active`` 가 참이 되도록 플래그 + 지속 stream-json 세션 전제를 세운다.
+    (레거시 sink 없는 poller 배선은 더 이상 존재하지 않는다.)
+    """
+    cfg.run.fractal_central = True
+    cfg.run.persistent_session = True
+    cfg.run.output_format = "stream-json"
+    cfg.run.input_format = "stream-json"
+    return cfg
+
+
 def _wire_routing(created_issues, assignee_issues, repo_map=None):
     reg = Registry()
     reg.upsert(UserRecord(username="u1", jira_account_id="a1", enabled=True,
                           per_repo={"portal-frontend": "A"}))
     reg.upsert(UserRecord(username="u2", jira_account_id="a2", enabled=False))  # 비활성
-    cfg = make_config(concurrency_per_worker=5, repo_map=repo_map or {})
+    cfg = _fractalize(make_config(concurrency_per_worker=5, repo_map=repo_map or {}))
     sch = Scheduler(cfg, JobQueue())
     disp = Dispatcher(reg, sch)
     gate = DedupGate()
     jira = RoutingFakeJira(created_issues, assignee_issues)
-    poller = Poller(cfg, jira, gate, reg, disp, clock=_fixed_clock)
+    poller = Poller(cfg, jira, gate, reg, disp, clock=_fixed_clock,
+                    central_sink=_FakeCentralSink())
     return reg, sch, disp, gate, jira, poller
 
 
@@ -87,10 +103,12 @@ def _wire(issues, repo_map=None, per_user=5):
     sch = Scheduler(make_config(concurrency_per_worker=per_user, repo_map=repo_map or {}), JobQueue())
     disp = Dispatcher(reg, sch)
     gate = DedupGate()
-    cfg = make_config(concurrency_per_worker=per_user, repo_map=repo_map or {})
+    cfg = _fractalize(make_config(concurrency_per_worker=per_user, repo_map=repo_map or {}))
     # 고정 시계 주입 → watermark 최초 시드가 결정적(2026-08-10T00:00, KST)이라
     # 이후 생성분(10:00 등)은 정상적으로 watermark를 전진시킨다.
-    poller = Poller(cfg, FakeJira(issues), gate, reg, disp, clock=_fixed_clock)
+    # 프랙탈-ON: 방출은 센트럴 sink 주입(record_fractal_job 이 같은 store 에 queued 로 기록).
+    poller = Poller(cfg, FakeJira(issues), gate, reg, disp, clock=_fixed_clock,
+                    central_sink=_FakeCentralSink())
     return reg, sch, disp, gate, poller
 
 
@@ -278,14 +296,15 @@ def _wire_llm(issues, *, loader=None, runner=None, per_user=5, repo_map=None):
     """LLM 리졸버 주입 배선(라이브 claude/git 없이)."""
     reg = Registry()
     reg.upsert(UserRecord(username="u1", jira_account_id="a1", enabled=True))
-    cfg = make_config(concurrency_per_worker=per_user, repo_map=repo_map or {})
+    cfg = _fractalize(make_config(concurrency_per_worker=per_user, repo_map=repo_map or {}))
     # run.repo_resolution 기본이 'llm' 임을 명시(make_config엔 없음 → getattr 폴백).
     cfg.run.repo_resolution = "llm"
     sch = Scheduler(cfg, JobQueue())
     disp = Dispatcher(reg, sch)
     gate = DedupGate()
     poller = Poller(cfg, FakeJira(issues), gate, reg, disp, clock=_fixed_clock,
-                    repo_map_loader=loader, llm_runner=runner)
+                    repo_map_loader=loader, llm_runner=runner,
+                    central_sink=_FakeCentralSink())
     return reg, sch, disp, gate, poller
 
 
@@ -346,12 +365,13 @@ def test_poll_once_static_mode_skips_llm(isolated_state):
     repo_map = {"portal-frontend": "portal-frontend"}
     reg = Registry()
     reg.upsert(UserRecord(username="u1", jira_account_id="a1", enabled=True))
-    cfg = make_config(concurrency_per_worker=5, repo_map=repo_map)
+    cfg = _fractalize(make_config(concurrency_per_worker=5, repo_map=repo_map))
     cfg.run.repo_resolution = "static"
     sch = Scheduler(cfg, JobQueue())
     disp = Dispatcher(reg, sch)
     poller = Poller(cfg, FakeJira([_issue("PROJ-1", "a1", components=["portal-frontend"])]),
-                    DedupGate(), reg, disp, clock=_fixed_clock, repo_map_loader=loader)
+                    DedupGate(), reg, disp, clock=_fixed_clock, repo_map_loader=loader,
+                    central_sink=_FakeCentralSink())
     assert poller.poll_once() == 1
     assert loader_calls == []   # static 모드 → REPO-MAP 로드 안 함
     assert sch.jobs.get("PROJ-1").target_repos == ["portal-frontend"]
@@ -384,13 +404,14 @@ def _wire_trigger(issue, *, repo_map=None, resolution="static", raise_exc=None):
     reg.upsert(UserRecord(username="u1", jira_account_id="a1", enabled=True,
                           per_repo={"portal-frontend": "A"}))
     reg.upsert(UserRecord(username="u2", jira_account_id="a2", enabled=False))  # 비활성
-    cfg = make_config(concurrency_per_worker=5, repo_map=repo_map or {})
+    cfg = _fractalize(make_config(concurrency_per_worker=5, repo_map=repo_map or {}))
     cfg.run.repo_resolution = resolution
     sch = Scheduler(cfg, JobQueue())
     disp = Dispatcher(reg, sch)
     gate = DedupGate()
     jira = GetIssueFakeJira(issue, raise_exc=raise_exc)
-    poller = Poller(cfg, jira, gate, reg, disp, clock=_fixed_clock)
+    poller = Poller(cfg, jira, gate, reg, disp, clock=_fixed_clock,
+                    central_sink=_FakeCentralSink())
     return reg, sch, disp, gate, jira, poller
 
 
@@ -556,18 +577,6 @@ def _wire_central(issues, *, central_on, sink_ok=True, repo_map=None):
     return reg, sch, disp, gate, sink, poller
 
 
-def test_emit_fractal_off_enqueues_even_with_sink_present(isolated_state):
-    """플래그 OFF면 sink 가 배선돼 있어도 오늘과 동일하게 dispatcher.enqueue(무동작변경)."""
-    reg, sch, disp, gate, sink, poller = _wire_central(
-        [_issue("PROJ-1", "a1")], central_on=False)
-    n = poller.poll_once()
-    assert n == 1
-    # ⚠️ 센트럴 주입 없음 — 스케줄러 큐로 갔다(byte-for-byte 오늘 경로).
-    assert sink.events == []
-    assert sch.jobs.get("PROJ-1") is not None
-    assert sch.jobs.get("PROJ-1").user == "u1"
-
-
 def test_emit_fractal_on_injects_instead_of_enqueue(isolated_state):
     """플래그 ON이면 해석된 티켓을 (구 경로 enqueue 대신) 센트럴 세션에 이벤트로 주입하고,
     **관측성 뼈대(A.1)로 JobQueue 에 queued 레코드를 남긴다**(대시보드 가시성).
@@ -594,23 +603,22 @@ def test_emit_fractal_on_injects_instead_of_enqueue(isolated_state):
     assert sch.jobs.get("PROJ-1").status == "queued"
 
 
-def test_emit_fractal_on_inject_failure_falls_back_to_enqueue(isolated_state):
-    """주입이 실패하면 유실 방지로 스케줄러 enqueue 로 폴백한다(잡을 떨어뜨리지 않음)."""
+def test_emit_fractal_on_inject_failure_raises_no_legacy_fallback(isolated_state):
+    """P3: 주입 실패는 레거시 enqueue 로 폴백하지 않고 CentralInjectFailed 를 올린다.
+
+    프랙탈이 유일 경로이므로 구 경로(스케줄러 enqueue)로 방출하지 않는다(이중-체인 근본
+    제거). 실패 시 dedup claim 을 되돌려 다음 폴에서 재트리거 가능하게 한다(잡 유실 없음).
+    """
+    from app.poller import CentralInjectFailed
+
     reg, sch, disp, gate, sink, poller = _wire_central(
         [_issue("PROJ-1", "a1")], central_on=True, sink_ok=False)
-    n = poller.poll_once()
-    assert n == 1
-    assert len(sink.events) == 1              # 주입 시도는 했다
-    assert sch.jobs.get("PROJ-1") is not None  # 실패 → enqueue 폴백(유실 없음)
-
-
-def test_emit_no_sink_always_enqueues(isolated_state):
-    """sink 미주입(main.py 가 플래그 OFF에서 안 넘김)이면 항상 enqueue."""
-    reg, sch, disp, gate, poller = _wire([_issue("PROJ-1", "a1")])
-    assert poller._central_sink is None
-    n = poller.poll_once()
-    assert n == 1
-    assert sch.jobs.get("PROJ-1") is not None
+    with pytest.raises(CentralInjectFailed):
+        poller.poll_once()
+    assert len(sink.events) == 1               # 주입 시도는 했다
+    assert sch.jobs.get("PROJ-1") is None      # ⚠️ 레거시 enqueue 폴백 없음
+    # dedup claim 이 되돌려져 재트리거(재-claim) 가능 — 잡 유실 없음.
+    assert gate.claim("PROJ-1") is True
 
 
 # --- 축0: Jira 자격 생존 확인(빈 결과 위장 벗기기) -----------------------------
@@ -653,10 +661,11 @@ class _SettableClock:
 def _wire_auth(jira, *, clock=None):
     reg = Registry()
     reg.upsert(UserRecord(username="u1", jira_account_id="a1", enabled=True))
-    cfg = make_config()
+    cfg = _fractalize(make_config())
     sch = Scheduler(cfg, JobQueue())
     disp = Dispatcher(reg, sch)
-    poller = Poller(cfg, jira, DedupGate(), reg, disp, clock=clock or _fixed_clock)
+    poller = Poller(cfg, jira, DedupGate(), reg, disp, clock=clock or _fixed_clock,
+                    central_sink=_FakeCentralSink())
     noted: list = []
     poller.set_auth_reporter(lambda ok, detail: noted.append((ok, detail)))
     return poller, noted

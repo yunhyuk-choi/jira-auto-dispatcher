@@ -159,18 +159,43 @@ def test_in_user_scope_is_false_when_nothing_declares_a_range():
 # 폴러 — 합집합 JQL · 빈 합집합 차단 · 수신 후 게이트
 # ---------------------------------------------------------------------------
 
+class _FakeCentralSink:
+    """CentralSession 대역 — 방출된 잡을 기록만 한다(프랙탈이 유일 실행 경로).
+
+    실행 경로가 센트럴 세션 주입으로 통일됐으므로, 범위 게이트 테스트도 그 배선에서
+    돌아야 실제와 같은 경로를 검증한다(잡 레코드는 seam 이 같은 store 에 남긴다).
+    """
+
+    def __init__(self):
+        self.events: list = []
+
+    def inject_event(self, job):
+        self.events.append(job)
+        return True
+
+
+def _fractalize(cfg):
+    """프랙탈-ON 전제(플래그 + 지속 stream-json 세션) — central_active 가 참이 되게."""
+    cfg.run.fractal_central = True
+    cfg.run.persistent_session = True
+    cfg.run.output_format = "stream-json"
+    cfg.run.input_format = "stream-json"
+    return cfg
+
+
 def _wire_poller(issues=(), users=None, cfg=None, issue_by_key=None):
     reg = Registry()
     for rec in (users or [UserRecord(username="u1", jira_account_id="a1", enabled=True)]):
         reg.upsert(rec)
-    cfg = cfg or make_config(concurrency_per_worker=5)
+    cfg = _fractalize(cfg or make_config(concurrency_per_worker=5))
     gate = DedupGate()
     # 스케줄러에도 같은 게이트를 준다 — park(재배정 드롭) 시 dedup 해제가 실제로 일어나야
     # "나중에 다시 범위에 들어오면 재트리거" 가 성립한다.
     sch = Scheduler(cfg, JobQueue(), gate=gate)
     disp = Dispatcher(reg, sch)
     jira = FakeJira(issues, issue_by_key)
-    poller = Poller(cfg, jira, gate, reg, disp, clock=_fixed_clock)
+    poller = Poller(cfg, jira, gate, reg, disp, clock=_fixed_clock,
+                    central_sink=_FakeCentralSink())
     return reg, sch, disp, gate, jira, poller
 
 

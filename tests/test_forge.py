@@ -394,67 +394,75 @@ def test_notifier_env_accepts_neutral_and_legacy_names(tmp_path, monkeypatch):
     assert C.load_config(str(p)).notifier.provider == "none"
 
 
-# --- worker: 변경요청 닫기 forge 라우팅 --------------------------------------
+# --- 변경요청 닫기 forge 라우팅 ----------------------------------------------
+#
+# ⚠️ 이 프리미티브(app/forge.close_change_request)의 파이썬 호출자는 현재 없다 — 취소
+# 롤백을 하던 워커 폴링 루프가 프랙탈 센트럴 세션으로 대체되며 함께 은퇴했다. 그래도
+# **GitLab MR API 와 GitHub PR API 의 모양 차이**는 여기 말고 기록된 곳이 없으므로,
+# 어댑터와 함께 그 계약을 지킨다(옛 tests/test_forge.py 의 worker 섹션에서 이관).
 
 
-def test_default_mr_closer_routes_to_github_pr_api(tmp_path, monkeypatch):
-    import requests
+class _FakeHTTP:
+    """requests 모듈 대역 — put/patch 호출을 기록하고 상태코드를 돌려준다."""
 
-    from app import worker as W
+    def __init__(self, status_code=200):
+        self.status_code = status_code
+        self.calls: list = []
 
-    base = str(tmp_path / "secrets")
-    _write(base, "u/forge-token", "GH-PAT")
-    calls: list = []
+    def put(self, url, **kw):
+        self.calls.append(("put", url, kw))
+        return SimpleNamespace(status_code=self.status_code)
 
-    def fake_patch(url, **kw):
-        calls.append((url, kw))
-        return SimpleNamespace(status_code=200)
+    def patch(self, url, **kw):
+        self.calls.append(("patch", url, kw))
+        return SimpleNamespace(status_code=self.status_code)
 
-    def boom_put(*a, **kw):  # GitLab 경로로 새면 즉시 실패시킨다.
-        raise AssertionError("GitHub PR 인데 GitLab MR API 를 호출했다")
 
-    monkeypatch.setattr(requests, "patch", fake_patch)
-    monkeypatch.setattr(requests, "put", boom_put)
-
-    creds = UserCreds(user="u", forge_token_ref="u/forge-token")
-    ok = W._default_mr_closer("https://github.com/owner/repo/pull/7",
-                              creds, _cfg("github", base))
+def test_close_change_request_routes_to_github_pr_api():
+    http = _FakeHTTP()
+    ok = F.close_change_request("https://github.com/owner/repo/pull/7", "GH-PAT",
+                                config=_cfg("github"), http=http)
     assert ok is True
-    url, kw = calls[0]
+    verb, url, kw = http.calls[0]
+    assert verb == "patch"      # ⚠️ GitLab 의 PUT 이 아니라 GitHub 의 PATCH
     assert url == "https://api.github.com/repos/owner/repo/pulls/7"
     assert kw["json"] == {"state": "closed"}
     assert kw["headers"]["Authorization"] == "Bearer GH-PAT"
 
 
-def test_default_mr_closer_still_routes_gitlab_mr(tmp_path, monkeypatch):
-    import requests
-
-    from app import worker as W
-
-    base = str(tmp_path / "secrets")
-    _write(base, "u/forge-token", "GL-PAT")
-    calls: list = []
-
-    monkeypatch.setattr(requests, "put",
-                        lambda url, **kw: (calls.append((url, kw)),
-                                           SimpleNamespace(status_code=200))[1])
-    creds = UserCreds(user="u", forge_token_ref="u/forge-token")
-    ok = W._default_mr_closer("https://gitlab.example.com/g/p/-/merge_requests/7",
-                              creds, _cfg("gitlab", base))
+def test_close_change_request_routes_to_gitlab_mr_api():
+    http = _FakeHTTP()
+    ok = F.close_change_request("https://gitlab.example.com/g/p/-/merge_requests/7", "GL-PAT",
+                                config=_cfg("gitlab"), http=http)
     assert ok is True
-    url, kw = calls[0]
+    verb, url, kw = http.calls[0]
+    assert verb == "put"
     assert url.endswith("/api/v4/projects/g%2Fp/merge_requests/7")
+    assert kw["params"] == {"state_event": "close"}
     assert kw["headers"]["PRIVATE-TOKEN"] == "GL-PAT"
 
 
-@pytest.mark.parametrize("bad", ["https://github.com/owner/repo", "not-a-url", ""])
-def test_default_mr_closer_is_best_effort_on_bad_urls(bad, tmp_path):
-    from app import worker as W
+def test_close_change_request_prefers_the_url_over_config_kind():
+    """이미 만들어진 링크를 되돌리는 일이라 **링크의 모양**이 config 보다 믿을 만하다."""
+    http = _FakeHTTP()
+    # config 는 gitlab 인데 URL 은 GitHub PR → GitHub API 로 가야 한다.
+    assert F.close_change_request("https://github.com/o/r/pull/3", "PAT",
+                                  config=_cfg("gitlab"), http=http) is True
+    assert http.calls[0][0] == "patch"
 
-    base = str(tmp_path / "secrets")
-    _write(base, "u/forge-token", "PAT")
-    creds = UserCreds(user="u", forge_token_ref="u/forge-token")
-    assert W._default_mr_closer(bad, creds, _cfg("github", base)) is False
+
+@pytest.mark.parametrize("bad", ["https://github.com/owner/repo", "not-a-url", ""])
+def test_close_change_request_is_best_effort_on_bad_urls(bad):
+    http = _FakeHTTP()
+    assert F.close_change_request(bad, "PAT", config=_cfg("github"), http=http) is False
+    assert http.calls == []
+
+
+def test_close_change_request_without_token_never_calls_out():
+    http = _FakeHTTP()
+    assert F.close_change_request("https://github.com/o/r/pull/3", "",
+                                  config=_cfg("github"), http=http) is False
+    assert http.calls == []
 
 
 # --- 프롬프트/알림 용어 ------------------------------------------------------
@@ -474,18 +482,10 @@ def test_prompt_uses_pr_wording_on_github():
     assert "원격(GitLab)" in build_prompt(job_b, _cfg("gitlab"))
 
 
-def test_notify_message_uses_pr_wording_on_github():
-    from app.notify import build_message
-
-    result = SimpleNamespace(status="done", mr_url="https://github.com/o/r/pull/5",
-                             final_text="완료")
-    job = {"ticket": "PROJ-1", "autonomy_mode": "A"}
-    creds = UserCreds(user="u")
-    msg = build_message(result=result, job=job, creds=creds, forge_kind="github")
-    assert "PR: https://github.com/o/r/pull/5" in msg
-    assert "PR을 리뷰·머지" in msg
-    # 기본(kind 미지정)은 종전 문구 그대로.
-    assert "MR: " in build_message(result=result, job=job, creds=creds)
+# ⚠️ 알림 **메시지 조립**의 MR/PR 용어 테스트는 제거됐다 — 그 조립기
+# (app/notify.build_message)가 워커 잡-종료 통지자와 함께 은퇴했기 때문이다. 프랙탈
+# 경로의 알림 본문은 에이전트가 쓴 완료-리포트 그대로이고(notify_report.py), 용어를
+# 고르는 자리는 위 프롬프트 테스트가 지킨다.
 
 
 # --- base URL 판정 — ⚠️ **토큰이 나갈 곳을 정하는 일이다** --------------------

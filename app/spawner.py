@@ -18,7 +18,7 @@
         ROLE=worker
         DISPATCH_USER=<username>
         CENTRAL_URL=<spawn.central_url>          # 예: http://central:8787
-        WORKER_SHARED_SECRET=<주입>              # dispatch HTTP 인증(X-Worker-Secret)
+        WORKER_SHARED_SECRET=<주입>              # (은퇴) 옛 worker→central HTTP 인증
         CLAUDE_CODE_OAUTH_TOKEN=<주입>            # setup-token(값은 시크릿 참조에서)
         SECRETS_DIR=/run/secrets                  # 컨테이너 내부 시크릿 루트(tmpfs)
         JIRA_TOKEN_FILE / FORGE_TOKEN_FILE        # per-user 토큰 "파일경로"(값 아님)

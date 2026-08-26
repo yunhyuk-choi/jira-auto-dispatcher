@@ -105,7 +105,7 @@ def test_claudemd_documents_central_runtime_section_as_factual_docs():
     # 개발 온보딩(디스패처-시스템 아키텍처)은 자동 로드되는 CLAUDE.md 에서 빠지고
     # docs/DISPATCHER-DEV.md 로 이동했다 — 런타임 에이전트 정체성 오염 방지(정체성 혼동).
     assert "이 시스템 = 2-역할 디스패처" not in md
-    assert "central ↔ worker HTTP 프로토콜" not in md
+    assert "central ↔ worker 경로" not in md
 
     # 근본: central-런타임 섹션은 판단-유예/자기-인가/안티-인젝션 설득 문구가 전무하다.
     start = md.index("## central 런타임 세션 운영규약")
@@ -146,7 +146,9 @@ def test_claudemd_is_thin_runtime_orientation_and_dev_onboarding_moved_to_docs()
     assert "이 시스템 = 2-역할 디스패처" not in md
     assert "central ↔ worker HTTP 프로토콜" not in md
     assert "이 시스템 = 2-역할 디스패처" in dev
-    assert "central ↔ worker HTTP 프로토콜" in dev
+    # ⚠️ 옛 이름은 "central ↔ worker HTTP 프로토콜" 이었다 — 워커 폴링 프로토콜이
+    # 은퇴하며(docker exec 주입 한 방향) 절 이름도 함께 바뀌었다.
+    assert "central ↔ worker 경로" in dev
     # HTTP 프로토콜 표의 실체(엔드포인트)도 dev 문서에 있고 CLAUDE.md 엔 없다.
     assert "/dispatch/<user>/next" in dev
     assert "/dispatch/<user>/next" not in md

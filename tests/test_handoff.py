@@ -10,13 +10,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from types import SimpleNamespace
 
 from app import agent_runner as ar
 from app import queue as q
 from app import scheduler as sched
-from app import worker as w
-from app.dispatch import DISPATCHER_KEY, Dispatcher, dispatch_bp
+from app.dispatch import Dispatcher
 from app.gate import DedupGate
 from app.poller import Poller
 from app.queue import Job, JobQueue
@@ -68,6 +66,28 @@ def test_reassign_queued_redispatches_to_y(isolated_state):
     sch.on_complete("PROJ-1", q.DONE)                    # 레포락 해제 → Y로 재-dispatch
     assert sch.jobs.get("PROJ-2").status == q.RUNNING
     assert sch.jobs.get("PROJ-2").user == "u2"
+
+
+def test_reassign_queued_redispatch_routes_via_hook_not_tick(isolated_state):
+    """REDISPATCH 시 ``on_redispatch`` 훅이 주어지면 구 tick 대신 그 훅으로 재-dispatch 위임.
+
+    프랙탈 배포: 재-소유된 슬롯을 센트럴 세션으로 라우팅하려고 poller 가 훅을 주입한다.
+    훅이 있으면 스케줄러가 tick 으로 running 을 만들지 않는다(실행자 없어 스턱나지 않게).
+    """
+    sch, gate = _wire_sched()
+    # repoA 는 비어 있고 PROJ-2 는 queued — 훅이 없었다면(레거시) tick 이 즉시 running 으로 올린다.
+    sch.jobs.enqueue(_job("PROJ-2", "u1", ["repoA"]))
+    assert sch.jobs.get("PROJ-2").status == q.QUEUED
+
+    calls = []
+    signal = sch.reassign_or_handoff(
+        "PROJ-2", "u2", enabled=True, autonomy_mode="A",
+        on_redispatch=lambda t: calls.append(t))
+    assert signal == sched.REASSIGN_REDISPATCH
+    assert calls == ["PROJ-2"]                            # 훅으로 라우팅됨
+    j = sch.jobs.get("PROJ-2")
+    assert j.user == "u2"                                 # Y로 재-소유
+    assert j.status == q.QUEUED                           # ⚠️ 구 tick 미실행(running 안 됨)
 
 
 def test_reassign_running_hands_off_then_continues_to_y(isolated_state):
@@ -154,50 +174,6 @@ def test_reassign_terminal_job_returns_no_job(isolated_state):
 
 
 # =========================================================================
-# dispatch control 엔드포인트 — action 필드
-# =========================================================================
-
-
-def _wire_disp():
-    reg = Registry()
-    reg.upsert(UserRecord(username="u1", jira_account_id="a1", enabled=True))
-    gate = DedupGate()
-    sch = Scheduler(make_config(concurrency_per_worker=5), JobQueue(), gate=gate)
-    disp = Dispatcher(reg, sch)
-    return reg, gate, sch, disp
-
-
-def test_control_returns_handoff_action(isolated_state):
-    """핸드오프 요청 시 control이 {"cancel": False, "action": "handoff"}를 반환한다."""
-    _, gate, sch, disp = _wire_disp()
-    gate.claim("PROJ-1")
-    disp.enqueue("u1", Job(ticket="PROJ-1", target_repos=["repoA"]))
-    # 정상: none
-    assert disp.control("u1", "PROJ-1") == {"cancel": False, "action": "none"}
-    # 핸드오프 요청 → action=handoff (cancel은 False — 구 worker 오취소 방지).
-    sch.reassign_or_handoff("PROJ-1", "u2", enabled=True)
-    assert disp.control("u1", "PROJ-1") == {"cancel": False, "action": "handoff"}
-
-
-def test_http_control_route_handoff(isolated_state):
-    """HTTP control 라우트도 action=handoff를 그대로 노출한다."""
-    from flask import Flask
-
-    _, gate, sch, disp = _wire_disp()
-    gate.claim("PROJ-1")
-    disp.enqueue("u1", Job(ticket="PROJ-1", target_repos=["repoA"]))
-    sch.reassign_or_handoff("PROJ-1", "u2", enabled=True)
-
-    app = Flask(__name__)
-    app.config[DISPATCHER_KEY] = disp
-    app.register_blueprint(dispatch_bp)
-    client = app.test_client()
-    r = client.get("/dispatch/u1/PROJ-1/control")
-    assert r.status_code == 200
-    assert r.get_json() == {"cancel": False, "action": "handoff"}
-
-
-# =========================================================================
 # agent_runner — 핸드오프 신호 → STATUS_HANDOFF (롤백 아님) + 프롬프트 힌트
 # =========================================================================
 
@@ -264,194 +240,6 @@ def test_build_prompt_continue_from_wip_hint():
 
 
 # =========================================================================
-# worker — checkpoint_job(커밋·push, 롤백X) + 핸드오프 후처리
-# =========================================================================
-
-
-def _cfg():
-    return SimpleNamespace(
-        resume=SimpleNamespace(reset_buffer_sec=0),
-        run=SimpleNamespace(orchestrator_repo="/app/orch", claude_bin="claude",
-                            output_format="stream-json", workspace_dir="/ws"),
-        secrets=SimpleNamespace(base_dir=""),
-    )
-
-
-def _token_cfg(tmp_path, user="u1"):
-    """per-user 토큰(gitlab-token)을 갖춘 cfg — #6 자격증명 위생 테스트용."""
-    (tmp_path / user).mkdir(exist_ok=True)
-    (tmp_path / user / "gitlab-token").write_text("TKN123", encoding="utf-8")
-    return SimpleNamespace(
-        resume=SimpleNamespace(reset_buffer_sec=0),
-        run=SimpleNamespace(orchestrator_repo="/app/orch", claude_bin="claude",
-                            output_format="stream-json", workspace_dir="/ws"),
-        secrets=SimpleNamespace(base_dir=str(tmp_path)),
-    )
-
-
-def _creds_u1():
-    return ar.UserCreds(user="u1", gitlab_token_ref="u1/gitlab-token")
-
-
-def test_checkpoint_job_commits_and_pushes(tmp_path):
-    """checkpoint_job은 롤백 대신 add/commit/push로 WIP를 보존한다(주입 git_run).
-
-    #6: push 는 ambient `origin` 이 아니라 **per-user 토큰 URL** 로 나간다."""
-    seen = []
-
-    def git_run(args, cwd=None):
-        seen.append(list(args))
-        if args[:2] == ["remote", "get-url"]:
-            return SimpleNamespace(returncode=0,
-                                   stdout="http://server.example/g/repoA.git\n", stderr="")
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    notes = []
-
-    def write_note(cwd, ticket, branch):
-        notes.append((ticket, branch))
-        return "runs/PROJ-1/HANDOFF.md"
-
-    job = {"ticket": "PROJ-1", "branch": "auto/PROJ-1", "target_repos": ["repoA"]}
-    cp = w.checkpoint_job(job, _creds_u1(), _token_cfg(tmp_path),
-                          git_run=git_run, write_note=write_note)
-    assert cp["checkpointed"] is True
-    assert cp["committed"] is True
-    assert cp["pushed"] is True
-    assert cp["branch"] == "auto/PROJ-1"
-    # 롤백(branch -D)이 아니라 commit + push를 한다.
-    assert ["add", "-A"] in seen
-    assert any(a[:2] == ["commit", "-m"] for a in seen)
-    # #6: ambient `push origin` 금지 — per-user 토큰 URL 로 push.
-    assert not any(a[:2] == ["push", "origin"] for a in seen)
-    push_calls = [a for a in seen if a[:1] == ["push"]]
-    assert push_calls, "push 호출이 있어야 한다"
-    assert all("oauth2:TKN123@" in a[1] for a in push_calls)  # 명시 토큰 URL
-    assert all(a[-1] == "auto/PROJ-1" for a in push_calls)
-    assert not any(a[:2] == ["branch", "-D"] for a in seen)   # 롤백 아님
-    assert notes == [("PROJ-1", "auto/PROJ-1")]               # 이관 저널 노트 기록
-
-
-def test_checkpoint_job_skips_commit_when_nothing_to_commit(tmp_path):
-    """커밋할 변경이 없으면(commit nonzero) committed=False, push는 여전히 시도(토큰 URL)."""
-    def git_run(args, cwd=None):
-        if args[:2] == ["remote", "get-url"]:
-            return SimpleNamespace(returncode=0,
-                                   stdout="http://server.example/g/repoA.git", stderr="")
-        rc = 1 if args[:1] == ["commit"] else 0   # commit만 '변경 없음'
-        return SimpleNamespace(returncode=rc, stdout="", stderr="")
-
-    job = {"ticket": "PROJ-1", "branch": "auto/PROJ-1", "target_repos": ["repoA"]}
-    cp = w.checkpoint_job(job, _creds_u1(), _token_cfg(tmp_path),
-                          git_run=git_run, write_note=lambda *a, **k: None)
-    assert cp["committed"] is False
-    assert cp["pushed"] is True                    # 선행 커밋 push는 시도됨
-    assert cp["checkpointed"] is True              # push만 돼도 보존됨
-
-
-def test_checkpoint_job_skips_push_without_user_token(tmp_path):
-    """#6: per-user 토큰이 없으면 push 를 **skip**(ambient `origin` 폴백 금지)."""
-    seen = []
-
-    def git_run(args, cwd=None):
-        seen.append(list(args))
-        if args[:2] == ["remote", "get-url"]:
-            return SimpleNamespace(returncode=0,
-                                   stdout="http://server.example/g/repoA.git", stderr="")
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    # 토큰 ref 미설정 → 토큰 미해결.
-    job = {"ticket": "PROJ-1", "branch": "auto/PROJ-1", "target_repos": ["repoA"]}
-    cfg = SimpleNamespace(run=SimpleNamespace(workspace_dir="/ws"),
-                          secrets=SimpleNamespace(base_dir=str(tmp_path)))
-    cp = w.checkpoint_job(job, ar.UserCreds(user="u1"), cfg,
-                          git_run=git_run, write_note=lambda *a, **k: None)
-    assert cp["pushed"] is False
-    assert not any(a[:1] == ["push"] for a in seen)   # ambient 폴백 없이 push 자체를 안 한다
-
-
-class HandoffHTTP:
-    """next 1회 + control(handoff) 응답 + post 기록(핸드오프 실행경로 검증용)."""
-
-    def __init__(self, job, action="handoff"):
-        self.job = job
-        self.action = action
-        self._next_served = False
-        self.posts = []
-        self.control_polls = 0
-
-    def get(self, url, headers=None):
-        if url.endswith("/next"):
-            if not self._next_served:
-                self._next_served = True
-                return _Resp(200, self.job)
-            return _Resp(204)
-        if url.endswith("/control"):
-            self.control_polls += 1
-            return _Resp(200, {"cancel": False, "action": self.action})
-        return _Resp(204)
-
-    def post(self, url, json=None, headers=None):
-        self.posts.append((url, json))
-        return _Resp(200, {})
-
-
-class _Resp:
-    def __init__(self, status_code, payload=None):
-        self.status_code = status_code
-        self._payload = payload
-
-    def json(self):
-        if self._payload is None:
-            raise ValueError("no json body")
-        return self._payload
-
-
-_ENV = {"DISPATCH_USER": "u1", "CENTRAL_URL": "http://central:8787"}
-_NOW = lambda: datetime(2026, 1, 1, tzinfo=timezone.utc)
-
-
-def _statuses(http):
-    return [p[1].get("status") for p in http.posts]
-
-
-def test_worker_handoff_triggers_checkpoint_not_rollback():
-    """실행 중 핸드오프 신호 → checkpoint 수행(롤백 아님) + handed_off 회신."""
-    job = {"ticket": "PROJ-1", "branch": "auto/PROJ-1", "target_repos": ["repoA"]}
-    http = HandoffHTTP(job, action="handoff")
-    cp_calls = {}
-    rb_calls = {"n": 0}
-
-    def run(job_, creds, cfg, cancel_check=None, **k):
-        # agent_runner 흉내: control이 handoff면 STATUS_HANDOFF 반환.
-        if cancel_check and ar._normalize_control(cancel_check()) == "handoff":
-            return ar.AgentResult(status=ar.STATUS_HANDOFF, session_id="s1",
-                                  log_summary="checkpointed")
-        return ar.AgentResult(status=ar.STATUS_DONE)
-
-    def checkpoint(job_, creds, cfg):
-        cp_calls["job"] = job_
-        return {"checkpointed": True, "committed": True, "pushed": True,
-                "branch": "auto/PROJ-1"}
-
-    def rollback(*a, **k):
-        rb_calls["n"] += 1
-        return {"rolledback": True}
-
-    w.worker_loop(_cfg(), env=dict(_ENV), http=http, run=run,
-                  resume=lambda *a, **k: None, sleep=lambda s: None, now=_NOW,
-                  rollback=rollback, checkpoint=checkpoint, max_iterations=1)
-
-    assert _statuses(http) == ["진행중", "handed_off"]   # 취소가 아니라 이관 회신
-    assert http.control_polls >= 1                      # control 폴링으로 감지
-    assert cp_calls["job"]["ticket"] == "PROJ-1"        # checkpoint 수행
-    assert rb_calls["n"] == 0                            # ⚠️ 롤백은 절대 하지 않음
-    payload = http.posts[-1][1]
-    assert payload["branch"] == "auto/PROJ-1"
-    assert payload["audit_refs"] == {"committed": True, "pushed": True}
-
-
-# =========================================================================
 # 폴러/웹훅 — 담당자 변경 감지 라우팅(재배정 ≠ 취소)
 # =========================================================================
 
@@ -487,7 +275,19 @@ def _issue(key, account_id, status="진행 중"):
     }
 
 
-def _wire_poller(issues):
+class _FakeCentralSink:
+    """CentralSession 대역 — inject_event 호출 기록."""
+
+    def __init__(self, ok=True):
+        self.events = []
+        self._ok = ok
+
+    def inject_event(self, job):
+        self.events.append(job)
+        return self._ok
+
+
+def _wire_poller(issues, *, central_sink=None):
     reg = Registry()
     reg.upsert(UserRecord(username="u1", jira_account_id="a1", enabled=True))
     reg.upsert(UserRecord(username="u2", jira_account_id="a2", enabled=True))
@@ -495,9 +295,16 @@ def _wire_poller(issues):
     gate = DedupGate()
     cfg = make_config(concurrency_per_worker=5)
     cfg.run.repo_resolution = "static"
+    if central_sink is not None:
+        # 프랙탈 활성 — 지속 stream-json 세션 전제.
+        cfg.run.fractal_central = True
+        cfg.run.persistent_session = True
+        cfg.run.output_format = "stream-json"
+        cfg.run.input_format = "stream-json"
     sch = Scheduler(cfg, JobQueue(), gate=gate)
     disp = Dispatcher(reg, sch)
-    poller = Poller(cfg, FakeJira(issues), gate, reg, disp, clock=lambda: _FIXED_NOW)
+    poller = Poller(cfg, FakeJira(issues), gate, reg, disp, clock=lambda: _FIXED_NOW,
+                    central_sink=central_sink)
     return reg, sch, gate, poller
 
 
@@ -513,6 +320,26 @@ def test_poll_once_reassignment_routes_to_handoff(isolated_state):
     assert j.status == q.HANDING_OFF                      # 핸드오프 요청됨(취소 아님)
     assert j.control_action == "handoff"
     assert j.user == "u1"                                 # 회신 전까진 X 소유
+
+
+def test_poll_once_reassignment_queued_routes_to_central_when_fractal(isolated_state):
+    """프랙탈 활성 + 큐 대기 잡의 담당자 변경(X=u1→Y=u2): REDISPATCH 를 구 tick 이 아니라
+    정상 폴링 티켓과 동일한 센트럴 세션 seam(inject_event)으로 라우팅 + fractal 표식."""
+    sink = _FakeCentralSink()
+    reg, sch, gate, poller = _wire_poller(
+        [_issue("PROJ-2", "a2", status="진행 중")], central_sink=sink)
+    gate.claim("PROJ-2")
+    sch.jobs.enqueue(_job("PROJ-2", "u1", ["repoA"]))     # queued(u1) — WIP 없음
+    assert sch.jobs.get("PROJ-2").status == q.QUEUED
+
+    poller.poll_once()                                    # 담당자 a2(u2) 감지 → REDISPATCH
+    # 센트럴 세션으로 주입됨(구 tick 아님).
+    assert len(sink.events) == 1 and sink.events[0].ticket == "PROJ-2"
+    j = sch.jobs.get("PROJ-2")
+    assert j.user == "u2"                                 # Y로 재-소유
+    assert j.status == q.QUEUED                           # running 안 만듦(스턱 방지)
+    assert j.is_fractal is True                           # 스케줄러 디스패치 제외
+    assert sch.tick() == []                               # 프랙탈 잡은 tick 이 건너뛴다
 
 
 def test_poll_once_same_owner_no_reassign(isolated_state):

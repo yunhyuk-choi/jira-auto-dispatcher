@@ -58,6 +58,9 @@ log = logging.getLogger("jad.forge")
 KIND_GITLAB = "gitlab"
 KIND_GITHUB = "github"
 
+# 변경요청 닫기 API 호출 타임아웃(초) — 취소 롤백은 부수적이므로 짧게 클램프.
+CLOSE_TIMEOUT_SEC = 30
+
 #: 종류를 못 정했을 때의 기본 — 기존 배포가 전부 GitLab 이었으므로 gitlab 이다(무동작변경).
 DEFAULT_KIND = KIND_GITLAB
 
@@ -397,3 +400,92 @@ def search_change_url(text: str, kind: Any = None) -> Optional[str]:
             return m.group(0)
     m = _ANY_CHANGE_URL.search(body)
     return m.group(0) if m else None
+
+
+# --- 변경요청 닫기(취소 롤백 프리미티브) ------------------------------------
+#
+# ⚠️ **현재 파이썬 호출자는 없다.** 취소 롤백(브랜치 삭제 + 변경요청 닫기)은 워커 폴링
+# 루프(app/worker.py)의 일부였고, 그 루프가 프랙탈 센트럴 세션으로 대체되며 함께 은퇴
+# 했다 — 지금은 워커 컨테이너 안의 에이전트가 취소 지시를 받아 스스로 되돌린다.
+# 그럼에도 이 프리미티브를 forge 어댑터에 남기는 이유는, forge 중립성(GitLab MR /
+# GitHub PR 의 API 모양 차이)이 **여기 말고는 어디에도 기록돼 있지 않기** 때문이다.
+# 파이썬 경로에서 롤백을 다시 하게 되면 이 함수가 그 자리다.
+
+
+def _requests():
+    """HTTP 클라이언트(requests 모듈). 지연 import — 테스트 격리·로드 오버헤드 회피."""
+    import requests  # noqa: PLC0415
+
+    return requests
+
+
+def _close_gitlab_mr(url: str, token: str, *, http=None) -> bool:
+    """GitLab MR 닫기(``PUT …/merge_requests/{iid}?state_event=close``).
+
+    URL 모양이 GitLab MR 이 아니면 False(호출부가 best-effort 로 흡수).
+    """
+    import urllib.parse  # noqa: PLC0415
+
+    # url 예: https://gitlab.example.com/group/proj/-/merge_requests/7
+    marker = "/-/merge_requests/"
+    if marker not in url:
+        return False
+    left, iid = url.split(marker, 1)
+    iid = iid.strip("/").split("/")[0]
+    _scheme_host, _, project_path = left.partition("://")[2].partition("/")
+    if not project_path:
+        return False
+    base = left.split("/", 3)  # [scheme:, '', host, project_path]
+    host = base[2] if len(base) >= 3 else ""
+    api = (f"https://{host}/api/v4/projects/"
+           f"{urllib.parse.quote_plus(project_path)}/merge_requests/{iid}")
+    client = http if http is not None else _requests()
+    resp = client.put(api, params={"state_event": "close"},
+                      headers={"PRIVATE-TOKEN": token}, timeout=CLOSE_TIMEOUT_SEC)
+    return getattr(resp, "status_code", 500) < 400
+
+
+def _close_github_pr(url: str, token: str, *, http=None) -> bool:
+    """GitHub PR 닫기(``PATCH /repos/{owner}/{repo}/pulls/{n}`` state=closed).
+
+    GitHub.com 은 ``api.github.com``, GHE 는 ``<host>/api/v3`` 가 API 루트다.
+    URL 모양이 GitHub PR 이 아니면 False(호출부가 best-effort 로 흡수).
+    """
+    # url 예: https://github.com/owner/repo/pull/7
+    marker = "/pull/"
+    if marker not in url:
+        return False
+    left, number = url.split(marker, 1)
+    number = number.strip("/").split("/")[0]
+    host, _, repo_path = left.partition("://")[2].partition("/")
+    if not host or repo_path.count("/") < 1:
+        return False
+    owner, _, repo = repo_path.partition("/")
+    repo = repo.split("/")[0]
+    root = "https://api.github.com" if host.lower() == "github.com" else f"https://{host}/api/v3"
+    api = f"{root}/repos/{owner}/{repo}/pulls/{number}"
+    client = http if http is not None else _requests()
+    resp = client.patch(
+        api, json={"state": "closed"},
+        headers={"Authorization": f"Bearer {token}",
+                 "Accept": "application/vnd.github+json"},
+        timeout=CLOSE_TIMEOUT_SEC,
+    )
+    return getattr(resp, "status_code", 500) < 400
+
+
+def close_change_request(url: str, token: str, *, config: Any = None,
+                         kind: Any = None, http=None) -> bool:
+    """변경요청(GitLab MR / GitHub PR)을 닫는다 — best-effort → 성공 여부 bool.
+
+    forge 판정은 **그 URL 자신**이 우선한다(:func:`kind_for`) — 이미 만들어진 링크를
+    되돌리는 일이라 링크의 모양이 가장 믿을 만한 근거다. 호스트가 중립이면
+    ``config.forge.kind`` 로 내려간다. 토큰이 없거나 URL 모양이 안 맞으면 False.
+
+    ⚠️ 토큰은 헤더로만 실린다(URL·로그에 남기지 않는다).
+    """
+    if not (url or "").strip() or not (token or "").strip():
+        return False
+    if kind_for(url=url, kind=kind, config=config) == KIND_GITHUB:
+        return _close_github_pr(url, token, http=http)
+    return _close_gitlab_mr(url, token, http=http)

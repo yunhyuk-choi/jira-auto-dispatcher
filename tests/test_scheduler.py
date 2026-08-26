@@ -78,18 +78,6 @@ def test_complete_dispatches_next_on_same_repo(isolated_state):
     assert _status(sch, "PROJ-2") == q.RUNNING
 
 
-def test_next_for_user_excludes_in_flight_tickets(isolated_state):
-    # next_for_user가 exclude로 서로 다른 running 잡을 준다(worker 동시 수령). 잡 수 cap 없음.
-    sch = _sch()
-    sch.enqueue(_job("PROJ-1", "u1", ["repoA"]))
-    sch.enqueue(_job("PROJ-2", "u1", ["repoB"]))
-    first = sch.next_for_user("u1")
-    assert first.ticket == "PROJ-1"                  # 첫 running(삽입 순서)
-    second = sch.next_for_user("u1", exclude={"PROJ-1"})
-    assert second.ticket == "PROJ-2"
-    assert sch.next_for_user("u1", exclude={"PROJ-1", "PROJ-2"}) is None
-
-
 def test_unresolved_target_is_global_serial(isolated_state):
     sch = _sch()
     sch.enqueue(_job("PROJ-1", "u1", []))          # 미해석 → 단독 실행
@@ -206,7 +194,7 @@ def test_default_probe_fail_open_admits(isolated_state):
 
 
 # ===========================================================================
-# 재개 / 라우터 / rerun / 재시작 — 자원 무관 정확성(ample 프로브).
+# 재개 / 라우터 / 재시작 — 자원 무관 정확성(ample 프로브).
 # ===========================================================================
 
 def test_interrupted_reset_at_reeligibility(isolated_state):
@@ -248,49 +236,6 @@ def test_report_router(isolated_state):
     # 완료(한글) → done
     sch.report("PROJ-1", "완료")
     assert sch.jobs.get("PROJ-1").status == q.DONE
-
-
-def test_rerun_resets_terminal_job_and_redispatches(isolated_state):
-    """종결(failed) 잡을 사람이 수동 재실행 → queued 리셋 후 재-dispatch(수정 2)."""
-    from app.gate import DedupGate
-
-    gate = DedupGate()
-    sch = Scheduler(make_config(), JobQueue(), gate=gate, resource_probe=_AMPLE)
-    sch.enqueue(_job("PROJ-1", "u1", ["repoA"]))
-    sch.on_complete("PROJ-1", q.FAILED)          # 연결실패 등으로 실패 종결
-    assert _status(sch, "PROJ-1") == q.FAILED
-
-    dispatched = sch.rerun("PROJ-1")
-    assert "PROJ-1" in dispatched                 # 재-dispatch 시도됨
-    assert _status(sch, "PROJ-1") == q.RUNNING
-    j = sch.jobs.get("PROJ-1")
-    assert j.reset_at is None and j.session_id is None
-    assert j.attempts == 1                         # reopen(0) → dispatch(+1)
-    assert gate.is_claimed("PROJ-1")               # dedup 재확보
-
-
-def test_rerun_reclaims_dedup_after_cancel(isolated_state):
-    """취소 확정(dedup 해제)된 잡도 rerun이 dedup을 재확보하고 재-dispatch한다."""
-    from app.gate import DedupGate
-
-    gate = DedupGate()
-    gate.claim("PROJ-1")
-    sch = Scheduler(make_config(), JobQueue(), gate=gate, resource_probe=_AMPLE)
-    sch.enqueue(_job("PROJ-1", "u1", ["repoA"]))
-    sch.confirm_cancelled("PROJ-1")                # cancelled + dedup 해제
-    assert not gate.is_claimed("PROJ-1")
-
-    sch.rerun("PROJ-1")
-    assert gate.is_claimed("PROJ-1")               # 재확보
-    assert _status(sch, "PROJ-1") == q.RUNNING
-
-
-def test_rerun_unknown_job_raises(isolated_state):
-    import pytest
-
-    sch = _sch()
-    with pytest.raises(KeyError):
-        sch.rerun("NOPE")
 
 
 def test_restart_rebuilds_locks_from_persisted_jobs(isolated_state):

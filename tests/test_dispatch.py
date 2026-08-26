@@ -1,20 +1,25 @@
-"""dispatch 단위테스트 — enqueue(스케줄러 경유)·next·status·인증·교차유저."""
+"""dispatch 단위테스트 — enqueue(스케줄러 경유)·완료 상태머신·dlc-meta 커밋·교차유저.
+
+⚠️ 프랙탈 P2: 레거시 worker-facing HTTP 서빙(GET /next·POST /status·GET /control)과
+그 폴링 소비자(app/worker.py)는 제거됐다(이중 실행 근본 차단). 남은 인프로세스 표면
+(enqueue·report_status·list_jobs·Tier-2 pending)만 검증한다.
+"""
 
 from __future__ import annotations
 
 from app import queue as q
-from app.dispatch import DISPATCHER_KEY, Dispatcher, dispatch_bp
+from app.dispatch import Dispatcher
 from app.queue import Job, JobQueue
 from app.registry import Registry, UserRecord
 from app.scheduler import Scheduler
 from tests.conftest import make_config
 
 
-def _wire(worker_secret="", per_user=5):
+def _wire(per_user=5):
     reg = Registry()
     reg.upsert(UserRecord(username="u1", jira_account_id="a1", enabled=True))
     sch = Scheduler(make_config(concurrency_per_worker=per_user), JobQueue())
-    disp = Dispatcher(reg, sch, worker_secret=worker_secret)
+    disp = Dispatcher(reg, sch)
     return reg, sch, disp
 
 
@@ -23,43 +28,6 @@ def test_enqueue_goes_through_scheduler(isolated_state):
     disp.enqueue("u1", Job(ticket="PROJ-1", target_repos=["repoA"]))
     j = sch.jobs.get("PROJ-1")
     assert j.user == "u1" and j.status == q.RUNNING   # 스케줄러가 즉시 dispatch
-
-
-def test_next_job_returns_running_for_user(isolated_state):
-    _, sch, disp = _wire()
-    disp.enqueue("u1", Job(ticket="PROJ-1", target_repos=["repoA"]))
-    got = disp.next_job("u1")
-    assert got is not None and got.ticket == "PROJ-1"
-    assert disp.next_job("other") is None
-
-
-def test_next_job_exclude_serves_distinct_jobs(isolated_state):
-    # per-user 동시(Increment 2): exclude로 이미 처리 중인 잡을 빼고 다른 running 잡을 준다.
-    _, sch, disp = _wire()
-    disp.enqueue("u1", Job(ticket="PROJ-1", target_repos=["repoA"]))
-    disp.enqueue("u1", Job(ticket="PROJ-2", target_repos=["repoB"]))   # 다른 레포 → 둘 다 running
-    assert disp.next_job("u1").ticket == "PROJ-1"
-    assert disp.next_job("u1", exclude={"PROJ-1"}).ticket == "PROJ-2"
-    assert disp.next_job("u1", exclude={"PROJ-1", "PROJ-2"}) is None
-
-
-def test_http_next_exclude_query(isolated_state):
-    from flask import Flask
-    _, sch, disp = _wire(worker_secret="secret")
-    disp.enqueue("u1", Job(ticket="PROJ-1", target_repos=["repoA"]))
-    disp.enqueue("u1", Job(ticket="PROJ-2", target_repos=["repoB"]))
-    app = Flask(__name__)
-    app.config[DISPATCHER_KEY] = disp
-    app.register_blueprint(dispatch_bp)
-    client = app.test_client()
-    hdr = {"X-Worker-Secret": "secret"}
-    r = client.get("/dispatch/u1/next", headers=hdr)
-    assert r.get_json()["ticket"] == "PROJ-1"
-    # 처리 중(PROJ-1)을 배제하면 다른 running 잡(PROJ-2)을 준다.
-    r2 = client.get("/dispatch/u1/next?exclude=PROJ-1", headers=hdr)
-    assert r2.get_json()["ticket"] == "PROJ-2"
-    # 둘 다 배제 → 204.
-    assert client.get("/dispatch/u1/next?exclude=PROJ-1,PROJ-2", headers=hdr).status_code == 204
 
 
 def test_report_status_terminal_triggers_on_complete(isolated_state):
@@ -149,38 +117,10 @@ def test_cross_user_claim_rejected(isolated_state):
         pass
 
 
-# --- Flask 라우트/인증 ---
-
-
-def _app(disp):
-    from flask import Flask
-    app = Flask(__name__)
-    app.config[DISPATCHER_KEY] = disp
-    app.register_blueprint(dispatch_bp)
-    return app.test_client()
-
-
-def test_http_next_and_status_with_auth(isolated_state):
-    _, sch, disp = _wire(worker_secret="secret")
-    disp.enqueue("u1", Job(ticket="PROJ-1", target_repos=["repoA"]))
-    client = _app(disp)
-
-    # 인증 없음 → 401
-    assert client.get("/dispatch/u1/next").status_code == 401
-    # 인증 OK → 잡 반환
-    r = client.get("/dispatch/u1/next", headers={"X-Worker-Secret": "secret"})
-    assert r.status_code == 200 and r.get_json()["ticket"] == "PROJ-1"
-    # 다른 유저는 204
-    assert client.get("/dispatch/nobody/next", headers={"X-Worker-Secret": "secret"}).status_code == 204
-    # status 회신
-    r = client.post("/dispatch/u1/PROJ-1/status", headers={"X-Worker-Secret": "secret"},
-                    json={"status": "완료"})
-    assert r.status_code == 200
-    assert sch.jobs.get("PROJ-1").status == q.DONE
-
-
-def test_http_unknown_job_404(isolated_state):
+def test_unknown_job_raises_keyerror(isolated_state):
     _, sch, disp = _wire()
-    client = _app(disp)
-    r = client.post("/dispatch/u1/NOPE/status", json={"status": "완료"})
-    assert r.status_code == 404
+    try:
+        disp.report_status("u1", "NOPE", {"status": "완료"})
+        assert False, "미존재 잡 보고가 KeyError를 내지 않음"
+    except KeyError:
+        pass

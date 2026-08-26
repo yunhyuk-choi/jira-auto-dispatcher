@@ -182,8 +182,18 @@ run: {}
     assert central_fractal_enabled(cfg) is True   # config.yaml 만으로 게이트 ON
 
 
-def test_fractal_central_env_override_still_off(tmp_path, monkeypatch):
-    # 승격 후에도 env FRACTAL_CENTRAL 명시가 여전히 우선 — falsy 로 끌 수 있다.
+def test_fractal_central_off_is_ignored_with_a_loud_warning(tmp_path, monkeypatch, caplog):
+    """⚠️ fractal-OFF 은퇴: 명시 false(yaml·env)는 **무시**되고 경고만 남는다.
+
+    예전에 OFF 는 "스케줄러 큐 → 워커 HTTP 폴링(구 경로)로 돈다"는 뜻이었지만, 그 폴링
+    소비자(app/worker.py)가 프랙탈 경로와 이중 실행(같은 티켓 두 번 → 중복 브랜치·변경
+    요청·완료알림)을 일으켜 제거됐다. 소비자가 없는 지금 OFF 는 **아무것도 실행되지
+    않음**을 뜻하므로, 옛 설정을 그대로 존중하면 조용한 무실행이 된다.
+
+    부팅 거부 대신 **무시 + 경고**를 택했다 — 이 키는 남의 배포에 이미 적혀 있을 수 있는
+    옛 키라 부팅을 막으면 업그레이드가 곧 장애가 되고(설정을 고칠 관리 UI 조차 안 뜬다),
+    OFF 로 얻을 동작이 더 이상 존재하지 않아 무시가 의도를 왜곡하지도 않는다.
+    """
     monkeypatch.setenv("SECRETS_DIR", "/tmp/jad-secrets")
     body = """
 role: central
@@ -192,17 +202,21 @@ match: { statuses: ["해야 할 일"] }
 secrets: { base_dir: "${SECRETS_DIR}" }
 run: {}
 """
+    # (1) env 로 끄려 해도 무시된다.
     monkeypatch.setenv("FRACTAL_CENTRAL", "false")
-    cfg = C.load_config(_write(tmp_path, body))
-    assert cfg.run.fractal_central is False   # env 우선(명시 falsy → OFF)
+    with caplog.at_level("ERROR", logger="jad.config"):
+        cfg = C.load_config(_write(tmp_path, body))
+    assert cfg.run.fractal_central is True
+    assert "무시" in caplog.text          # 조용히 뒤집지 않는다 — 추적 가능해야 한다
 
     from app.central_session import central_fractal_enabled
-    assert central_fractal_enabled(cfg) is False
+    assert central_fractal_enabled(cfg) is True
 
-    # 명시 yaml false 도 존중(env 없을 때).
+    # (2) yaml 로 끄려 해도 무시된다(옛 config.yaml 하위호환).
     monkeypatch.delenv("FRACTAL_CENTRAL", raising=False)
-    cfg2 = C.load_config(_write(tmp_path, body.replace("run: {}", "run: { fractal_central: false }")))
-    assert cfg2.run.fractal_central is False
+    cfg2 = C.load_config(
+        _write(tmp_path, body.replace("run: {}", "run: { fractal_central: false }")))
+    assert cfg2.run.fractal_central is True
 
 
 def test_missing_required_key_fails(tmp_path):

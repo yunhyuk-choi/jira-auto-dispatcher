@@ -34,13 +34,12 @@ Jira(PROJ) 티켓이 등록 사용자에게 새로 할당되면 이를 감지해
     gate         원자적 dedup claim(폴러·웹훅 수렴점)
     queue        잡 스토어 + 상태머신(dispatch의 하부 저장)
     registry     등록 사용자 레지스트리 CRUD + 영속
-    dispatch     사용자별 잡 큐 + central↔worker HTTP 프로토콜
+    dispatch     잡 등록(enqueue) + 완료 상태머신(report_status) + 관측/Tier-2 pending(인프로세스)
+    central_dispatch 모든 디스패치 진입점이 수렴하는 프랙탈 센트럴 세션 방출 seam(주입+관측성)
     spawner      Docker SDK로 사용자 worker 컨테이너 spawn/stop/status
-    poller       high-watermark JQL 폴링 → 사용자 매핑 → 디스패치
-    webhook      얇은 웹훅 엔드포인트(기본 비활성)
-    scheduler    리셋시각 재개 + 야간 드레인(사용자 큐 재-enqueue)
+    poller       high-watermark JQL 폴링 → 사용자 매핑 → 프랙탈 방출
+    scheduler    레포락/자원 어드미션 + 취소/재오픈/재배정 상태머신
     [worker]
-    worker       중앙 폴링 → 실행 → 상태 회신 + 한도 감지/재개
     agent_runner `claude -p` 실행 계약 구성 + per-user 정체성 주입
 """
 

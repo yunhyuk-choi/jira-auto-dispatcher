@@ -1,5 +1,18 @@
 # 설계 제안: 계층형 동적 디스패치 — 지속-임시 위임 트리
 
+> ## ⚠️ 이 문서는 **은퇴한 레거시 계층**을 서술한다 (역사적 기록)
+>
+> 이 분석이 다루는 `app/worker.py`(`worker_loop`)·`GET /dispatch/<user>/next`·
+> `POST …/status`·`GET …/control` 폴링 프로토콜은 **삭제됐다.** 그 소비자가
+> 프랙탈-센트럴 경로와 동시에 살아 있으면서 같은 티켓을 두 번 실행(중복 브랜치·중복
+> 변경요청·중복 완료알림)했기 때문이다. 지금의 유일한 실행 경로는
+> [DESIGN-fractal-agent-dispatch.md](DESIGN-fractal-agent-dispatch.md) 가 서술하는
+> **상주 센트럴 라이브 세션 → `docker exec` 주입**이다.
+>
+> 문서를 남기는 이유는 그 결론(왜 계층형 동적 디스패치가 필요했는가)이 프랙탈 설계의
+> 전제이기 때문이다. **아래의 코드 위치·HTTP 계약 서술은 현행이 아니다.**
+
+
 > ⚠️ **부분 SUPERSEDED (2026-08-20)** — 목표 아키텍처(§3)·열린 결정 D1~D4(§5)·Phase 3b 페이징은
 > **`DESIGN-fractal-agent-dispatch.md`(정본)** 으로 대체되었다. 특히 D3(in-process Agent SDK) 및
 > 3b-1/3b-2 러너·전송로 스캐폴드는 기각·은퇴. **이 문서의 As-Is(§1)·문제정의(§2)는 계속 유효**하며
@@ -94,7 +107,7 @@
 - **재개**: `interrupted + reset_at` 잡은 reset_at 도래 전까지 적격 풀에서 제외
   (`_eligible_now` `scheduler.py:496-507`).
 
-### 1.3 워커 — `app/worker.py` (`worker_loop`)
+### 1.3 워커 — `app/worker.py` (`worker_loop`) — **은퇴·삭제됨**
 
 - per-user 워커가 `GET /dispatch/<user>/next`로 잡을 수령, `run_job`으로 실행, 회신.
 - **⚠️ per-user 병렬은 이미 착지**(커밋 `f9eef29`, "Increment 2"). `worker_loop`는

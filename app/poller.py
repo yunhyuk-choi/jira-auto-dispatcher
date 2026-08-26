@@ -33,7 +33,7 @@
        전 프로젝트를 긁는 일이 없도록. 왜 안 도는지는 WARNING 으로 남는다.
     3. (A)·(B) 결과를 **티켓 키로 합집합·중복제거** 후, 각 유니크 이슈:
        gate.claim(key) → resolve_user(enabled + **per-user 프로젝트 범위 게이트**) →
-       target_repos 해석 → Job 생성 → dispatcher.enqueue(user, job)
+       target_repos 해석 → Job 생성 → _emit(user, job)(프랙탈 센트럴 세션 주입)
        (JQL 은 합집합이라 남의 프로젝트 티켓이 섞여 온다 — 담당자 매핑 단계에서
        :func:`app.scope.resolve_user_in_scope` 가 그것을 거른다.)
     4. created 워터마크는 처리한 max created로, assignee 워터마크는 now로 전진 후 영속
@@ -56,9 +56,11 @@ import threading
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
+from app import central_dispatch
 from app import queue as q
 from app import scheduler as sched
 from app import scope as scope_mod
+from app.central_dispatch import CentralInjectFailed  # noqa: F401 — 공용 seam 으로 이관, 재-export(하위호환)
 from app.queue import Job
 from app.repo_resolver import CentralAIRateLimited
 
@@ -69,17 +71,6 @@ _DEFAULT_TIMEZONE = "Asia/Seoul"
 
 # 한 드레인 사이클에서 해석·디스패치할 pending 티켓 상한(한꺼번에 몰아치지 않도록).
 _DRAIN_BATCH_DEFAULT = 10
-
-
-def _central_enabled(config) -> bool:
-    """프랙탈 P2 센트럴 신경로 활성 여부(지연 import — 순환/로드 오버헤드 회피).
-
-    ``run.fractal_central`` 기본 OFF. OFF면 이 함수만 False 를 돌려 poller 의 방출
-    seam 이 오늘과 **byte-for-byte 동일**하게 enqueue 로 수렴한다(무동작변경).
-    """
-    from app.central_session import central_fractal_enabled
-
-    return central_fractal_enabled(config)
 
 
 class AICooldown:
@@ -214,12 +205,12 @@ class Poller:
         로더가 공유 워크스페이스 dlc-meta를 pull·read 한다.
         ``llm_runner``: repo_resolver의 claude 실행자 주입(테스트 격리).
 
-        ``central_sink``(프랙탈 P2, 기본 None): 상주 센트럴 라이브 세션 핸들
+        ``central_sink``(프랙탈, 기본 None): 상주 센트럴 라이브 세션 핸들
         (``inject_event(job)`` 을 노출하는 :class:`app.central_session.CentralSession`).
-        ``run.fractal_central`` ON 이고 이 핸들이 주입돼 있으면, 해석된 티켓을
-        ``dispatcher.enqueue`` **대신** 센트럴 세션에 이벤트로 주입한다(설계 §3.1). OFF/
-        미주입이면 오늘과 **byte-for-byte 동일**하게 enqueue 한다(무동작변경). main.py 가
-        플래그 ON 일 때만 이 핸들을 주입한다.
+        해석된 티켓은 이 핸들을 통해 센트럴 세션에 이벤트로 주입된다(설계 §3.1) — 이것이
+        **유일 실행 경로**다. 미주입(오설정 배포)이면 방출을 조용히 건너뛴다(레거시
+        ``dispatcher.enqueue`` 폴백은 은퇴했다 — 그 소비자가 더 이상 없다). main.py 가
+        지속 세션이 성립할 때만 이 핸들을 주입한다.
         """
         self.config = config
         self.jira = jira_client
@@ -227,10 +218,10 @@ class Poller:
         self.registry = registry
         self.dispatcher = dispatcher
         self._central_sink = central_sink
-        # 프랙탈 P2 관측성(A.1): 프랙탈 경로에서 잡을 JobQueue(같은 store)에 queued 로
-        # 기록해 대시보드에 뜨게 하는 뼈대용 핸들. 미주입이면 dispatcher.scheduler.jobs 로
-        # 폴백한다(같은 인스턴스). 프랙탈 잡만 meta.fractal 표식으로 기록한다(구 경로 스케줄러
-        # 는 이 표식을 건너뛰어 이중 실행하지 않는다). None 이면 기록을 건너뛴다(뼈대 없음).
+        # 프랙탈 관측성(A.1): 프랙탈 경로에서 잡을 JobQueue(같은 store)에 queued 로
+        # 기록해 대시보드에 뜨게 하는 핸들. 미주입이면 dispatcher.scheduler.jobs 로
+        # 폴백한다(같은 인스턴스). 잡에 meta.fractal 표식을 달아 구 경로 스케줄러 tick 이
+        # 이를 running 으로 올리지 않게 한다. None 이면 기록을 건너뛴다.
         self._job_queue = job_queue
         if self._job_queue is None:
             self._job_queue = getattr(getattr(dispatcher, "scheduler", None), "jobs", None)
@@ -365,52 +356,28 @@ class Poller:
     # ------------------------------------------------------------------
 
     def _emit(self, user, job) -> None:
-        """해석된 잡을 하류로 방출 — 센트럴 신경로면 라이브 세션 주입, 아니면 enqueue.
+        """해석된 잡을 프랙탈 센트럴 라이브 세션에 이벤트로 주입(유일 실행 경로).
 
-        프랙탈 P2 주입 seam(설계 §3.1): ``run.fractal_central`` ON 이고 센트럴 세션
-        핸들(``_central_sink``)이 주입돼 있으면, 스케줄러 큐(``dispatcher.enqueue``) **대신**
-        상주 센트럴 라이브 세션에 이벤트로 주입한다(센트럴 에이전트가 레포락 consult →
-        사용자별 서브 스폰/이어위임 → 완료-리포트 수신 시 gchat). 그 외(플래그 OFF/핸들
-        미주입)면 오늘과 **byte-for-byte 동일**하게 enqueue 한다.
+        프랙탈 주입 seam(설계 §3.1): 공용 :mod:`app.central_dispatch` seam 으로 상주 센트럴
+        라이브 세션에 이벤트를 주입한다(센트럴 에이전트가 레포락 consult → 사용자별 서브
+        스폰/이어위임 → 완료-리포트 수신 시 알림 채널 상신). 재오픈/재배정/rerun 도 같은
+        seam 으로 수렴한다(진입점 통일).
 
-        ⚠️ 안전 폴백: 플래그 ON 이어도 주입이 실패하면(파이프 깨짐 등) 유실을 막기 위해
-        스케줄러 enqueue 로 폴백한다(잡을 떨어뜨리지 않는다). 재사용 원칙상 job.user 태깅
-        시맨틱은 dispatcher.enqueue 와 동일하게 유지한다.
+        ⚠️ 레거시 은퇴 완료: 프랙탈이 **유일 실행 경로**다(fractal-OFF 폴백 제거됨).
+        주입이 실패해도(파이프 깨짐 등) 구 경로(``dispatcher.enqueue`` → 스케줄러 → 워커
+        폴링)로 **폴백하지 않는다** — 그 소비자는 이제 존재하지 않으며, 폴백은 이중-체인·
+        이중-통지의 근원이었다. 실패면 dedup claim 을 되돌리고 :class:`CentralInjectFailed`
+        를 올려 폴 루프가 다음 사이클에 재시도하게 한다(잡 유실 없음 — 재트리거 가능).
+
+        ``central_active`` 가드는 이 배포의 프랙탈-ON 게이트(sink 주입 + 지속 세션 성립)이며
+        항상 참이다 — 유일하게 거짓일 수 있는 오설정 배포에선 방출을 조용히 건너뛴다(다음
+        폴에서 재시도).
         """
-        sink = self._central_sink
-        if sink is not None and _central_enabled(self.config):
-            try:
-                if sink.inject_event(job):
-                    log.info("central-inject: %s → user=%s repos=%s",
-                             getattr(job, "ticket", ""), user.username, job.target_repos)
-                    # 관측성 뼈대(A.1): 프랙탈 잡을 JobQueue 에 queued 로 기록(대시보드 가시성).
-                    # 구 경로 enqueue 를 타지 않으므로 여기서 명시 기록한다(이중 생성 없음 —
-                    # inject 성공 분기에서만, meta.fractal 표식으로 스케줄러 디스패치 제외).
-                    self._record_fractal_job(job)
-                    return
-                log.warning("central-inject 실패 → enqueue 폴백: %s", getattr(job, "ticket", ""))
-            except Exception:  # noqa: BLE001 — 주입 예외가 폴 루프를 죽이지 않게 격리 + 폴백
-                log.exception("central-inject 예외 → enqueue 폴백: %s", getattr(job, "ticket", ""))
-        self.dispatcher.enqueue(user.username, job)
-
-    def _record_fractal_job(self, job) -> None:
-        """프랙탈 잡을 JobQueue(같은 store)에 queued 로 기록 — 대시보드 최소 가시성 뼈대(A.1).
-
-        ``meta.fractal=True`` 표식을 달아 구 경로 스케줄러가 이 잡을 디스패치하지 않게 한다
-        (관측성 레코드일 뿐 — 실행은 상주 센트럴 세션이 조율). enqueue 는 티켓 멱등이라
-        재트리거로 이미 있으면(예: running) 덮어쓰지 않는다. best-effort — 기록 실패가 폴
-        루프를 죽이지 않는다.
-        """
-        jq = self._job_queue
-        if jq is None:
-            return
-        try:
-            job.meta[q.FRACTAL_META_KEY] = True
-            if not job.status:
-                job.status = q.QUEUED
-            jq.enqueue(job)
-        except Exception:  # noqa: BLE001 — 관측성 기록 실패가 방출/폴을 막지 않는다
-            log.warning("fractal 잡 레코드 생성 실패(격리): %s", getattr(job, "ticket", ""))
+        if central_dispatch.central_active(self.config, self._central_sink):
+            central_dispatch.emit_to_central(
+                self.config, self._central_sink, self._job_queue, self.gate, job)
+            log.info("central-inject: %s → user=%s repos=%s",
+                     getattr(job, "ticket", ""), user.username, job.target_repos)
 
     # ------------------------------------------------------------------
 
@@ -664,13 +631,39 @@ class Poller:
                      key, new_rec.username, scope_mod.project_key_of(key, issue) or "?")
         enabled = bool(new_rec.enabled) and in_scope
         mode = _mode_for(new_rec, job.target_repos)
+        # REDISPATCH(큐 대기분 재-소유) 는 정상 폴링 티켓과 **동일 프랙탈 seam** 으로 방출한다
+        # (재-소유된 슬롯을 센트럴 세션에 주입 — 구 tick 으로 running 만들어 스턱나지 않게).
+        # fractal-OFF 폴백 은퇴 완료: 훅을 항상 주입한다(레거시 tick 재-dispatch 분기 제거).
         signal = scheduler.reassign_or_handoff(
-            key, new_rec.username, enabled=enabled, autonomy_mode=mode)
+            key, new_rec.username, enabled=enabled, autonomy_mode=mode,
+            on_redispatch=self._central_redispatch)
         if signal == sched.REASSIGN_SAME_OWNER or signal == sched.REASSIGN_NO_JOB:
             return False  # 경계 재확인(잡 소멸 등) → 일반 스킵
         log.info("담당자 변경 감지: %s (X=%s → Y=%s, enabled=%s) → %s",
                  key, job.user, new_rec.username, enabled, signal)
         return True
+
+    def _central_redispatch(self, ticket: str) -> None:
+        """재배정(REDISPATCH)로 Y에게 재-소유된 큐 대기 슬롯을 프랙탈 센트럴 세션에 주입.
+
+        ``scheduler.reassign_or_handoff`` 이 락 밖에서 호출하는 훅. 슬롯은 이미
+        ``jobs.reassign`` 으로 queued 재초기화됐다. 리셋~주입 윈도우에서 구 경로 tick 이 이
+        잡을 비-프랙탈로 오인해 dispatch 하지 못하게 **먼저 fractal 표식**을 찍고
+        (mark_fractal), 정상 폴링 티켓과 동일 seam(emit_to_central)으로 주입한다. 주입 실패는
+        :class:`CentralInjectFailed` 로 전파돼 상위 폴/웹훅 루프가 재시도한다.
+
+        ``central_active`` 가 거짓인 오설정 배포에서는 조용히 건너뛴다 — 방출 seam
+        (:meth:`_emit`)·재오픈 seam 과 같은 게이트다. 여기서만 예외를 던지면 재배정이
+        오설정 배포에서 폴 루프를 깨뜨린다(잡은 큐 대기로 남아 다음 기회를 기다린다).
+        """
+        if not central_dispatch.central_active(self.config, self._central_sink):
+            return
+        central_dispatch.mark_fractal(self._job_queue, ticket)
+        job = self.dispatcher.scheduler.jobs.get(ticket)
+        if job is None:
+            return
+        central_dispatch.emit_to_central(
+            self.config, self._central_sink, self._job_queue, self.gate, job)
 
     def _make_job(self, key: str, issue: dict, user, target_repos: Optional[list] = None) -> Job:
         return build_job(self.config, key, issue, user, target_repos=target_repos)

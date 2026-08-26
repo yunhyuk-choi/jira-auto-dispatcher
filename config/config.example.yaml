@@ -259,15 +259,17 @@ run:
   # 지속 세션(persistent_session)이 꺼져 있으면 켜도 무시된다.
   fractal_worker: false
 
-  # --- 프랙탈 P2(센트럴 계층) 신경로 피처 플래그(기본 ON — 승격됨) ---
-  # true 면 central 이 신규/갱신 티켓을 스케줄러 큐 대신 **상주 센트럴 라이브 세션**
-  # (app/central_session.CentralSession)에 이벤트로 주입한다(설계 §3.1·§9 P2). 센트럴
-  # 세션이 사용자별 서브를 스폰해 워커로 위임하고, 리치 완료-리포트를 관찰해 gchat 으로
-  # 상신한다. **기본 ON 으로 승격**(라이브 검증 완료): 예전엔 비영속 env FRACTAL_CENTRAL=1
-  # override 로만 켜져 배포마다 꺼졌으나, 이제 코드/설정 기본이 true 라 override 없이
-  # 배포만으로 fractal ON 이 유지된다. env FRACTAL_CENTRAL 명시 시 그게 여전히 우선(끌 수도
-  # 있음). 지속 세션(persistent_session)+양방향 stream-json 이 꺼져 있으면 켜도 무시된다.
-  fractal_central: true
+  # --- 프랙탈 센트럴 실행 경로 — 토글 없음(항상 ON) ---
+  # central 은 신규/갱신 티켓을 **상주 센트럴 라이브 세션**(app/central_session)에
+  # 이벤트로 주입하고, 그 세션이 사용자별 서브를 스폰해 워커 컨테이너로 위임한다.
+  # ⚠️ 예전의 run.fractal_central 키는 **은퇴했다**. 옛 config 에 남아 있어도 값은
+  # 무시되고 경고만 남는다(OFF 로 얻던 구 경로 — 워커 HTTP 폴링 — 는 이중 실행,
+  # 즉 중복 변경요청·중복 완료알림의 원인이라 코드에서 제거됐다).
+  # 이 경로가 성립하려면 **지속 세션**(아래 두 키의 기본값)이 살아 있어야 한다.
+  # 끄면 티켓이 감지돼도 실행되지 않으며, 부팅 로그와 자가진단(/api/doctor)이 그
+  # 사실을 드러낸다. 특별한 이유가 없으면 그대로 둔다.
+  persistent_session: true
+  input_format: stream-json
 
   # --- central LLM 레포 리졸버(신규 티켓 → target_repos 판단) ---
   # "llm"(기본): central이 claude로 dlc-meta REPO-MAP + 티켓을 읽어 "이 티켓이

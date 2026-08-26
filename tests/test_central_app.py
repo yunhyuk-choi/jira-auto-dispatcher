@@ -34,7 +34,7 @@ def _write_config(tmp_path):
               poll_interval_sec: 60
               watcher_token_file: service/jira-token
             match: {{ statuses: ["해야 할 일"] }}
-            webhook: {{ enabled: false, path: /jira-webhook }}
+            webhook: {{ enabled: false }}
             secrets: {{ base_dir: "{secrets_dir.as_posix()}" }}
             run: {{ worker_max_concurrency: 64 }}
             """
@@ -75,23 +75,81 @@ def test_rerun_endpoint_unknown_job_404(central_client):
     assert res.get_json()["error"] == "unknown job"
 
 
-def test_rerun_endpoint_requeues_terminal_job(central_client):
-    """종결(failed) 잡을 rerun 엔드포인트가 queued로 되돌리고 재-dispatch 시도(수정 2)."""
+def _terminal_job(ticket="PROJ-77"):
+    """그 티켓을 종결(failed) 상태로 만들어 rerun 대상으로 세운다."""
     from app import main
     from app import queue as q
     from app.queue import Job
 
     scheduler = main._components["scheduler"]
-    scheduler.enqueue(Job(ticket="PROJ-9", user="u1", target_repos=["repoA"]))
-    scheduler.on_complete("PROJ-9", q.FAILED)
-    assert scheduler.jobs.get("PROJ-9").status == q.FAILED
+    scheduler.enqueue(Job(ticket=ticket, user="u1", target_repos=["repoA"]))
+    scheduler.on_complete(ticket, q.FAILED)
+    assert scheduler.jobs.get(ticket).status == q.FAILED
+    return scheduler
 
-    res = central_client.post("/api/jobs/PROJ-9/rerun")
+
+def test_rerun_endpoint_routes_to_central_seam(central_client, monkeypatch):
+    """수동 재실행이 정상 폴링 티켓과 **동일한 센트럴 세션 seam** 으로 라우팅된다.
+
+    구 경로(scheduler.rerun = reopen + tick → running)는 은퇴했다 — 그 잡을 집어 실행할
+    워커 폴링 소비자가 없어 running 인 채로 스턱되기 때문이다. 잡은 queued + fractal
+    표식으로 남아 tick 이 건너뛴다(이중 실행 방지).
+    """
+    from app import central_dispatch
+    from app import queue as q
+
+    scheduler = _terminal_job()
+    calls = []
+
+    def fake_emit(config, sink, job_queue, gate, job):
+        calls.append(job.ticket)
+        central_dispatch.record_fractal_job(job_queue, job)  # 실제 seam 과 동일 관측성 기록
+
+    monkeypatch.setattr(central_dispatch, "central_active", lambda cfg, sink: True)
+    monkeypatch.setattr(central_dispatch, "emit_to_central", fake_emit)
+
+    res = central_client.post("/api/jobs/PROJ-77/rerun")
     assert res.status_code == 200
     body = res.get_json()
-    assert body["ok"] is True
-    assert "PROJ-9" in body["dispatched"]
-    assert scheduler.jobs.get("PROJ-9").status == q.RUNNING
+    assert body["ok"] is True and body.get("fractal") is True
+    assert calls == ["PROJ-77"]                          # 센트럴 seam 으로 방출됨
+    job = scheduler.jobs.get("PROJ-77")
+    assert job.status == q.QUEUED                        # 구 tick 으로 running 만들지 않음
+    assert job.is_fractal is True                        # 스케줄러 디스패치 제외 표식
+    assert scheduler.tick() == []                        # 프랙탈 잡은 tick 이 건너뛴다
+
+
+def test_rerun_endpoint_refuses_when_central_inactive(central_client, monkeypatch):
+    """센트럴 세션이 성립하지 않는 오설정 배포에서는 **거부**한다(409).
+
+    레거시 실행 경로가 없으므로 "재실행했다"고 답하면 거짓말이 된다 — 잡은 종결 상태
+    그대로 두고 사람에게 설정을 고치라고 알린다.
+    """
+    from app import central_dispatch
+    from app import queue as q
+
+    scheduler = _terminal_job("PROJ-78")
+    monkeypatch.setattr(central_dispatch, "central_active", lambda cfg, sink: False)
+
+    res = central_client.post("/api/jobs/PROJ-78/rerun")
+    assert res.status_code == 409
+    assert scheduler.jobs.get("PROJ-78").status == q.FAILED   # 손대지 않았다
+
+
+def test_rerun_endpoint_reports_retryable_when_inject_fails(central_client, monkeypatch):
+    """주입 실패는 503 — seam 이 claim 을 되돌렸으니 사람이 다시 눌러 볼 수 있다."""
+    from app import central_dispatch
+
+    _terminal_job("PROJ-79")
+
+    def boom(config, sink, job_queue, gate, job):
+        raise central_dispatch.CentralInjectFailed(job.ticket)
+
+    monkeypatch.setattr(central_dispatch, "central_active", lambda cfg, sink: True)
+    monkeypatch.setattr(central_dispatch, "emit_to_central", boom)
+
+    res = central_client.post("/api/jobs/PROJ-79/rerun")
+    assert res.status_code == 503
 
 
 def test_scheduler_state_endpoint_read_only(central_client):

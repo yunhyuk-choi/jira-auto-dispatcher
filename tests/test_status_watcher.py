@@ -87,6 +87,36 @@ def _wire():
     return reg, gate, sch, disp, jira, watcher
 
 
+class _FakeCentralSink:
+    """CentralSession 대역 — inject_event 호출을 기록(반환값 구성 가능)."""
+
+    def __init__(self, ok=True):
+        self.events = []
+        self._ok = ok
+
+    def inject_event(self, job):
+        self.events.append(job)
+        return self._ok
+
+
+def _wire_central(sink_ok=True):
+    """프랙탈 활성(센트럴 세션 주입) status_watcher 배선 — 지속 stream-json 세션 전제."""
+    reg = Registry()
+    reg.upsert(UserRecord(username="u1", jira_account_id="a1", enabled=True))
+    gate = DedupGate()
+    cfg = make_config(concurrency_per_worker=5)
+    cfg.run.fractal_central = True
+    cfg.run.persistent_session = True
+    cfg.run.output_format = "stream-json"
+    cfg.run.input_format = "stream-json"
+    sch = Scheduler(cfg, JobQueue(), gate=gate)
+    disp = Dispatcher(reg, sch)
+    jira = FakeJira()
+    sink = _FakeCentralSink(ok=sink_ok)
+    watcher = StatusWatcher(cfg, jira, gate, reg, disp, central_sink=sink)
+    return reg, gate, sch, disp, jira, sink, watcher
+
+
 # --- 취소 감지 → abort -------------------------------------------------------
 
 
@@ -130,22 +160,49 @@ def test_done_status_is_not_cancel_and_no_rollback(isolated_state):
 # --- 재오픈: 취소됨 → 해야 할 일 → 재-enqueue -------------------------------
 
 
-def test_reopen_reenqueues_cancelled_ticket(isolated_state):
-    _, gate, sch, disp, jira, watcher = _wire()
+def test_reopen_routes_to_central_when_fractal(isolated_state):
+    """프랙탈 활성: 재오픈이 구 scheduler.reopen(→running, 실행자 없어 스턱)이 아니라 정상
+    폴링 티켓과 동일한 센트럴 세션 seam(inject_event)으로 라우팅된다 + fractal 표식으로 tick 제외."""
+    _, gate, sch, disp, jira, sink, watcher = _wire_central()
     gate.claim("PROJ-1")
     disp.enqueue("u1", Job(ticket="PROJ-1", user="u1", target_repos=["repoA"]))
-    sch.cancel_job("PROJ-1")               # cancelling
-    sch.report("PROJ-1", "취소됨")         # cancelled + dedup 해제
+    sch.cancel_job("PROJ-1")
+    sch.report("PROJ-1", "취소됨")               # cancelled + dedup 해제
     assert sch.jobs.get("PROJ-1").status == q.CANCELLED
-    assert gate.is_claimed("PROJ-1") is False
 
     jira.add("해야 할 일", _issue("PROJ-1", status="해야 할 일",
                                    updated="2026-08-11T09:00:00.000+0900"))
     res = watcher.poll_once()
     assert res["reopened"] == 1
-    assert sch.jobs.get("PROJ-1").status == q.RUNNING    # 같은 티켓 재-dispatch
-    assert gate.is_claimed("PROJ-1") is True             # 재-claim
-    assert watcher.reopen_watermark == "2026-08-11T09:00:00.000+0900"
+    # 센트럴 세션으로 주입됨(정상 폴링 티켓과 동일 seam) — 재-claim 은 유지.
+    assert len(sink.events) == 1 and sink.events[0].ticket == "PROJ-1"
+    job = sch.jobs.get("PROJ-1")
+    assert job.status == q.QUEUED                # 구 tick 으로 running 만들지 않음(스턱 방지)
+    assert job.is_fractal is True               # 스케줄러 디스패치 제외 표식
+    assert gate.is_claimed("PROJ-1") is True     # 재-claim 유지
+    assert sch.tick() == []                      # 프랙탈 잡은 tick 이 건너뛴다
+
+
+def test_reopen_fractal_inject_failure_releases_claim_and_raises(isolated_state):
+    """프랙탈 주입 실패: 레거시 폴백 없이 CentralInjectFailed 전파 + dedup claim 되돌림(재시도 가능)."""
+    from app.central_dispatch import CentralInjectFailed
+
+    _, gate, sch, disp, jira, sink, watcher = _wire_central(sink_ok=False)
+    gate.claim("PROJ-1")
+    disp.enqueue("u1", Job(ticket="PROJ-1", user="u1", target_repos=["repoA"]))
+    sch.cancel_job("PROJ-1")
+    sch.report("PROJ-1", "취소됨")
+    jira.add("해야 할 일", _issue("PROJ-1", status="해야 할 일",
+                                   updated="2026-08-11T09:00:00.000+0900"))
+    import pytest
+
+    with pytest.raises(CentralInjectFailed):
+        watcher.poll_once()
+    assert len(sink.events) == 1                 # 주입 시도는 했다
+    # claim 이 되돌려져 다음 주기 재트리거 가능(잡 유실 없음).
+    assert gate.is_claimed("PROJ-1") is False
+    # 구 경로로 running 만들지 않았다(스턱 방지).
+    assert sch.jobs.get("PROJ-1").status == q.QUEUED
 
 
 def test_reopen_skips_unmapped_assignee(isolated_state):
