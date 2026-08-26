@@ -22,11 +22,17 @@ consent:
   accepted_at: ""            # 동의 시각(ISO-8601, 예: 2026-08-25T09:00:00+09:00) — 감사 흔적
 
 # 어디에 세우는가. profile 하나만 고르면 나머지가 파생된다(app/setup_schema.PROFILE_DEFAULTS):
-#   local         개발자 노트북 — 도커 소켓 직결, 시크릿은 로컬 디렉토리(env SECRETS_DIR)
-#   cloud_vm      클라우드 VM  — compose + socket-proxy 경유, 시크릿 /run/secrets
+#   local         개발자 노트북 — 시크릿은 로컬 디렉토리(env SECRETS_DIR)
+#   cloud_vm      클라우드 VM  — 시크릿 /run/secrets
 #   onprem_server 사내 온프렘  — cloud_vm 과 같은 형태(다른 건 네트워크·정책이지 이 값들이 아니다)
+# ⚠️ **도커 접근은 세 프로파일 모두 socket-proxy 경유**다 — 이 리포의 docker-compose.yml 이
+#    그렇게 배포되고(Docker Desktop 포함, compose 를 한 글자도 안 고쳐도 뜬다), 소켓 직결은
+#    central 에 호스트 root 동치 권한을 준다(SECURITY.md §4). 굳이 직결하려면 아래
+#    docker_host 를 명시하고 compose 도 함께 바꾼다(INSTALL.md §3 의 "고급" 대안).
 # 아래 개별 값을 명시하면 프로파일 파생보다 우선한다. 레거시 키(spawn.docker_host·
 # spawn.workspace_volume·secrets.base_dir)도 계속 읽는다.
+# ⚠️ `python -m app.setup render` 는 프로파일 파생값을 **실제로 이 파일에 써 넣는다** —
+#    프로파일과 모순되는 예시 값이 남지 않는다.
 #
 # ⚠️ 예전에 여기 있던 host_deploy_dir(호스트 배포 절대경로)은 **없어졌다**. 워커에 거는
 # 마운트가 전부 named 볼륨이 되고, config·per-user 시크릿·알림 웹훅은 central 이 워커
@@ -34,7 +40,8 @@ consent:
 # 없다. 기존 config.yaml 에 그 키가 남아 있어도 무시된다(무해).
 deploy:
   profile: cloud_vm
-  docker_host: tcp://socket-proxy:2375     # 직결 대안: unix:///var/run/docker.sock (특권 확대)
+  docker_host: tcp://socket-proxy:2375     # 전 프로파일 공통 기본. 직결 대안:
+                                           # unix:///var/run/docker.sock (호스트 root 동치)
   # 시크릿 파일들의 루트(값 아님, 경로). 호스트 OS 무관 — 로컬 개발이면 임의의 로컬
   # 디렉토리(예: ~/.jad/secrets), 컨테이너면 /run/secrets 또는 마운트 볼륨.
   # env SECRETS_DIR 로 주입하는 것을 권장한다(아래는 그 치환 형태).
@@ -90,6 +97,12 @@ jira:
   #    WARNING 을 남긴다 — 예전처럼 project 절만 빠져 전 프로젝트를 긁지 않는다.
   projects: []
   poll_interval_sec: 60
+  # 감시 토큰 **생존 확인** 주기(초, 0=끔). ⚠️ Jira Cloud 는 자격이 틀려도 JQL 검색에
+  # 200 + 빈 배열을 돌려준다(401 은 /myself 에서만 난다) — 토큰이 만료·회수되면 시스템이
+  # 영원히 "할 일 없음" 상태로 조용히 돈다. 그래서 **티켓이 하나도 안 걸린 폴**에서만,
+  # 이 주기마다 GET /rest/api/3/myself 로 자격을 다시 확인한다(티켓이 돌아온 폴은 그
+  # 자체가 자격 증거라 확인하지 않는다). 실패는 로그 + /api/doctor(관리 UI 배너)로 뜬다.
+  auth_recheck_sec: 1800
   watcher_token_file: service/jira-token   # 중앙이 Jira를 감시하는 토큰(내 것/봇). secrets.base_dir 상대
   # ⚠️ Basic auth 는 **(이메일, 토큰) 쌍**이다 — 토큰만으로는 인증되지 않는다. 위 토큰을
   # 발급받은 Atlassian 계정의 이메일을 적는다(비우면 env JIRA_WATCHER_EMAIL 폴백).
@@ -130,7 +143,9 @@ jira:
 # Jira 웹훅 수신(이벤트 구동) — 신규/담당자-변경 티켓을 폴링 주기(위 poll_interval_sec)를
 # 기다리지 않고 **즉시** 트리거한다. 폴러와 동일한 dedup 게이트/매핑 수렴점을 재사용하며
 # 폴링은 백스톱으로 남는다. 엔드포인트: POST /webhook/jira
-#   - 인증: 헤더 X-Jira-Webhook-Token 또는 쿼리 ?token= (secret_ref 파일값과 상수시간 비교)
+#   - 인증: 헤더 X-Jira-Webhook-Token **전용**(secret_ref 파일값과 상수시간 비교).
+#     ⚠️ 쿼리 ?token= 은 **거부한다**(401) — 프록시·서버 access 로그에 평문으로 남는
+#        유출 표면이다. Jira 자동화에서 헤더를 못 넣으면 앞단 프록시가 헤더를 붙이게 한다.
 #   - 페이로드: {"issueKey":"PROJ-1"}(커스텀 Automation) 또는 {"issue":{"key":"PROJ-1"}}(표준)
 # ⚠️ 토큰은 "값"이 아니라 참조(secrets.base_dir 상대 파일)만 둔다 — 그 파일에 토큰을 0600으로
 #    저장. secret_ref 파일이 없으면 엔드포인트는 503으로 거부한다(무인증 자율 실행 금지 — RCE 표면).

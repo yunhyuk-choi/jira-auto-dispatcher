@@ -210,6 +210,52 @@ def test_jira_search_400_suggests_wrong_project_key():
     assert r.status == D.STATUS_FAIL and "프로젝트 키" in r.message
 
 
+class _EmptySearchJira:
+    """검색은 200 + 빈 배열, ``myself`` 만 실패하는 대역 — Jira Cloud 실측 동작."""
+
+    def __init__(self, auth_error=None):
+        self._auth_error = auth_error
+        self.myself_calls = 0
+
+    def myself(self):
+        self.myself_calls += 1
+        if self._auth_error:
+            raise self._auth_error
+        return {"displayName": "봇 계정"}
+
+    def search_jql_page(self, jql, fields=None, max_results=50, next_page_token=None):
+        return {"issues": [], "isLast": True}
+
+
+def test_jira_search_does_not_pass_when_credentials_are_rejected():
+    """★ 빈 결과 + 자격 거부 = FAIL. 'jira_auth 는 FAIL 인데 jira_search 는 PASS' 금지."""
+    jira = _EmptySearchJira(auth_error=JiraError("GET → HTTP 401", status_code=401))
+    r = D.check_jira_search(make_cfg(), client=jira)
+    assert r.status == D.STATUS_FAIL
+    assert "자격" in r.message and "빈 결과" in r.message
+    assert jira.myself_calls == 1
+
+
+def test_jira_search_passes_on_an_empty_but_authenticated_instance():
+    """티켓이 정말 없을 뿐이면 PASS — 빈 결과 자체는 죄가 아니다."""
+    jira = _EmptySearchJira()
+    r = D.check_jira_search(make_cfg(), client=jira)
+    assert r.status == D.STATUS_PASS and "표본 0건" in r.message
+    assert jira.myself_calls == 1
+
+
+def test_jira_search_skips_the_extra_probe_when_issues_came_back():
+    """이슈가 돌아왔다는 것이 곧 자격 증거다 — 확인 요청을 더 하지 않는다."""
+    class _NonEmpty(_EmptySearchJira):
+        def search_jql_page(self, jql, fields=None, max_results=50, next_page_token=None):
+            return {"issues": [{"key": "ACME-1"}], "isLast": True}
+
+    jira = _NonEmpty(auth_error=JiraError("GET → HTTP 401", status_code=401))
+    r = D.check_jira_search(make_cfg(), client=jira)
+    assert r.status == D.STATUS_PASS
+    assert jira.myself_calls == 0
+
+
 # ---------------------------------------------------------------------------
 # forge 토큰 프로브(대역)
 # ---------------------------------------------------------------------------

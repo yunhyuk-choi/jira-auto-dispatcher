@@ -611,3 +611,124 @@ def test_emit_no_sink_always_enqueues(isolated_state):
     n = poller.poll_once()
     assert n == 1
     assert sch.jobs.get("PROJ-1") is not None
+
+
+# --- 축0: Jira 자격 생존 확인(빈 결과 위장 벗기기) -----------------------------
+#
+# ★ 실측된 Jira Cloud 동작:
+#       GET  /rest/api/3/myself      → 401
+#       POST /rest/api/3/search/jql  → 200 {"issues": [], "isLast": true}
+#   자격이 틀려도 검색은 성공한 척한다. 그래서 폴러는 "매칭 티켓 없음"과 "토큰 만료"를
+#   응답 형태로 구별할 수 없고, 토큰이 회수되면 **영원히 조용히** 돈다.
+
+
+class AuthProbeJira:
+    """검색은 지정한 이슈를, ``myself`` 는 지정한 예외를 내는 대역(호출 횟수 기록)."""
+
+    def __init__(self, issues=None, auth_error=None):
+        self._issues = list(issues or [])
+        self._auth_error = auth_error
+        self.myself_calls = 0
+
+    def search_jql(self, jql, fields=None, max_results=50):
+        return {"issues": self._issues, "total": len(self._issues)}
+
+    def myself(self):
+        self.myself_calls += 1
+        if self._auth_error:
+            raise self._auth_error
+        return {"displayName": "봇 계정"}
+
+
+class _SettableClock:
+    """테스트가 직접 시각을 밀어 주는 시계(``clock.now = ...``)."""
+
+    def __init__(self, now):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+def _wire_auth(jira, *, clock=None):
+    reg = Registry()
+    reg.upsert(UserRecord(username="u1", jira_account_id="a1", enabled=True))
+    cfg = make_config()
+    sch = Scheduler(cfg, JobQueue())
+    disp = Dispatcher(reg, sch)
+    poller = Poller(cfg, jira, DedupGate(), reg, disp, clock=clock or _fixed_clock)
+    noted: list = []
+    poller.set_auth_reporter(lambda ok, detail: noted.append((ok, detail)))
+    return poller, noted
+
+
+def test_empty_poll_probes_auth_and_reports_failure(isolated_state):
+    """★ 빈 폴이 '할 일 없음'인지 '자격 만료'인지 가른다 — 만료면 드러낸다."""
+    from app.jira_client import JiraError
+
+    jira = AuthProbeJira(auth_error=JiraError("GET → HTTP 401", status_code=401))
+    poller, noted = _wire_auth(jira)
+    assert poller.poll_once() == 0
+    assert jira.myself_calls == 1
+    assert noted == [(False, "HTTP 401")]
+
+
+def test_empty_poll_reports_ok_when_credentials_are_alive(isolated_state):
+    jira = AuthProbeJira()
+    poller, noted = _wire_auth(jira)
+    poller.poll_once()
+    assert noted == [(True, "/myself 확인")]
+
+
+def test_a_non_empty_poll_is_its_own_proof_of_auth(isolated_state):
+    """티켓이 돌아온 폴은 그 자체가 자격 증거 — 추가 요청을 하지 않는다."""
+    jira = AuthProbeJira(issues=[_issue("PROJ-1", "a1")])
+    poller, noted = _wire_auth(jira)
+    assert poller.poll_once() == 1
+    assert jira.myself_calls == 0
+    assert noted == [(True, "검색 결과로 확인(티켓 수신)")]
+
+
+def test_auth_probe_respects_the_recheck_interval(isolated_state):
+    """매 폴마다 때리지 않는다 — jira.auth_recheck_sec 이 지나야 다시 확인한다."""
+    clock = _SettableClock(_FIXED_NOW)
+    jira = AuthProbeJira()
+    poller, _ = _wire_auth(jira, clock=clock)
+    poller.config.jira.auth_recheck_sec = 1800
+    poller.poll_once()                      # 최초 — 확인한다
+    assert jira.myself_calls == 1
+    clock.now = _FIXED_NOW + timedelta(seconds=120)
+    poller.poll_once()                      # +2분 — 주기 안이라 건너뛴다
+    assert jira.myself_calls == 1
+    clock.now = _FIXED_NOW + timedelta(seconds=3600)
+    poller.poll_once()                      # +1시간 — 주기가 지나 다시 확인
+    assert jira.myself_calls == 2
+
+
+def test_auth_probe_can_be_switched_off(isolated_state):
+    jira = AuthProbeJira()
+    poller, noted = _wire_auth(jira)
+    poller.config.jira.auth_recheck_sec = 0
+    poller.poll_once()
+    assert jira.myself_calls == 0 and noted == []
+
+
+def test_auth_probe_failure_never_breaks_the_poll_loop(isolated_state):
+    """진단 호출이 터져도 폴링은 계속된다(이건 전제 조건이 아니라 진단이다)."""
+    class _Boom(AuthProbeJira):
+        def myself(self):
+            self.myself_calls += 1
+            raise RuntimeError("소켓 끊김")
+
+    jira = _Boom(issues=[])
+    poller, noted = _wire_auth(jira)
+    assert poller.poll_once() == 0
+    assert noted == [(False, "RuntimeError")]
+
+
+def test_auth_probe_is_skipped_for_clients_without_myself(isolated_state):
+    """``myself`` 가 없는 클라이언트면 조용히 건너뛴다(없는 근거로 실패를 만들지 않는다)."""
+    jira = FakeJira([])
+    poller, noted = _wire_auth(jira)
+    assert poller.poll_once() == 0
+    assert noted == []

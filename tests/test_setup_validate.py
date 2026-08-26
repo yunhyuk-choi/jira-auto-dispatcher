@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from app import setup_validate as V
@@ -277,12 +279,44 @@ def test_unknown_key_outside_closed_sections_is_silent():
 # --- 해석 결과(렌더러 계약) -----------------------------------------------------
 
 
-def test_explicit_holds_only_answered_keys():
-    """렌더러는 '답한 것'만 써야 한다 — 기본값까지 쓰면 프로파일 파생이 죽는다."""
+def test_explicit_holds_answered_keys_and_profile_derivations():
+    """렌더러가 쓸 값 = 답한 것 + **프로파일에서 파생된 것**.
+
+    스키마 dataclass 기본값은 여전히 들어가지 않는다(그걸 박으면 프로파일 설계가
+    무력화된다). 하지만 파생값은 답의 일부라 반드시 들어가야 한다 — 빠지면 렌더된
+    config.yaml 에 *다른 프로파일의 예시 값*이 남아 프로파일과 모순된다(실측 결함).
+    """
     result = V.validate_answers(GOOD)
-    assert "deploy.docker_host" not in result.explicit
-    assert "deploy.docker_host" in result.values  # 해석 결과에는 기본값이 있다
     assert result.explicit["deploy.profile"] == "cloud_vm"
+    assert result.explicit["deploy.docker_host"] == "tcp://socket-proxy:2375"
+    assert result.explicit["deploy.workspace_volume"] == "jad-workspace"
+    # 파생 대상이 아닌 항목은 답하지 않았으면 여전히 빠져 있다.
+    assert "forge.base_url" not in result.explicit
+
+
+def test_profile_local_derives_socket_proxy_not_the_example_value():
+    """결함 재현 방지 — local 로 답했는데 cloud_vm 예시 값이 남으면 안 된다."""
+    answers = json.loads(json.dumps(GOOD))
+    answers["deploy"]["profile"] = "local"
+    result = V.validate_answers(answers)
+    assert result.ok
+    assert result.explicit["deploy.docker_host"] == "tcp://socket-proxy:2375"
+
+
+def test_explicit_answer_beats_profile_derivation():
+    """명시 답변 > 프로파일 파생(app.config._build_deploy 와 같은 우선순위)."""
+    answers = json.loads(json.dumps(GOOD))
+    answers["deploy"]["docker_host"] = "unix:///var/run/docker.sock"
+    result = V.validate_answers(answers)
+    assert result.explicit["deploy.docker_host"] == "unix:///var/run/docker.sock"
+
+
+def test_legacy_key_beats_profile_derivation():
+    """레거시 키(spawn.docker_host)도 파생보다 앞선다 — 기존 배포가 조용히 바뀌면 안 된다."""
+    answers = json.loads(json.dumps(GOOD))
+    answers["spawn"] = {"docker_host": "unix:///var/run/docker.sock"}
+    result = V.validate_answers(answers)
+    assert result.explicit["deploy.docker_host"] == "unix:///var/run/docker.sock"
 
 
 def test_defaults_are_copied_not_shared():

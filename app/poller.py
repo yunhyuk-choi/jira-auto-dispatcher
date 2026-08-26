@@ -39,6 +39,10 @@
     4. created 워터마크는 처리한 max created로, assignee 워터마크는 now로 전진 후 영속
 
 참고:
+    - **자격 생존 확인(축0)**: 인증이 깨져도 Jira Cloud 의 JQL 검색은 200 + 빈 배열을
+      돌려주므로 "매칭 티켓 없음"과 구별되지 않는다. 빈 폴에서 주기적으로
+      ``GET /myself`` 를 때려 그 위장을 벗긴다(:meth:`Poller._verify_auth_if_due`,
+      ``jira.auth_recheck_sec``). 감지되면 로그 + ``/api/doctor`` 로 드러난다.
     - 백그라운드 스레드로 상시 구동(main.py의 central 분기가 기동).
     - 웹훅과 동일하게 반드시 gate를 통과한 뒤 매핑/디스패치(직접 큐잉 금지).
     - 매핑 실패/미등록/비활성 사용자면 enqueue하지 않고 로그만 남긴다(가역성을
@@ -272,6 +276,91 @@ class Poller:
         # (claude 해석·enqueue)은 스냅샷을 들고 **락 밖에서** 수행한다(데드락·정체 방지).
         self._pending_lock = threading.RLock()
         self._pending: list = list(state.load_pending_resolution([]) or [])
+
+        # --- Jira 자격 생존 확인(축0) ---------------------------------------
+        # 인증이 깨져도 JQL 검색은 200 + 빈 배열이라 "할 일 없음"과 구별되지 않는다.
+        # _verify_auth_if_due 가 주기적으로 /myself 를 때려 그 위장을 벗긴다.
+        self._auth_reporter: Optional[Callable] = None   # 진단에 알리는 콜백(주입)
+        self._auth_checked_ts: float = 0.0               # 마지막 확인 시각(epoch, 0=미확인)
+        self._auth_broken: bool = False                  # 직전 확인이 실패였나(로그 소음 억제)
+
+    # ------------------------------------------------------------------
+
+    def set_auth_reporter(self, reporter: Optional[Callable]) -> None:
+        """Jira 자격 상태를 알릴 콜백을 주입한다 — ``reporter(ok: bool, detail: str)``.
+
+        central 조립부(:func:`app.main.build_central_components`)가 부팅 자가진단
+        (:meth:`app.doctor_runtime.DoctorRuntime.note_jira_auth`)을 물려, 폴링 중 감지한
+        인증 실패가 ``/api/doctor`` → 관리 UI 배너로 드러나게 한다. 미주입이면 로그만
+        남는다(폴러는 진단 모듈을 몰라도 된다 — 결합 최소화).
+        """
+        self._auth_reporter = reporter
+
+    def _auth_recheck_sec(self) -> float:
+        """자격 재확인 최소 간격(초). 0 이하면 재확인 안 함(``jira.auth_recheck_sec``)."""
+        return float(getattr(self.config.jira, "auth_recheck_sec", 1800) or 0)
+
+    def _note_auth(self, ok: bool, detail: str = "") -> None:
+        """자격 확인 결과를 로그 + 진단에 반영(상태가 바뀔 때만 로그를 남긴다)."""
+        if ok:
+            if self._auth_broken:
+                log.info("Jira 자격 회복 확인 — 폴링이 다시 티켓을 읽을 수 있습니다")
+        elif not self._auth_broken:
+            log.error(
+                "⚠️ Jira 자격이 거부됩니다(%s) — JQL 검색은 오류가 아니라 **빈 결과**를 "
+                "돌려주므로 겉으로는 '할 일 없음'처럼 보이지만 실제로는 아무 티켓도 "
+                "읽지 못합니다. jira.watcher_token_file 의 토큰과 jira.watcher_email 을 "
+                "갱신하세요.", detail or "사유 불명",
+            )
+        self._auth_broken = not ok
+        reporter = self._auth_reporter
+        if reporter is None:
+            return
+        try:
+            reporter(ok, detail)
+        except Exception:  # noqa: BLE001 — 보고 실패가 폴 루프를 죽이지 않게 격리
+            log.warning("Jira 자격 상태 보고 실패(격리)")
+
+    def _verify_auth_if_due(self, now_ts: float, *, saw_issues: bool) -> None:
+        """빈 폴이 **인증 실패의 위장**인지 주기적으로 확인한다.
+
+        Jira Cloud 실측:
+            ``GET  /rest/api/3/myself``     → 401
+            ``POST /rest/api/3/search/jql`` → 200 ``{"issues": [], "isLast": true}``
+
+        즉 자격이 틀려도 검색은 성공한 척한다. 응답 **형태**로는 구별할 수 없으므로
+        (:mod:`app.jira_client` 가 이미 잡는 "200 + HTML" 과 달리 이건 정상 JSON 이다)
+        별도의 읽기 요청으로만 벗길 수 있다.
+
+        빈도 판단(``jira.auth_recheck_sec``, 기본 30분):
+            - **티켓이 하나라도 돌아온 폴은 그 자체가 자격 증거**다 → 요청 없이 OK 로 기록.
+            - 빈 폴에서만, 그것도 재확인 주기가 지났을 때만 ``/myself`` 를 부른다. 매 폴
+              (기본 60초)마다 부르면 하루 1,440회가 늘지만 30분 간격이면 48회다. 그
+              대가는 최악의 감지 지연 30분인데, 지금은 **영원히 감지되지 않는다.**
+
+        예외는 전부 삼킨다 — 이 확인은 *진단*이지 폴링의 전제 조건이 아니다.
+        """
+        if saw_issues:
+            self._auth_checked_ts = now_ts
+            self._note_auth(True, "검색 결과로 확인(티켓 수신)")
+            return
+        interval = self._auth_recheck_sec()
+        if interval <= 0:
+            return
+        if self._auth_checked_ts and (now_ts - self._auth_checked_ts) < interval:
+            return
+        myself = getattr(self.jira, "myself", None)
+        if myself is None:
+            return                      # 이 클라이언트로는 확인할 수단이 없다(대역 등)
+        self._auth_checked_ts = now_ts
+        try:
+            myself()
+        except Exception as exc:  # noqa: BLE001 — 진단 호출이 폴 루프를 죽이지 않게 격리
+            # ⚠️ 예외 **본문**을 싣지 않는다(응답에 뭐가 섞여 올지 모른다). 상태코드만.
+            code = getattr(exc, "status_code", None)
+            self._note_auth(False, f"HTTP {code}" if code else type(exc).__name__)
+        else:
+            self._note_auth(True, "/myself 확인")
 
     # ------------------------------------------------------------------
 
@@ -735,6 +824,9 @@ class Poller:
 
         # 이 폴 사이클 기준 쿨다운 판정 시각(epoch초). 폴 시작 시각으로 고정한다.
         now_ts = poll_now.timestamp()
+
+        # 축0: 빈 결과가 "할 일 없음"인지 "자격 만료"인지 주기적으로 가른다(위 메서드 참조).
+        self._verify_auth_if_due(now_ts, saw_issues=bool(issues_a or issues_b))
         throttled = self._resolution_mode() == "llm" and self._ai_cd.is_throttled(now_ts)
 
         # LLM 레포 해석용 REPO-MAP은 **신규 티켓이 있을 때만** 한 번 로드한다

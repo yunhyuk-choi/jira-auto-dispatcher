@@ -17,13 +17,18 @@
     이 리포의 런타임 의존성은 5개뿐이고, 설치 도구 하나 때문에 늘릴 값어치가 없다.
     대신 렌더 결과를 ``yaml.safe_load`` 로 **되읽어 검증**한다 — :func:`_verify_roundtrip`.)
 
-답한 것만 쓴다(중요):
-    렌더러는 :attr:`app.setup_validate.ValidationResult.explicit` — 설치자가 **실제로 답한**
-    항목만 쓴다. 스키마 기본값까지 파일에 박으면 ``deploy.profile`` 하나로 나머지가 파생되는
-    설계(:data:`app.setup_schema.PROFILE_DEFAULTS`)가 무력화된다. 예: 프로파일을
-    ``cloud_vm`` 으로 고른 사람이 ``docker_host`` 를 답하지 않았는데 스키마 기본값
-    (``unix:///var/run/docker.sock``)이 파일에 박히면, 파생돼야 할 socket-proxy 설정이
-    조용히 소켓 직결로 바뀐다.
+답한 것만 쓴다(중요) — 단, 파생값은 답의 일부다:
+    렌더러는 :attr:`app.setup_validate.ValidationResult.explicit` 만 쓴다. 스키마
+    dataclass 기본값까지 파일에 박으면 ``deploy.profile`` 하나로 나머지가 파생되는
+    설계(:data:`app.setup_schema.PROFILE_DEFAULTS`)가 무력화되기 때문이다.
+
+    ⚠️ 그렇다고 **프로파일 파생값까지 빼면 반대 방향으로 틀린다.** ``local`` 을 고른
+    설치자의 config.yaml 에 예시 파일의 ``cloud_vm`` 값(``tcp://socket-proxy:2375``)이
+    그대로 남는 실측 결함이 그것이었다 — INSTALL.md 는 "프로파일 하나면 끝난다"고
+    약속하는데 문서대로 따르면 프로파일과 **모순되는** 설정이 나왔다. 그래서
+    :func:`app.setup_validate._apply_profile_derived` 가 파생값을 ``explicit`` 에 합쳐
+    넘긴다(명시 답변·레거시 키가 있으면 그게 우선). 렌더러 쪽 규칙은 그대로다 —
+    "받은 것만 쓴다".
 
 시크릿 규율:
     ``secret=True`` 필드는 **절대 쓰지 않는다**(현재 스키마엔 없지만 방어). 참조 자리에
@@ -80,7 +85,7 @@ class RenderResult:
         text: 완성된 config.yaml 본문(LF).
         replaced: 템플릿의 기존 줄에서 **값만 바꾼** 키들.
         inserted: 템플릿에 자리가 없어 **새로 넣은** 키들(예: ``jira.watcher_email``).
-        unanswered: 설치자가 답하지 않아 **템플릿 값 그대로 남은** 스키마 항목들.
+        unanswered: 답하지도 파생되지도 않아 **템플릿 값 그대로 남은** 스키마 항목들.
             오류는 아니지만(선택 항목이거나 기본값이 맞을 수 있다) 알고는 있어야 한다 —
             특히 ``jira.custom_fields`` 처럼 예시 값이 *다른 조직의 id* 인 항목이 있다.
         placeholders: 산출물에 아직 ``<...>`` 자리표시자가 남은 줄 ``(줄번호, 원문)``.
@@ -113,7 +118,7 @@ class RenderResult:
             lines.append("  추가: " + ", ".join(self.inserted))
         if self.unanswered:
             lines.append(
-                "  ⚠️ 답하지 않아 예시 값이 남은 항목(확인 필요): "
+                "  ⚠️ 답하지도 파생되지도 않아 예시 값이 남은 항목(확인 필요): "
                 + ", ".join(self.unanswered)
             )
         if self.placeholders:

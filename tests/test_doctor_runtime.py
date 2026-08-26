@@ -157,3 +157,69 @@ def test_blocking_failures_are_reported_in_declaration_order():
 def test_blocking_checks_are_all_real_check_names():
     """오타 방지 — 목록에 실재하지 않는 검사 이름이 들어가면 영원히 발동하지 않는다."""
     assert set(DR.BLOCKING_CHECKS) <= set(D.CHECK_ORDER)
+
+
+# ---------------------------------------------------------------------------
+# 운영 중 실측 반영(폴러 → note_jira_auth)
+# ---------------------------------------------------------------------------
+
+
+def test_runtime_auth_failure_overrides_a_passing_boot_check():
+    """부팅 때는 자격이 멀쩡했어도, 폴링 중 만료되면 그 사실이 진단에 뜬다."""
+    rt = _runtime(_results(config=D.STATUS_PASS, jira_auth=D.STATUS_PASS))
+    rt.run_once()
+    assert rt.blocking_failures() == []
+
+    rt.note_jira_auth(False, "HTTP 401")
+    snap = rt.snapshot()
+    auth = next(c for c in snap["checks"] if c["name"] == "jira_auth")
+    assert auth["status"] == D.STATUS_FAIL
+    assert "401" in auth["message"]
+    # jira_auth 는 BLOCKING_CHECKS 라 온보딩이 막힌다(조용히 노는 워커를 늘리지 않는다).
+    assert snap["onboarding_blocked"] is True
+    assert rt.blocking_failures() == ["jira_auth"]
+
+
+def test_runtime_auth_recovery_lifts_the_block():
+    rt = _runtime(_results(jira_auth=D.STATUS_PASS))
+    rt.run_once()
+    rt.note_jira_auth(False, "HTTP 401")
+    assert rt.blocking_failures() == ["jira_auth"]
+    rt.note_jira_auth(True, "/myself 확인")
+    assert rt.blocking_failures() == []
+
+
+def test_a_fresh_diagnosis_supersedes_an_older_runtime_note():
+    """설정을 고치고 '다시 진단' 했으면 낡은 런타임 관측이 그 결과를 가리면 안 된다."""
+    rt = _runtime(_results(jira_auth=D.STATUS_PASS))
+    rt.note_jira_auth(False, "HTTP 401")
+    time.sleep(0.01)
+    rt.run_once()                       # 더 나중에 끝난 회차가 이긴다
+    assert rt.blocking_failures() == []
+
+
+def test_runtime_note_survives_before_any_diagnosis_ran():
+    """아직 한 회차도 안 돌았어도 폴러가 아는 사실은 버리지 않는다."""
+    rt = _runtime()
+    rt.note_jira_auth(False, "HTTP 401")
+    snap = rt.snapshot()
+    assert [c["name"] for c in snap["checks"]] == ["jira_auth"]
+    assert snap["onboarding_blocked"] is True
+
+
+def test_runtime_note_does_not_carry_a_token():
+    """진단 응답은 인증 없이 읽힌다 — detail 에 온 문자열이 그대로 실려도 값은 없다."""
+    rt = _runtime()
+    rt.note_jira_auth(False, "HTTP 401")
+    body = str(rt.snapshot())
+    assert "401" in body and "glpat-" not in body
+
+
+def test_a_blown_up_diagnosis_does_not_discard_the_runtime_note():
+    """터진 회차는 새 사실을 못 가져왔다 — 폴러가 아는 실패를 밀어내면 안 된다."""
+    rt = _runtime(boom=True)
+    rt.note_jira_auth(False, "HTTP 401")
+    time.sleep(0.01)
+    rt.run_once()                       # 예외로 끝난다(결과 없음)
+    assert rt.snapshot()["error"]
+    assert rt.blocking_failures() == ["jira_auth"]

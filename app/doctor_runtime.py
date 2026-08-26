@@ -26,6 +26,13 @@
     등록(``POST /onboard``)을 거부한다. 잘못된 설정으로 워커를 띄우면 **조용히 실패하는
     잡만 쌓이기** 때문이다. 고르는 기준은 그 상수의 주석 참조.
 
+운영 중 실측 반영:
+    진단은 부팅 때 한 번 돈다. 그런데 **토큰은 운영 중에 만료·회수된다** — 그때부터
+    폴러는 아무 티켓도 못 읽으면서 "할 일 없음"처럼 조용히 돈다(Jira Cloud 는 자격이
+    틀려도 JQL 검색에 200 + 빈 배열을 준다). 폴러가 그것을 감지하면
+    :meth:`DoctorRuntime.note_jira_auth` 로 여기 실어, 부팅 진단이 아니라 **지금 사실**이
+    ``/api/doctor`` 와 관리 UI 배너에 뜨게 한다.
+
 시크릿 규율:
     :class:`app.setup_doctor.CheckResult` 는 이미 값이 아니라 존재·응답코드·마스킹된
     출력만 담는다. 이 모듈은 그것을 **그대로** 실어 나르며 아무 것도 덧붙이지 않는다 —
@@ -94,6 +101,16 @@ class DoctorRuntime:
         self._run_checks = run_checks if run_checks is not None else setup_doctor.run_checks
         self._lock = threading.Lock()
         self._results: Optional[list] = None
+        #: :attr:`_results` 가 **실제로 갱신된** 시각. ``_finished_at`` 과 구분한다 —
+        #: 진단이 예외로 끝나도 ``_finished_at`` 은 전진하는데, 그걸 기준으로 삼으면
+        #: *터진 회차*가 폴러의 관측을 밀어내 버린다(새 사실은 아무것도 없었는데).
+        self._results_at: float = 0.0
+        #: 운영 중 **실측된** 검사 결과 덮어쓰기 ``{이름: (CheckResult, 기록 시각)}``.
+        #: 폴러처럼 상시 도는 축이 진단보다 **더 최근** 사실을 알게 되는 자리가 있다
+        #: (:meth:`note_jira_auth`). 시각을 함께 들고 있다가 마지막 회차보다 새로운
+        #: 것만 덮어쓴다 — 그래야 사람이 설정을 고치고 '다시 진단'을 눌렀을 때 낡은
+        #: 런타임 관측이 그 결과를 가리지 않는다(그리고 그 반대도 성립한다).
+        self._runtime: dict = {}
         self._running = False
         self._started_at: Optional[float] = None
         self._finished_at: Optional[float] = None
@@ -132,6 +149,7 @@ class DoctorRuntime:
                     self._duration_sec = self._finished_at - self._started_at
                 if results:
                     self._results = results
+                    self._results_at = self._finished_at or time.time()
         self._log(results)
         return results
 
@@ -162,8 +180,8 @@ class DoctorRuntime:
 
         ⚠️ 재실행하지 않는다. 매 요청마다 돌리면 관리 UI 폴링이 그대로 진단 폭주가 된다.
         """
+        results = self._effective_results()
         with self._lock:
-            results = list(self._results or [])
             running = self._running
             started_at = self._started_at
             finished_at = self._finished_at
@@ -197,9 +215,73 @@ class DoctorRuntime:
         ⚠️ **"모르면 막지 않는다."** 부팅 직후 진단이 끝나기 전에는 결과가 없고, 그때
         온보딩을 막으면 진단이 느린 환경에서 관리 UI 가 이유 없이 잠긴다.
         """
+        return _blocking_failures(self._effective_results())
+
+    # -- 운영 중 실측 반영 -------------------------------------------------
+
+    def note_jira_auth(self, ok: bool, detail: str = "") -> None:
+        """폴러가 **폴링 중 실측한** Jira 자격 상태를 ``jira_auth`` 검사에 반영한다.
+
+        왜 여기로 오는가:
+            자격이 만료·회수돼도 JQL 검색은 200 + 빈 배열이라(모듈 :mod:`app.poller`
+            축0 참조) 시스템은 겉보기에 "할 일 없음"으로 조용히 돈다. 폴러가 그것을
+            감지해도 알릴 곳이 로그뿐이면 아무도 안 본다. ``/api/doctor`` 는 관리 UI 가
+            이미 5초마다 읽는 자리라, 여기 실으면 그대로 배너가 된다.
+
+        온보딩 게이트에 미치는 영향(의도된 것):
+            ``jira_auth`` 는 :data:`BLOCKING_CHECKS` 다. 폴링 중 자격이 깨지면 신규
+            사용자 온보딩(``POST /onboard``)이 409 로 막힌다 — 티켓을 하나도 못 읽는
+            상태에서 워커를 새로 띄워 봐야 조용히 노는 컨테이너만 는다. 자격이
+            회복되면 폴러가 곧바로 PASS 를 기록해 게이트도 풀린다.
+
+        ⚠️ ``detail`` 에는 상태코드·예외 타입만 온다(폴러가 응답 본문을 싣지 않는다) —
+        진단 응답은 인증 없이 읽히므로 여기로 값이 새면 그대로 유출이다.
+        """
+        if ok:
+            result = setup_doctor.CheckResult(
+                "jira_auth", setup_doctor.STATUS_PASS,
+                f"폴링 중 자격 확인됨({detail})" if detail else "폴링 중 자격 확인됨")
+        else:
+            result = setup_doctor.CheckResult(
+                "jira_auth", setup_doctor.STATUS_FAIL,
+                f"폴링 중 자격 거부 감지({detail or '사유 불명'}) — 검색은 200 + 빈 "
+                f"결과를 돌려주므로 '할 일 없음'처럼 보이지만 티켓을 하나도 읽지 "
+                f"못하고 있습니다",
+                "jira.watcher_token_file 이 가리키는 토큰을 재발급하고 "
+                "jira.watcher_email 과 짝이 맞는지 확인한 뒤 '다시 진단' 하세요.")
+        self.note_runtime_check(result)
+
+    def note_runtime_check(self, result: Any) -> None:
+        """운영 중 실측된 :class:`app.setup_doctor.CheckResult` 하나를 덮어쓴다.
+
+        진단 회차 전체를 다시 돌리지 않고 **한 검사만** 최신 사실로 갈아 끼운다.
+        마지막 회차보다 나중에 기록된 것만 효력을 갖는다(:meth:`_effective_results`).
+        """
+        with self._lock:
+            self._runtime[result.name] = (result, time.time())
+
+    def _effective_results(self) -> list:
+        """캐시된 회차 결과 + (그보다 새로운) 런타임 관측을 합친 목록.
+
+        런타임 관측이 **회차보다 오래됐으면 버린다** — 사람이 설정을 고치고 '다시 진단'
+        을 눌렀는데 낡은 관측이 결과를 덮으면 고쳤다는 사실이 화면에 영영 안 뜬다.
+        반대로 회차가 끝난 뒤 폴러가 감지한 실패는 회차 결과를 이긴다(그쪽이 최신이다).
+
+        기준은 ``_finished_at`` 이 아니라 :attr:`_results_at` 이다 — 진단이 **터져서**
+        아무 결과도 못 남긴 회차는 새 사실을 가져오지 않았으므로 폴러의 관측을 밀어낼
+        자격이 없다.
+        """
         with self._lock:
             results = list(self._results or [])
-        return _blocking_failures(results)
+            runtime = dict(self._runtime)
+            floor = self._results_at
+        fresh = {name: res for name, (res, ts) in runtime.items() if ts >= floor}
+        if not fresh:
+            return results
+        merged = [fresh.pop(r.name, r) for r in results]
+        # 아직 한 회차도 안 돈 상태에서 들어온 관측도 버리지 않는다(그것만이 아는 사실이다).
+        merged.extend(fresh.values())
+        return merged
 
     # -- 내부 -------------------------------------------------------------
 

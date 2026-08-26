@@ -21,7 +21,7 @@
 
 | 갈래 | 쓰는 경우 | 본문 |
 |---|---|---|
-| **A. 로컬** | 개인 노트북에서 평가·개발. 도커 소켓 직결. | §3 |
+| **A. 로컬** | 개인 노트북에서 평가·개발(Docker Desktop 포함). | §3 |
 | **B. 클라우드 VM** | AWS EC2·GCE 등. ⚠️ **인바운드 전면 차단 + SSH 터널/VPN 필수** | §4 |
 | **C. 온프렘 서버** | 사설망 리눅스 서버 상시 운영 | §5 → [DEPLOY.md](DEPLOY.md) |
 
@@ -116,9 +116,19 @@ run:
 | 키 | A. 로컬 | B. 클라우드 VM | C. 온프렘 |
 |---|---|---|---|
 | `deploy.profile` | `local` | `cloud_vm` | `onprem_server` |
-| `deploy.docker_host` | `unix:///var/run/docker.sock` | `tcp://socket-proxy:2375` | `tcp://socket-proxy:2375` |
+| `deploy.docker_host` | `tcp://socket-proxy:2375` | `tcp://socket-proxy:2375` | `tcp://socket-proxy:2375` |
 | `deploy.secrets_base_dir` | `""`(→ env `SECRETS_DIR`) | `/run/secrets` | `/run/secrets` |
 | `deploy.workspace_volume` | `jad-workspace` | `jad-workspace` | `jad-workspace` |
+
+> **도커 접근은 세 갈래가 같다 — socket-proxy 경유.** 이 리포가 배포하는
+> `docker-compose.yml` 은 socket-proxy 를 기본으로 선언하고 central 을 거기에 붙인다.
+> 로컬(Docker Desktop 포함)에서도 **compose 를 한 글자도 고치지 않고** 그대로 뜬다.
+> 소켓 직결(`unix:///var/run/docker.sock`)은 central 에 호스트 root 동치 권한을 주므로
+> 기본값이 아니다 — 필요하면 §3 의 "고급" 대안으로 명시한다.
+>
+> `python -m app.setup render` 는 프로파일 파생값을 **실제로 `config.yaml` 에 써 넣는다.**
+> 예전에는 답하지 않은 항목이 예시 파일 값(=다른 프로파일 값) 그대로 남아, 문서를 그대로
+> 따랐는데 프로파일과 모순되는 설정이 나왔다.
 
 > ⚠️ **`host_deploy_dir` 은 없어졌다.** 예전에는 "이 리포 디렉토리의 **호스트** 절대경로"를
 > 설치자가 정확히 적어야 했고, 틀리면 worker 가 **에러 없이 뜬 채** 빈 디렉토리를 마운트해
@@ -293,15 +303,14 @@ python -m app.setup discover --json > jira.json   # 기계용(후속 온보딩·
 
 ## 3. 갈래 A — 로컬 (개인/평가용)
 
-가장 단순하다. docker.sock 을 직결하므로 **평가 목적에 한정**한다(호스트 root 동치).
+가장 단순하다. **`docker-compose.yml` 은 손대지 않는다** — 배포되는 그대로
+Docker Desktop 에서도 socket-proxy 경유로 뜬다(설치 리허설로 확인).
 
 ```bash
 # (1) 설정
 cp config/config.example.yaml config/config.yaml
-#     → deploy.profile: local / deploy.docker_host: unix:///var/run/docker.sock
-#     → docker-compose.yml 의 socket-proxy 서비스·depends_on 을 주석 처리하고
-#       central volumes 에 - /var/run/docker.sock:/var/run/docker.sock 한 줄을 추가한다
-#       (compose 파일 안 "(대안) docker.sock 직결" 주석 참조)
+#     → deploy.profile: local  (docker_host 는 프로파일에서 파생 — 손댈 것 없다)
+#     → compose 는 편집하지 않는다.
 
 # (2) 시크릿 — 값이 아니라 파일로
 mkdir -p secrets/service
@@ -325,6 +334,19 @@ docker compose logs -f central
 - 관리 UI: `http://localhost:8787`. **포트를 다른 기기에 노출하지 말 것.**
 - 로컬은 리소스가 곧 병목이다 — 사용자 1명(worker 1개, 4g)으로 시작해 본다.
 
+> **(고급) docker.sock 직결** — 편하지만 central 에 **호스트 root 동치** 권한을 준다
+> (SECURITY.md §4). 그 특권 확대를 감수할 때만, **두 곳을 함께** 바꾼다:
+>
+> 1. `config/config.yaml` 에 `deploy.docker_host: unix:///var/run/docker.sock` 을 **명시**
+>    (명시 값이 프로파일 파생을 이긴다)
+> 2. `docker-compose.yml` 에서 `socket-proxy` 서비스와 central 의 `depends_on` 을 지우고,
+>    central `volumes` 에 `- /var/run/docker.sock:/var/run/docker.sock` 을 추가
+>    (compose 파일 안 "(대안) docker.sock 직결" 주석 참조)
+>
+> ⚠️ 둘 중 하나만 바꾸면 **조용히 어긋난다** — 기동은 되고 워커 spawn 만 실패한다.
+> 바꿨으면 `docker compose exec central python -m app.setup doctor --only docker` 로
+> 실측한다.
+
 ---
 
 ## 4. 갈래 B — 클라우드 VM (AWS EC2 등)
@@ -346,9 +368,13 @@ docker compose logs -f central
    ```
    VPN 안이라면 VPN 사설 IP 로 바인딩해도 된다. **퍼블릭 IP 바인딩은 금지.**
 4. 아웃바운드는 필요하다 — Jira Cloud, forge(GitLab/GitHub), `api.anthropic.com`.
-5. 웹훅(`webhook.enabled: true`)을 꼭 써야 하면, 리버스 프록시(TLS)로 `webhook.path`
-   **하나만** 노출하고 출처를 Jira IP 로 제한한다. **8787 은 절대 함께 열지 않는다.**
-   폴링만 써도 기능은 동일하므로, 확신이 없으면 웹훅을 켜지 말고 폴링으로 간다.
+5. 웹훅(`webhook.enabled: true`)을 꼭 써야 하면, 리버스 프록시(TLS)로 경로
+   `POST /webhook/jira` **하나만** 노출하고 출처를 Jira IP 로 제한한다. **8787 은 절대
+   함께 열지 않는다.** 폴링만 써도 기능은 동일하므로, 확신이 없으면 웹훅을 켜지 말고
+   폴링으로 간다.
+   - 인증은 헤더 `X-Jira-Webhook-Token` **전용**이다(`webhook.secret_ref` 파일값과 비교).
+     쿼리 `?token=` 은 access 로그 유출 표면이라 **401 로 거부한다** — Jira 자동화에서
+     헤더를 못 붙이면 앞단 프록시가 붙이게 한다. 시크릿 미설정이면 엔드포인트가 503 이다.
 
 ### 4.2 기동
 

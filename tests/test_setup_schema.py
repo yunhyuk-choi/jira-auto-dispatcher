@@ -96,9 +96,28 @@ def test_profile_defaults_cover_every_declared_profile():
     for profile in S.DEPLOY_PROFILES:
         d = S.PROFILE_DEFAULTS[profile]
         assert set(d) == {"docker_host", "secrets_base_dir", "workspace_volume"}
-    # local 만 도커 소켓 직결이고 서버 프로파일은 socket-proxy 경유(특권 축소).
-    assert S.PROFILE_DEFAULTS["local"]["docker_host"].startswith("unix://")
-    assert S.PROFILE_DEFAULTS["cloud_vm"]["docker_host"].startswith("tcp://")
+    # ⚠️ **모든** 프로파일이 socket-proxy 경유다(소켓 직결은 호스트 root 동치라
+    # 기본값이 될 수 없고, 이 리포가 배포하는 compose 도 socket-proxy 를 선언한다).
+    # local 만 예외로 두면 배포되는 compose 와 모순되는 config 가 파생된다(실측 결함).
+    for profile in S.DEPLOY_PROFILES:
+        assert S.PROFILE_DEFAULTS[profile]["docker_host"].startswith("tcp://"), profile
+    # 프로파일이 실제로 갈리는 자리는 시크릿 루트다(로컬 디렉토리 vs 컨테이너 경로).
+    assert S.PROFILE_DEFAULTS["local"]["secrets_base_dir"] == ""
+    assert S.PROFILE_DEFAULTS["cloud_vm"]["secrets_base_dir"] == "/run/secrets"
+
+
+def test_profile_derived_values_are_dotted_and_drop_empties():
+    """파생값은 점 표기 키로 나오고, 빈 값('의견 없음')은 싣지 않는다."""
+    local = S.profile_derived_values("local")
+    assert local["deploy.docker_host"] == "tcp://socket-proxy:2375"
+    assert local["deploy.workspace_volume"] == "jad-workspace"
+    # local 의 secrets_base_dir 은 "" → 렌더에 쓰면 템플릿의 ${SECRETS_DIR} 을 지운다.
+    assert "deploy.secrets_base_dir" not in local
+    assert S.profile_derived_values("cloud_vm")["deploy.secrets_base_dir"] == "/run/secrets"
+    # 대소문자·공백은 흡수하고, 모르는 프로파일은 빈 dict.
+    assert S.profile_derived_values("  CLOUD_VM ") == S.profile_derived_values("cloud_vm")
+    assert S.profile_derived_values("없는프로파일") == {}
+    assert S.profile_derived_values(None) == {}
 
 
 def test_jira_custom_field_keys_match_todays_constants():
@@ -128,6 +147,7 @@ _KEY_TO_ATTR = {
     "jira.project": "jira.project",
     "jira.projects": "jira.projects",
     "jira.poll_interval_sec": "jira.poll_interval_sec",
+    "jira.auth_recheck_sec": "jira.auth_recheck_sec",
     "jira.watcher_token_file": "jira.watcher_token_file",
     "jira.watcher_email": "jira.watcher_email",
     "jira.trigger_statuses": "jira.trigger_statuses",

@@ -116,7 +116,7 @@ secrets_ref{jira_token,forge_token,claude_oauth_token}`(옛 이름 `gitlab_token
 | 1 | `config.py`, `state.py` | 설정 로드/검증(central 스키마) + state/*.json(+registry) 영속 |
 | 2 | `jira_client.py` | Jira REST(issue/transition/comment/JQL, 감시 토큰) |
 | 3 | `gate.py`, `queue.py`, `registry.py`, `dispatch.py` | dedup 게이트 + 잡 상태머신 + 레지스트리 CRUD + 사용자별 큐/HTTP + 온보딩 API |
-| 4 | `poller.py`, `webhook.py` | high-watermark 폴링 + 사용자 매핑 + 웹훅 수렴 |
+| 4 | `poller.py` (+ `main.py` 의 `/webhook/jira`) | high-watermark 폴링 + 사용자 매핑 + 웹훅 수렴(웹훅은 `poller.trigger_ticket` 에 위임 — 수신 구현은 하나뿐) |
 | 5 | `worker.py`, `agent_runner.py`, `scheduler.py`, `main.py`(배선) | 중앙 폴링 루프 + claude 실행/정체성 주입/한도/재개 + 스케줄러 |
 | 6 | `spawner.py`, `Dockerfile`, `docker-compose.yml` | worker 동적 spawn(Docker SDK) + 컨테이너/배포 |
 

@@ -364,6 +364,17 @@ def check_jira_search(cfg: Any, *, project_dir: str = ".", client: Any = None) -
 
     자격이 맞아도 프로젝트 키가 틀리면 폴러는 **조용히 아무 일도 안 한다**(가장 나쁜
     실패 모드). 그래서 인증과 별개로 한 번 더 본다.
+
+    ⚠️ **빈 결과는 그 자체로 PASS 의 근거가 되지 못한다.** Jira Cloud 는 자격이 틀려도
+    ``POST /rest/api/3/search/jql`` 에 **200 + ``{"issues": []}``** 를 돌려준다(실측:
+    같은 자격으로 ``GET /myself`` 는 401). 형태로는 "인증 실패"와 "매칭 티켓 없음"이
+    구별되지 않으므로, 표본이 0건이면 :meth:`~app.jira_client.JiraClient.myself` 로
+    자격을 한 번 더 확인하고 그게 실패하면 **FAIL 로 내린다.** 그러지 않으면
+    ``jira_auth`` 는 FAIL 인데 ``jira_search`` 만 초록불인 모순된 진단이 나온다
+    (실제로 리허설에서 그렇게 나왔다).
+
+    표본이 1건이라도 있으면 추가 호출을 하지 않는다 — 이슈가 돌아왔다는 것이 곧
+    자격이 받아들여졌다는 증거다.
     """
     from app.jira_client import JiraError
 
@@ -396,8 +407,37 @@ def check_jira_search(cfg: Any, *, project_dir: str = ".", client: Any = None) -
             )
         return result
     count = len((page or {}).get("issues") or [])
+    if count == 0:
+        auth_reason = _auth_confirmation_failure(client, base_url)
+        if auth_reason is not None:
+            return auth_reason
     return CheckResult("jira_search", STATUS_PASS,
                        f"JQL 검색 경로 정상(project={shown}, 표본 {count}건)")
+
+
+def _auth_confirmation_failure(client: Any, base_url: str):
+    """빈 검색 결과가 **인증 실패의 위장**인지 확인 — 문제면 FAIL, 아니면 None.
+
+    ``client`` 가 ``myself`` 를 노출하지 않으면(대역 등) 확인할 수단이 없으므로 None
+    (= 판정 보류)을 돌려준다. 없는 근거로 FAIL 을 만들지 않는다.
+    """
+    from app.jira_client import JiraError
+
+    myself = getattr(client, "myself", None)
+    if myself is None:
+        return None
+    try:
+        myself()
+    except JiraError as exc:
+        result = _jira_failure("jira_search", exc, base_url)
+        return CheckResult(
+            "jira_search", STATUS_FAIL,
+            f"검색은 200 을 돌려줬지만 **자격이 거부됩니다** — {result.message}. "
+            f"인증이 깨지면 JQL 검색은 오류가 아니라 **빈 결과**를 주므로 "
+            f"'매칭 티켓 없음'과 구별되지 않습니다(표본 0건).",
+            result.hint or "jira_auth 검사 결과를 함께 보세요.",
+        )
+    return None
 
 
 def _forge_destination_unknown(kind: str, resolution: Any) -> CheckResult:

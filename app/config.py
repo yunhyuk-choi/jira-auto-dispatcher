@@ -131,7 +131,7 @@ class DeployConfig:
     """
 
     profile: str = "local"
-    docker_host: str = "unix:///var/run/docker.sock"
+    docker_host: str = "tcp://socket-proxy:2375"
     secrets_base_dir: str = ""
     workspace_volume: str = "jad-workspace"
 
@@ -178,6 +178,16 @@ class JiraConfig:
     #: 인스턴스 기본값이 바로 그 합집합이다.
     projects: list = field(default_factory=list)
     poll_interval_sec: int = 60
+    #: **자격 재확인 주기(초)** — 폴러가 ``GET /rest/api/3/myself`` 로 감시 토큰이 아직
+    #: 살아 있는지 확인하는 최소 간격. 0 이하면 재확인을 끈다.
+    #:
+    #: 왜 필요한가: Jira Cloud 는 자격이 틀려도 JQL 검색에 **200 + 빈 배열**을 준다
+    #: (``/myself`` 만 401). 그래서 토큰이 만료·회수되면 폴러는 "매칭 티켓 없음"과
+    #: 구별하지 못한 채 **영원히 조용히** 돈다. 왜 매 폴이 아닌가: 티켓이 하나라도
+    #: 돌아온 폴은 그 자체가 자격 증거라 확인이 필요 없고, 빈 폴마다 확인하면
+    #: (기본 60초 주기) 하루 1,440회의 순수 진단 요청이 는다. 기본 30분이면 하루 48회로
+    #: 줄면서 최악의 감지 지연이 30분이다 — "영원히 모른다"와 바꿀 만하다.
+    auth_recheck_sec: int = 1800
     watcher_token_file: str = ""  # 중앙 감시 토큰(내 것/봇). secrets.base_dir 상대
     watcher_email: str = ""       # Basic auth actor(감시 계정 이메일). env JIRA_WATCHER_EMAIL 폴백
     # --- 인스턴스별 트리거/역-트리거(레거시 match.* 의 신규 이름 — 항상 미러) ---
@@ -228,17 +238,22 @@ class MatchConfig:
 class WebhookConfig:
     """[webhook] 섹션 — Jira 웹훅 수신(이벤트 구동 트리거).
 
-    이벤트 구동 경로(POST /webhook/jira)는 poller.trigger_ticket을 재사용해
-    폴링과 동일한 dedup 게이트/매핑 수렴점을 탄다(폴링은 백스톱 유지). 토큰은
-    "값"이 아니라 secrets.base_dir 상대 참조(secret_ref)로만 둔다 — 미설정/조회불가
-    면 엔드포인트가 503으로 거부한다(무인증 실행 금지). path/shared_secret_file은
-    레거시 동기 경로(app/webhook.py) 전용 필드로 남겨둔다(하위호환).
+    수신 구현은 **하나뿐**이다 — ``app/main.py::register_jira_webhook`` 이
+    ``POST /webhook/jira`` 를 배선하고, 판단은 전부 ``poller.trigger_ticket`` 에
+    위임한다(폴링과 같은 재검증·dedup·매핑·범위 수렴점. 폴링은 백스톱 유지).
+    경로는 고정이라 설정 항목이 아니다.
+
+    인증: 헤더 ``X-Jira-Webhook-Token`` **전용**이며 값은 ``secret_ref``(secrets.base_dir
+    상대 파일 참조)로만 둔다. 쿼리 ``?token=`` 은 프록시·서버 access 로그에 평문으로
+    남는 유출 표면이라 **거부한다**. 시크릿 미설정/조회불가 → 503(무인증 자율 실행 금지).
+
+    ⚠️ 예전에 있던 ``path``·``shared_secret_file`` 은 **없어졌다.** 배선되지 않는 두 번째
+    구현(``app/webhook.py``) 전용 필드였고 그 파일과 함께 지웠다. 기존 config.yaml 에
+    남아 있어도 무시된다(로더가 모르는 키를 그냥 넘긴다).
     """
 
     enabled: bool = True
     secret_ref: str = "service/jira-webhook"
-    path: str = "/jira-webhook"           # 레거시 동기 경로 전용(하위호환)
-    shared_secret_file: str = ""          # 레거시 동기 경로 시크릿 참조(하위호환)
 
 
 @dataclass
@@ -814,6 +829,7 @@ def _build_config(raw: dict) -> AppConfig:
             project=jira_project,
             projects=jira_projects,
             poll_interval_sec=int(jira.get("poll_interval_sec", 60)),
+            auth_recheck_sec=int(jira.get("auth_recheck_sec", 1800)),
             watcher_token_file=str(jira.get("watcher_token_file", "")),
             watcher_email=str(jira.get("watcher_email", "")),
             # 신규 jira.* 우선, 없으면 레거시 match.* (위에서 _named_refs 로 정규화).
@@ -833,8 +849,6 @@ def _build_config(raw: dict) -> AppConfig:
         webhook=WebhookConfig(
             enabled=bool(webhook.get("enabled", True)),
             secret_ref=str(webhook.get("secret_ref", "service/jira-webhook")),
-            path=str(webhook.get("path", "/jira-webhook")),
-            shared_secret_file=str(webhook.get("shared_secret_file", "")),
         ),
         resume=ResumeConfig(
             work_hours=str(resume.get("work_hours", "")),

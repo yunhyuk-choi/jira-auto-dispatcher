@@ -157,9 +157,20 @@ class SchemaSection:
 #: 갈라지지 않게). 우선순위는 config 파서 문서 참조:
 #: 명시 ``deploy.*`` > 레거시 키 > 프로파일 파생 > 코드 기본값.
 PROFILE_DEFAULTS: dict = {
-    # 개발자 노트북 — central 도 워커도 같은 로컬 도커. 시크릿은 로컬 디렉토리(env SECRETS_DIR).
+    # 개발자 노트북 — compose 를 그대로 띄운다(Docker Desktop 포함). 시크릿만 다르다:
+    # 로컬 디렉토리(env SECRETS_DIR)로 두고, 도커 접근은 서버 프로파일과 **같은**
+    # socket-proxy 경유다.
+    # ⚠️ 예전 값은 ``unix:///var/run/docker.sock`` 이었다. 바꾼 이유:
+    #   (1) 이 리포가 배포하는 docker-compose.yml 은 socket-proxy 를 **기본으로** 선언하고
+    #       central 을 거기에 붙인다. 로컬만 소켓 직결로 파생하면 *배포되는 compose 와
+    #       모순되는 config* 가 나오고(실제로 설치 리허설에서 그렇게 나왔다), 설치자는
+    #       그걸 맞추려고 compose 를 손으로 고치게 된다 — 틀리기 쉽고 틀려도 조용하다.
+    #   (2) 소켓 직결은 central 에 호스트 root 동치 권한을 준다(SECURITY.md §4). 기본값이
+    #       가장 넓은 권한이어야 할 이유가 없다.
+    #   소켓 직결은 사라지지 않았다 — ``deploy.docker_host`` 를 **명시**하면 그게 이긴다
+    #   (INSTALL.md §3 의 "고급" 대안).
     "local": {
-        "docker_host": "unix:///var/run/docker.sock",
+        "docker_host": "tcp://socket-proxy:2375",
         "secrets_base_dir": "",
         "workspace_volume": "jad-workspace",
     },
@@ -355,6 +366,17 @@ _JIRA = SchemaSection(
             type=FieldType.INT,
             default=60,
             description="폴링 주기(초). 웹훅이 켜져 있으면 폴링은 백스톱이라 짧을 필요가 없다.",
+        ),
+        SchemaField(
+            key="jira.auth_recheck_sec",
+            type=FieldType.INT,
+            default=1800,
+            description=(
+                "감시 토큰 **생존 확인** 주기(초). 0 이면 끈다. Jira Cloud 는 자격이 "
+                "틀려도 JQL 검색에 200 + 빈 배열을 주므로(``/myself`` 만 401) 토큰이 "
+                "만료되면 시스템이 영원히 '할 일 없음' 상태로 조용히 돈다 — 빈 폴에서 "
+                "이 주기마다 자격을 다시 확인해 로그·``/api/doctor`` 에 드러낸다."
+            ),
         ),
         SchemaField(
             key="jira.watcher_token_file",
@@ -586,11 +608,15 @@ _DEPLOY = SchemaSection(
         SchemaField(
             key="deploy.docker_host",
             type=FieldType.STRING,
-            default="unix:///var/run/docker.sock",
+            # ⚠️ 이 기본값은 **아무 프로파일도 안 골랐을 때**의 값이며, 프로파일 파생
+            #    (:data:`PROFILE_DEFAULTS`)과 어긋나면 안 된다(tests/test_setup_schema.py
+            #    가 파서와의 드리프트를 잡는다).
+            default="tcp://socket-proxy:2375",
             legacy_keys=("spawn.docker_host",),
             description=(
-                "워커를 띄울 docker 엔드포인트. 서버 프로파일은 socket-proxy 경유를 "
-                "기본으로 한다(소켓 직결은 특권 확대)."
+                "워커를 띄울 docker 엔드포인트. 기본은 **모든 프로파일에서** socket-proxy "
+                "경유다(이 리포의 docker-compose.yml 이 그렇게 배포된다). 소켓 직결"
+                "(``unix:///var/run/docker.sock``)은 호스트 root 동치라 명시할 때만 쓴다."
             ),
             example="tcp://socket-proxy:2375",
         ),
@@ -672,6 +698,34 @@ SETUP_SCHEMA: Tuple = (_FORGE, _NOTIFIER, _JIRA, _WEBHOOK, _DLC_META, _DOCS_REPO
 def iter_sections_in(sections: Tuple) -> Iterator[SchemaSection]:
     """주어진 섹션 묶음을 선언 순서대로 순회한다."""
     yield from sections
+
+
+def profile_derived_values(profile: Any) -> dict:
+    """``deploy.profile`` 에서 **파생되는 답**을 ``{점 표기 키: 값}`` 으로 돌려준다.
+
+    프로파일을 고른 순간 ``deploy.docker_host``·``deploy.workspace_volume`` 은 이미
+    정해진 것이다 — 그건 *스키마 dataclass 기본값*이 아니라 **답의 일부**다. 그래서
+    검증기(:func:`app.setup_validate.resolve_values`)가 이 함수로 파생값을 "답한 값"에
+    합치고, 렌더러가 그것을 실제 ``config.yaml`` 에 쓴다. 이 함수가 없으면 "프로파일
+    하나면 끝난다"는 약속이 깨진다 — ``local`` 을 골랐는데 예시 파일에 남아 있던
+    ``cloud_vm`` 값이 그대로 렌더되는 실측 결함이 그 증상이었다.
+
+    우선순위는 :func:`app.config._build_deploy` 와 **같다**:
+        명시 ``deploy.<key>`` > 레거시 키(``spawn.*``·``secrets.base_dir``) > 여기 파생값.
+    (이 함수는 파생값만 알려주고, 우선순위 적용은 호출부가 한다.)
+
+    Args:
+        profile: 프로파일 이름(대소문자·공백 무시). 모르는 값이면 빈 dict.
+
+    Returns:
+        점 표기 키 → 파생값. **빈 파생값은 싣지 않는다** — 빈 문자열은 "이 프로파일은
+        이 항목에 의견이 없다"는 뜻이지 "빈 값으로 써라"가 아니다(``local`` 의
+        ``secrets_base_dir`` 이 그렇다 — 그 값은 env ``SECRETS_DIR`` 로 온다).
+    """
+    derived = PROFILE_DEFAULTS.get(str(profile or "").strip().lower())
+    if not derived:
+        return {}
+    return {f"deploy.{k}": v for k, v in derived.items() if v not in (None, "")}
 
 
 def iter_fields_in(sections: Tuple) -> Iterator[SchemaField]:

@@ -158,8 +158,19 @@ role: central
 jira: { base_url: https://x, project: PROJ, watcher_token_file: t }
 deploy: { profile: local, secrets_base_dir: /tmp/jad-secrets }
 """))
-    assert cfg2.spawn.docker_host == "unix:///var/run/docker.sock"
+    # local 도 socket-proxy 경유다 — 이 리포가 배포하는 compose 가 그렇게 뜬다.
+    # 갈리는 것은 시크릿 루트뿐(로컬 디렉토리 vs /run/secrets).
+    assert cfg2.spawn.docker_host == "tcp://socket-proxy:2375"
     assert cfg2.secrets.base_dir == "/tmp/jad-secrets"
+
+    # 소켓 직결은 사라지지 않았다 — **명시**하면 그게 이긴다(고급/특권 확대 대안).
+    cfg3 = C.load_config(_write(tmp_path, """
+role: central
+jira: { base_url: https://x, project: PROJ, watcher_token_file: t }
+deploy: { profile: local, secrets_base_dir: /tmp/jad-secrets,
+          docker_host: "unix:///var/run/docker.sock" }
+"""))
+    assert cfg3.spawn.docker_host == "unix:///var/run/docker.sock"
 
 
 def test_legacy_keys_beat_profile_defaults(tmp_path, monkeypatch):
@@ -171,7 +182,7 @@ jira: { base_url: https://x, project: PROJ, watcher_token_file: t }
 spawn: { docker_host: tcp://custom:2375 }
 secrets: { base_dir: "${SECRETS_DIR}" }
 """))
-    # profile 미지정 → local(파생 기본 unix://...)이지만 명시 레거시 값이 이긴다.
+    # profile 미지정 → local(파생 기본 tcp://socket-proxy:2375)이지만 명시 레거시가 이긴다.
     assert cfg.deploy.profile == "local"
     assert cfg.deploy.docker_host == "tcp://custom:2375"
     assert cfg.spawn.docker_host == "tcp://custom:2375"

@@ -291,34 +291,6 @@ def test_reassignment_to_in_scope_user_still_redispatches(isolated_state):
 
 
 # ---------------------------------------------------------------------------
-# 얇은 웹훅 엔드포인트(app/webhook.py)
-# ---------------------------------------------------------------------------
-
-def test_handle_webhook_ignores_out_of_scope(isolated_state):
-    from app.webhook import handle_webhook
-
-    class FakeReq:
-        headers: dict = {}
-
-        def get_json(self, silent=False):
-            return {"issue": {"key": "TEAM-1"}}
-
-    reg = Registry()
-    reg.upsert(UserRecord(username="u1", jira_account_id="a1", enabled=True,
-                          scope=Scope(projects=["PROJ"])))
-    cfg = make_config()
-    sch = Scheduler(cfg, JobQueue())
-    disp = Dispatcher(reg, sch)
-    gate = DedupGate()
-    jira = FakeJira(issue_by_key={"TEAM-1": _issue("TEAM-1", "a1")})
-
-    body, code = handle_webhook(FakeReq(), cfg, jira, gate, reg, disp)
-    assert code == 200 and body["reason"] == "out of scope"
-    assert sch.jobs.get("TEAM-1") is None
-    assert gate.is_claimed("TEAM-1") is False   # claim 도 잡지 않는다
-
-
-# ---------------------------------------------------------------------------
 # 상태 감시축(재오픈 = 재-디스패치)
 # ---------------------------------------------------------------------------
 

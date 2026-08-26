@@ -141,8 +141,9 @@ mkdir -p secrets/service
 # (a) central Jira watcher 토큰 (config.jira.watcher_token_file = service/jira-token)
 printf '%s' 'ATLASSIAN_API_TOKEN_값' > secrets/service/jira-token
 
-# (b) 웹훅을 쓸 때만 — 웹훅 공유 시크릿 (config.webhook.secret_ref)
-# printf '%s' '웹훅시크릿' > secrets/service/webhook-secret
+# (b) 웹훅을 쓸 때만 — 웹훅 토큰 (config.webhook.secret_ref, 기본 service/jira-webhook)
+#     ⚠️ 파일 이름은 secret_ref 값과 **같아야 한다**(다르면 엔드포인트가 503).
+# printf '%s' "$(openssl rand -hex 32)" > secrets/service/jira-webhook
 
 # (c) 알림을 쓸 때만 — 웹훅 URL (config.notifier.webhook_ref).
 #     provider별 URL 획득법은 config/config.example.yaml 의 notifier: 절 주석이 정본.
@@ -204,8 +205,10 @@ find secrets -type f -exec chmod 600 {} \;
 - **폴링만** 쓰면(`webhook.enabled: false`) central이 Jira로 **아웃바운드**만 하므로
   인바운드 개방 **불필요**. 관리 UI(8787)는 신뢰 네트워크에서만 접근한다(SSH 터널 권장).
 - **웹훅**을 켜면(`webhook.enabled: true`) Jira → central 로의 인바운드가 필요하다.
-  리버스 프록시(TLS)를 앞단에 두고 `webhook.path` **하나만** 노출, 나머지(8787 관리 UI)는
-  절대 외부 노출하지 않는다. 방화벽에서 출처를 Jira IP로 제한한다.
+  리버스 프록시(TLS)를 앞단에 두고 경로 `POST /webhook/jira` **하나만** 노출, 나머지
+  (8787 관리 UI)는 절대 외부 노출하지 않는다. 방화벽에서 출처를 Jira IP로 제한한다.
+  인증은 헤더 `X-Jira-Webhook-Token` **전용**이다 — 쿼리 `?token=` 은 access 로그 유출
+  표면이라 401 로 거부한다(헤더를 못 붙이면 앞단 프록시가 붙이게 한다).
 
 관리 UI 접근은 포트를 여는 대신 SSH 터널을 권장:
 

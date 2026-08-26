@@ -154,9 +154,12 @@ class ValidationResult:
         findings: 오류·경고 전부(선언 순서 → 발견 순서).
         values: 기본값·레거시 키까지 **해석된** 최종 값 표(점 표기 키 → 값).
             렌더러·doctor 가 아니라 프로그래밍 소비처를 위한 것이다.
-        explicit: 설치자가 **실제로 답한** 항목만(기본값 제외, 레거시 키는 신규 키로
-            정규화). :func:`app.setup_render.render_config` 가 이걸 쓴다 — 답하지 않은
-            항목까지 써 버리면 프로파일 파생(``deploy.profile``)이 무력화된다.
+        explicit: 설치자가 **실제로 답한** 항목 + 그 답에서 **기계적으로 파생되는**
+            항목(스키마 dataclass 기본값은 제외, 레거시 키는 신규 키로 정규화).
+            :func:`app.setup_render.render_config` 가 이걸 쓴다 — 답하지 않은 항목까지
+            써 버리면 프로파일 설계가 무력화되고, 반대로 파생값을 빼면
+            ``deploy.profile`` 과 **모순되는** config.yaml 이 나온다
+            (:func:`_apply_profile_derived`).
     """
 
     findings: list = field(default_factory=list)
@@ -262,8 +265,8 @@ def flatten_answers(raw: Mapping, sections: Optional[tuple] = None) -> dict:
 def resolve_values(flat: Mapping, sections: Optional[tuple] = None) -> tuple:
     """평탄화된 답변 → ``(해석된 값 표, 명시적으로 답한 값 표, 경고 목록)``.
 
-    해석 규칙은 :mod:`app.config` 의 ``_pick`` 과 **같아야 한다**:
-        신규 키 > 레거시 키 > 스키마 기본값
+    해석 규칙은 :mod:`app.config` 의 ``_pick``/``_build_deploy`` 와 **같아야 한다**:
+        신규 키 > 레거시 키 > **프로파일 파생**(:func:`_apply_profile_derived`) > 스키마 기본값
 
     레거시 ``notify.enabled`` 만은 값의 모양이 달라(bool → provider 이름) 파서와 같은
     특례를 둔다: ``true`` 면 ``google_chat``(그 시절 유일한 구현), 아니면 ``none``.
@@ -302,7 +305,33 @@ def resolve_values(flat: Mapping, sections: Optional[tuple] = None) -> tuple:
         if f.default is not None:
             values[f.key] = copy.deepcopy(f.default)
 
+    _apply_profile_derived(values, explicit, _sections(sections))
     return values, explicit, notes
+
+
+def _apply_profile_derived(values: dict, explicit: dict, sections: tuple) -> None:
+    """``deploy.profile`` 파생값을 **답한 값에 합친다**(제자리 변경).
+
+    왜 ``explicit`` 에까지 넣는가:
+        렌더러는 "답한 것만" 쓴다 — 그 규칙 자체는 옳다(스키마 dataclass 기본값을 파일에
+        박으면 프로파일 설계가 무력화된다). 하지만 **프로파일 파생값은 dataclass 기본값이
+        아니라 답의 일부**다. 프로파일을 고른 순간 함께 정해진 값이므로, 렌더에 반영되지
+        않으면 예시 파일의 *다른 프로파일 값*이 그대로 남아 프로파일과 모순되는
+        config.yaml 이 나온다(실측 결함).
+
+    우선순위(:func:`app.config._build_deploy` 와 동일):
+        명시 답변 > 레거시 키 > **프로파일 파생** > 스키마 기본값.
+        앞의 두 경우는 이미 ``explicit`` 에 들어와 있으므로, 여기 없는 키만 채운다.
+    """
+    if S.get_field_in(sections, "deploy.profile") is None:
+        return                      # 이 스키마는 배포 프로파일을 묻지 않는다(사용자 스키마 등)
+    for key, value in S.profile_derived_values(values.get("deploy.profile")).items():
+        if key in explicit:         # 명시 답변·레거시 키가 이긴다
+            continue
+        if S.get_field_in(sections, key) is None:
+            continue
+        values[key] = value
+        explicit[key] = value
 
 
 # ---------------------------------------------------------------------------

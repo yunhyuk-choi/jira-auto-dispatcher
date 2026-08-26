@@ -58,7 +58,8 @@ services:
       # claude로 판단할 때 쓰는 central 자신의 인증 토큰(.env로 주입, 워커 per-user와 별개).
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       # 프랙탈 PUSH: central의 docker CLI가 socket-proxy를 타깃하도록 지정.
-      # ⚠️ 정합 필수: config.yaml 의 spawn.docker_host 와 동일 값이어야 한다.
+      # ⚠️ 정합 필수: config.yaml 의 deploy.docker_host 와 동일 값이어야 한다
+      #    (기본값은 deploy.profile 에서 파생되며 세 프로파일 모두 이 값이다).
       DOCKER_HOST: tcp://socket-proxy:2375
     ports:
       - "8787:8787"                          # 관리 UI — ⚠️ 인터넷 노출 금지.
@@ -74,11 +75,14 @@ services:
       #                                        워커 쪽은 다르다 — 워커는 호스트 데몬이 만들기 때문에 bind 를 쓰지 않고 주입으로 받는다(app/inject.py).
       # --- worker 동적 spawn을 위한 docker 접근 ---
       # (기본) 위 socket-proxy 경유 — central은 docker.sock을 직접 보지 않는다.
-      #        ⚠️ 정합 필수: config.yaml 의 spawn.docker_host: tcp://socket-proxy:2375
+      #        ⚠️ **로컬(Docker Desktop) 포함 모든 프로파일의 기본**이다. 이 파일을 고칠
+      #           일이 없다 — config.yaml 의 deploy.docker_host 도 tcp://socket-proxy:2375
+      #           으로 파생된다(app/setup_schema.PROFILE_DEFAULTS).
       #
       # (대안) docker.sock 직결 — 편하지만 호스트 root 동치(특권 상승 표면, 비권장).
       #        socket-proxy 서비스/depends_on 제거 후 아래 한 줄을 추가하고
-      #        config.yaml 의 spawn.docker_host: unix:///var/run/docker.sock 로 되돌린다.
+      #        config.yaml 에 deploy.docker_host: unix:///var/run/docker.sock 을 **명시**한다
+      #        (명시 값이 프로파일 파생을 이긴다). ⚠️ 한쪽만 바꾸면 조용히 어긋난다.
       #   - /var/run/docker.sock:/var/run/docker.sock
 
   # --- worker(사용자별)는 compose에 없음 ---

@@ -126,6 +126,46 @@ def test_render_writes_a_loadable_config(tmp_path, capsys):
     assert C.load_config(out).jira.project == "ACME"
 
 
+def test_render_writes_profile_derived_values(tmp_path, capsys):
+    """결함 재현 방지 — 프로파일을 골랐으면 산출물이 그 프로파일과 **일치**해야 한다.
+
+    예전에는 ``local`` 로 답해도 예시 파일의 ``cloud_vm`` 값
+    (``tcp://socket-proxy:2375``)이 그대로 남았고, 경고에는 "답하지 않아 예시 값이
+    남은 항목"으로 ``deploy.docker_host`` 가 찍혔다. 문서(INSTALL §2.2)는 "프로파일
+    하나면 끝난다"고 약속하므로 그건 문서와 산출물의 모순이다.
+    """
+    from app import config as C
+
+    answers = json.loads(json.dumps(GOOD_ANSWERS))
+    answers["deploy"] = {"profile": "local", "secrets_base_dir": str(tmp_path / "secrets")}
+    out = str(tmp_path / "config.yaml")
+    code = CLI.main(["render", _write_json(tmp_path, "a.json", answers), "-o", out]
+                    + _render_args(tmp_path))
+    assert code == 0
+    cfg = C.load_config(out)
+    assert cfg.deploy.profile == "local"
+    assert cfg.deploy.docker_host == "tcp://socket-proxy:2375"
+    assert cfg.deploy.workspace_volume == "jad-workspace"
+    # 파생된 항목은 더 이상 "답하지 않아 예시 값이 남은 항목" 경고에 뜨지 않는다.
+    captured = capsys.readouterr().out
+    assert "deploy.docker_host" not in captured
+    assert "deploy.workspace_volume" not in captured
+
+
+def test_render_keeps_an_explicit_docker_host_over_the_profile(tmp_path, capsys):
+    """소켓 직결(고급 대안)을 **명시**하면 프로파일 파생을 이긴다."""
+    from app import config as C
+
+    answers = json.loads(json.dumps(GOOD_ANSWERS))
+    answers["deploy"] = {"profile": "local",
+                         "secrets_base_dir": str(tmp_path / "secrets"),
+                         "docker_host": "unix:///var/run/docker.sock"}
+    out = str(tmp_path / "config.yaml")
+    assert CLI.main(["render", _write_json(tmp_path, "a.json", answers), "-o", out]
+                    + _render_args(tmp_path)) == 0
+    assert C.load_config(out).deploy.docker_host == "unix:///var/run/docker.sock"
+
+
 def test_render_refuses_when_validation_fails(tmp_path, capsys):
     out = str(tmp_path / "config.yaml")
     code = CLI.main(["render", _write_json(tmp_path, "a.json", NO_CONSENT), "-o", out]

@@ -154,6 +154,27 @@ def test_webhook_passes_event_string_for_logging(tmp_path, isolated_state):
     assert rec.events == ["jira:issue_updated"]
 
 
+def test_webhook_forwards_only_the_key_never_the_payload_fields(tmp_path, isolated_state):
+    """★ 페이로드를 **믿지 않는다** — 이슈 키만 넘기고 판단은 Jira 재조회가 한다.
+
+    담당자·상태·라벨을 페이로드가 주장해도 라우트는 그것을 읽지도, 넘기지도 않는다.
+    ``poller.trigger_ticket`` 이 ``get_issue`` 로 현재 상태를 다시 읽어 판단한다
+    (재검증·상태 게이트·범위 게이트·dedup 은 tests/test_poller.py·test_scope.py 가 덮는다).
+    """
+    client, rec = _build(tmp_path, isolated_state)
+    res = client.post(
+        "/webhook/jira",
+        headers={"X-Jira-Webhook-Token": _SECRET},
+        json={"issue": {"key": "PROJ-7",
+                        "fields": {"assignee": {"accountId": "위조"},
+                                   "status": {"name": "해야 할 일"},
+                                   "labels": ["no-auto"]}}},
+    )
+    assert res.status_code == 202
+    assert rec.called.wait(timeout=5) is True
+    assert rec.keys == ["PROJ-7"]              # 키 하나만 — 나머지는 통째로 무시
+
+
 def test_webhook_no_issue_key_400(tmp_path, isolated_state):
     client, rec = _build(tmp_path, isolated_state)
     res = client.post(
