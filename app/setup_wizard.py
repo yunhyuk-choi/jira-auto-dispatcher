@@ -373,11 +373,18 @@ def _help_for(f: S.SchemaField) -> str:
 
 
 def ask_field(s: _Session, key: str, *, default: Any = None,
-              required: Optional[bool] = None, prompt: str = "") -> Any:
+              required: Optional[bool] = None, prompt: str = "",
+              record: bool = True) -> Any:
     """스키마 선언 하나를 질문으로 바꿔 묻고, 답을 기록한다.
 
     타입별 위젯은 :attr:`app.setup_schema.SchemaField.type` 이 정한다 — 질문 문구·허용값·
     예시가 전부 스키마에서 오므로, 스키마가 늘어도 이 모듈은 그대로다.
+
+    Args:
+        record: False 면 답을 **기록하지 않고** 돌려주기만 한다. 받은 답을 먼저 따져보고
+            받아들일지 정하는 호출부(:func:`_ask_secret_ref`)를 위한 것이다 — 기록은 곧
+            답변 파일 쓰기라, 되물어 버릴 입력을 디스크에 한 번 얹었다 지우는 일이
+            없게 한다(그 입력이 진짜 토큰일 수 있다).
     """
     f = S.get_field(key)
     if f is None:  # 스키마에 없는 키를 물을 이유가 없다(오타 방어)
@@ -428,7 +435,8 @@ def ask_field(s: _Session, key: str, *, default: Any = None,
             hint += f" (예: {f.example})"
         value = s.io.ask(label, default=fallback or "", help_text=hint,
                          required=is_required)
-    s.set(key, value)
+    if record:
+        s.set(key, value)
     return value
 
 
@@ -444,21 +452,92 @@ def _ref_label(item: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _masked_shape(value: str) -> str:
+    """입력을 **되비추지 않고** 형태만 말한다.
+
+    참조 자리에 진짜 토큰이 들어온 경우가 이 경고가 존재하는 이유다 — 경고문에 그 값을
+    그대로 실으면 화면·스크롤백·터미널 로그에 토큰이 남아 사고가 한 겹 늘어난다. 길이만
+    알려줘도 사람은 "방금 내가 붙여넣은 그것"임을 안다.
+    """
+    return f"입력값은 표시하지 않습니다 — 길이 {len(str(value or ''))}자"
+
+
+def _ask_secret_ref(s: _Session, key: str) -> str:
+    """시크릿 **참조 경로**를 묻는다 — 값처럼 보이면 경고하고 되묻는다.
+
+    설치 리허설에서 실제로 난 사고: 참조 자리에 토큰 값을 붙여넣자 그것이 그대로 파일
+    이름(``secrets/<토큰>``)과 ``config.yaml`` 의 ``*_ref`` 가 됐다. 파일명은 ``ls``·로그·
+    오류 메시지에 자유롭게 실리므로 그 자체가 **유출 표면**이고, 정작 토큰은 아무 데도
+    저장되지 않아 나중에 ``doctor`` 가 "시크릿 없음"으로만 잡는다(설치자는 왜 안 되는지
+    모른다).
+
+    판정은 **여기서 만들지 않는다** — ``config.yaml`` 을 같은 기준으로 검사하는
+    :func:`app.setup_validate.looks_like_secret_value` 를 그대로 부른다. 두 곳에 다른
+    기준이 생기면 한쪽만 갱신돼 어긋난다(대화에서 통과한 값이 검증에서 막히는 식).
+
+    휴리스틱이라 오탐이 있을 수 있으므로 **마법사는 여기서 막지 않는다** — 사용자가 "이게
+    맞다"고 재확인하면 그대로 쓴다. 판정의 권한은 마법사가 아니라 게이트에 있다: 같은
+    함수가 ``validate`` 에서 한 번 더 돌아 최종 판단을 하고, 이 모듈은 **그 게이트를
+    우회하는 경로를 만들지 않는다**(모듈 docstring). 그래서 재확인은 "검사를 끄는 것"이
+    아니라 "이 자리에서 되묻기를 그만두는 것"이며, 그 사실을 그대로 알려 준다 — 통과할 수
+    없는 탈출구를 통과할 수 있는 척 내밀지 않는다.
+
+    ⚠️ 입력한 값은 어떤 메시지에도 되비추지 않는다(:func:`_masked_shape`).
+    """
+    f = S.get_field(key)
+    suggested = f.example if f is not None else ""
+    example = str(suggested or "")
+    while True:
+        # record=False — 되물어 버릴 입력을 답변 파일에 얹지 않는다.
+        ref = str(ask_field(s, key, default=suggested, required=True,
+                            prompt=f"{key} (시크릿 파일 참조)", record=False) or "").strip()
+        reason = setup_validate.looks_like_secret_value(ref)
+        if not reason:
+            s.set(key, ref)
+            return ref
+
+        s.io.say("  ⚠️ 여기는 시크릿 **값**이 아니라, 그 값을 저장할 **파일 경로**를 적는 자리입니다.")
+        s.io.say(f"     받은 입력이 값으로 보입니다 — {reason}. ({_masked_shape(ref)})")
+        if example:
+            s.io.say(f"     참조는 시크릿 루트 기준 상대경로입니다 — 예: {example}")
+        s.io.say("     값은 바로 다음 질문에서 따로 받아 그 파일에 0600 으로 저장합니다.")
+        if s.io.ask_bool("     그래도 방금 입력을 참조 경로로 쓸까요(오탐이면 y)",
+                         default=False):
+            s.io.say("  ⚠️ 그대로 씁니다 — 이 참조는 파일 이름과 config.yaml 에 남고,"
+                     " ls·로그·오류 메시지에 그대로 보입니다.")
+            s.io.say("     다만 되묻기를 그만두는 것일 뿐 검사를 끄는 것은 아닙니다 —"
+                     " validate 게이트가 같은 기준으로 다시 봅니다(마법사는 게이트를"
+                     " 우회하지 않습니다).")
+            s.notes.append(f"{key}: 값처럼 보이는 참조를 확인 후 그대로 사용({reason})")
+            s.set(key, ref)
+            return ref
+        # 되묻기 — 방금 입력을 기본값으로 되돌려주지 않는다(Enter 로 되풀이되지 않게).
+        # 재개로 실려온 값이 문제였던 경우까지 지워야 다음 질문이 예시에서 시작한다.
+        if key in s.answers:
+            s.answers.pop(key, None)
+            s.save()
+
+
 def ensure_secret(s: _Session, key: str, *, what: str, generate: bool = False) -> None:
     """시크릿 참조를 묻고(기본값 제시), 그 **값**을 0600 파일로 저장한다.
+
+    참조 자리에 값이 오면 :func:`_ask_secret_ref` 가 붙잡는다 — 시크릿 참조를 묻는 자리는
+    전부 이 함수를 거치므로(``jira.watcher_token_file``·``forge.token_ref``·
+    ``webhook.secret_ref``·``notifier.webhook_ref``, 그리고 검증 되묻기), 방어가 한 곳에만
+    붙어도 전부에 적용된다.
 
     이미 파일이 있으면 **묻지 않는다** — 재개 시 같은 토큰을 두 번 붙여넣게 하지 않는다.
     값을 지금 못 구하면 건너뛸 수 있고(중단·재개), 그 경우 ``doctor --only secrets`` 가
     부재를 잡는다 — 마법사가 판정을 흉내내지 않는다.
     """
-    f = S.get_field(key)
-    ref = ask_field(s, key, default=(f.example if f is not None else ""),
-                    required=True, prompt=f"{key} (시크릿 파일 참조)")
+    ref = _ask_secret_ref(s, key)
     root = s.options.secrets_root
     try:
         path = inject.secret_dest(root, str(ref))
     except Exception:  # noqa: BLE001 — 경로 조립 실패는 참조가 이상하다는 뜻
-        s.io.say(f"  ⚠️ 참조가 이상합니다: {ref!r}")
+        # ⚠️ 참조를 되비추지 않는다 — 사용자가 확인 후 밀어붙인 '값 같은 참조'일 수 있다.
+        s.io.say(f"  ⚠️ 참조로 경로를 만들 수 없습니다({_masked_shape(ref)})"
+                 f" — 다시 실행해 참조를 고쳐 주세요.")
         return
 
     if os.path.exists(path) and os.path.getsize(path) > 0:
@@ -480,9 +559,11 @@ def ensure_secret(s: _Session, key: str, *, what: str, generate: bool = False) -
         return
     try:
         written = inject.write_secret(root, str(ref), value)
-    except inject.InjectError as exc:
-        s.io.say(f"  ⚠️ 저장하지 못했습니다: {exc}")
-        s.notes.append(f"시크릿 저장 실패: {ref}")
+    except inject.InjectError:
+        # ⚠️ 예외 메시지에는 ref 원문이 실려 있다 — 그대로 출력하지 않는다(값일 수 있다).
+        s.io.say(f"  ⚠️ 저장하지 못했습니다 — 참조가 시크릿 루트를 벗어납니다"
+                 f"({_masked_shape(ref)}).")
+        s.notes.append(f"시크릿 저장 실패: {key} (참조가 시크릿 루트를 벗어남)")
         return
     s.io.say(f"  저장: {written} (0600) — 값은 어디에도 출력하지 않습니다.")
 

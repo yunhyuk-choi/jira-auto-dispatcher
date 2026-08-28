@@ -411,6 +411,150 @@ def test_skipping_a_secret_value_leaves_a_note_not_a_silent_hole(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# 참조 자리에 값이 오면 — 리허설에서 실제로 난 사고
+# ---------------------------------------------------------------------------
+
+
+#: 유출되면 안 되는 것처럼 다루는 가짜 토큰(알려진 GitLab PAT 접두사 —
+#: :func:`app.setup_validate.looks_like_secret_value` 가 잡는 형태).
+PASTED_TOKEN = "glpat-DO-NOT-LEAK-THIS-INTO-A-FILENAME"
+
+#: 참조 자리를 묻는 프롬프트 조각(키 이름이 그대로 프롬프트에 들어간다).
+REF_PROMPTS = (
+    "jira.watcher_token_file",
+    "forge.token_ref",
+    "webhook.secret_ref",
+    "notifier.webhook_ref",
+)
+
+#: 되묻기를 켜려면 알림 채널이 ``none`` 이 아니어야 한다(그래야 webhook_ref 를 묻는다).
+NOTIFIER_ON = ("notifier.provider", "2")   # 1)none 2)google_chat …
+
+
+def answer_then(bad, good):
+    """첫 호출만 ``bad``, 이후로는 ``good`` 을 답하는 대역(되묻기 검증용)."""
+    state = {"n": 0}
+
+    def _answer():
+        state["n"] += 1
+        return bad if state["n"] == 1 else good
+
+    return _answer
+
+
+@pytest.mark.parametrize("ref_key", REF_PROMPTS)
+def test_a_token_pasted_into_the_reference_prompt_is_caught_and_reasked(tmp_path, ref_key):
+    """참조 자리에 토큰을 붙여넣으면 **파일 이름이 되기 전에** 붙잡힌다.
+
+    리허설에서 난 사고 그대로다 — 참조 자리에 값을 넣자 ``secrets/<값>`` 파일이 생기고
+    ``config.yaml`` 의 ``*_ref`` 에도 그 값이 적혔다(파일명은 ls·로그·오류 메시지에
+    실리므로 그 자체가 유출 표면이다). 참조를 묻는 자리는 **전부** 막혀야 한다.
+    """
+    good_ref = "service/제대로-된-참조"
+    rules = HAPPY_RULES + (NOTIFIER_ON,
+                           (ref_key, answer_then(PASTED_TOKEN, good_ref)))
+    code, responder, out = run(tmp_path, rules=rules,
+                               secrets=HAPPY_SECRETS + (("값", "아무-값"),))
+
+    assert code == W.EXIT_OK
+    # 그 프롬프트가 실제로 나왔고, **다시** 물었다(테스트가 헛돌지 않는다).
+    assert responder.asked(ref_key) >= 2, ref_key
+    assert "파일 경로" in out.text
+    # 토큰이 파일 이름이 되지 않았다.
+    assert not (tmp_path / "secrets" / PASTED_TOKEN).exists()
+    assert not any(PASTED_TOKEN in p for p in _all_paths(tmp_path / "secrets"))
+    # 설정·답변 파일 어디에도 없다.
+    for path in ("config.yaml", "setup-answers.json"):
+        assert PASTED_TOKEN not in (tmp_path / path).read_text(encoding="utf-8")
+    # 되물은 뒤 받은 **참조**는 정상적으로 쓰인다.
+    assert good_ref in (tmp_path / "setup-answers.json").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("ref_key", REF_PROMPTS)
+def test_the_warning_never_echoes_what_was_typed(tmp_path, ref_key):
+    """경고문이 입력값을 되비추지 않는다 — 진짜 토큰이면 그 에코가 곧 유출이다."""
+    rules = HAPPY_RULES + (NOTIFIER_ON,
+                           (ref_key, answer_then(PASTED_TOKEN, "service/ok")))
+    _code, responder, out = run(tmp_path, rules=rules,
+                                secrets=HAPPY_SECRETS + (("값", "아무-값"),))
+
+    assert responder.asked(ref_key) >= 2, ref_key
+    assert "파일 경로" in out.text                # 무엇이 문제인지 말은 한다
+    assert PASTED_TOKEN not in out.text          # 값은 말하지 않는다
+    assert PASTED_TOKEN[:12] not in out.text     # 앞자락도 흘리지 않는다
+    assert "길이" in out.text                     # 형태(길이)만 알려준다
+
+
+def test_insisting_ends_the_reasking_and_hands_the_call_to_the_gate(tmp_path):
+    """휴리스틱은 오탐이 난다 — **마법사는** 사용자를 여기서 막지 않는다.
+
+    다만 되묻기를 그만두는 것이 검사를 끄는 것은 아니다. 판정 권한은 게이트에 있고
+    (``validate`` 가 같은 함수로 다시 본다), 이 모듈은 그 게이트를 우회하는 경로를 만들지
+    않는다 — 그래서 "통과할 수 있는 탈출구"인 척하지 않고 그 사실을 그대로 알린다.
+    """
+    odd_ref = "a" * 40          # 값처럼 보이지만 사람이 고집할 수 있는 참조
+    rules = HAPPY_RULES + (("forge.token_ref", odd_ref),
+                           ("그래도 방금 입력을 참조 경로로 쓸까요", "y"))
+    code, responder, out = run(tmp_path, rules=rules)
+
+    # 마법사는 되묻기를 멈추고 그대로 진행했다 — 값까지 받아 그 참조 파일에 저장한다.
+    assert (tmp_path / "secrets" / odd_ref).read_text(encoding="utf-8") == "forge-token-값"
+    assert any("forge 토큰" in p for p in responder.secret_prompts)
+    # 밀어붙인 대가(파일명·로그 노출)와 게이트가 다시 본다는 사실을 둘 다 알린다.
+    assert "ls·로그" in out.text
+    assert "게이트를 우회하지 않습니다" in out.text
+    # 그리고 막은 것은 마법사가 아니라 **게이트**다(config.yaml 은 생기지 않는다).
+    assert code == W.EXIT_GATE_FAILED
+    assert not (tmp_path / "config.yaml").exists()
+
+
+def test_declining_the_flagged_reference_does_not_leave_it_in_the_answers(tmp_path):
+    """되묻기로 버린 입력은 답변 파일에 **한 번도** 얹히지 않는다(중단해도 남지 않게)."""
+    rules = HAPPY_RULES + (("forge.token_ref",
+                            answer_then(PASTED_TOKEN, "service/forge-token")),)
+    seen: list = []
+
+    real_write = W.write_answers
+
+    def spy(path, flat):
+        seen.append(dict(flat))
+        real_write(path, flat)
+
+    W.write_answers = spy
+    try:
+        code, _responder, _out = run(tmp_path, rules=rules)
+    finally:
+        W.write_answers = real_write
+
+    assert code == W.EXIT_OK
+    assert not any(PASTED_TOKEN in str(snapshot.values()) for snapshot in seen)
+
+
+def test_the_wizard_and_the_validator_judge_by_the_same_rule():
+    """판정은 마법사가 새로 만들지 않는다 — 검증기의 것을 그대로 쓴다.
+
+    기준이 두 벌이 되면 한쪽만 갱신돼 어긋난다(대화에서 통과한 값이 검증에서 막히는 식).
+    그리고 스키마 **예시**가 자기 자신의 경고에 걸리면 안 된다.
+    """
+    from app import setup_schema as SC
+    from app import setup_validate as V
+
+    assert V.looks_like_secret_value(PASTED_TOKEN)   # 같은 함수가 잡는다
+    for key in REF_PROMPTS:
+        example = SC.get_field(key).example
+        if example:
+            assert V.looks_like_secret_value(str(example)) == "", key
+
+
+def _all_paths(root) -> list:
+    """``root`` 아래 모든 경로 문자열(파일명 유출 검사용)."""
+    out: list = []
+    for dirpath, dirnames, filenames in os.walk(str(root)):
+        out.extend(os.path.join(dirpath, n) for n in list(dirnames) + list(filenames))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # 묻지 않는 값 · 자동 선택
 # ---------------------------------------------------------------------------
 
