@@ -3,12 +3,11 @@
 # 하나의 이미지를 두 역할로 재사용한다. ENTRYPOINT는 `python -m app.main` 이며,
 # 앱이 env ROLE(central|worker)을 읽어 분기한다(app/main.py).
 #   central: 관리 UI + Jira 감시/디스패치 + worker 컨테이너 spawn(Docker SDK)
-#   worker : 중앙 HTTP 폴링 → `claude -p` 자율 실행 → 상태 회신
+#   worker : 상주(/healthz)만 하고, 중앙이 `docker exec` 로 밀어 넣는 `claude -p` 를 실행
 #
 # 계약 정합(반드시 유지):
 #   image   = jira-auto-dispatcher:latest  (config.spawn.image / compose image)
 #   network = jad-net                       (config.spawn.network / compose networks)
-#   central = http://central:8787           (config.spawn.central_url / compose 서비스명)
 #   claude  = /home/app/.claude             (spawner CLAUDE_CONFIG_DIR = $HOME/.claude)
 #   claude bin은 비-root 유저(uid 1000) PATH에 있어야 한다(run.claude_bin=claude).
 #
@@ -49,10 +48,15 @@ RUN curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${
 #   ~/.claude   : 사용자 인증/세션 영속(worker; 런타임에 per-user 볼륨이 마운트)
 #   /app/state  : central 영속(jobs/watermark/dedup/registry)
 #   /app/workspace : 오케스트레이터 작업 공간
+#   /run/secrets   : worker가 **주입받은 시크릿을 자기 컨테이너 안에** 기록하는 자리
+#                    (app/inject.py). 실운영에서는 spawner가 여기에 uid 소유 tmpfs를
+#                    걸어 RAM 전용으로 만들지만, tmpfs 없이 이미지를 그냥 돌려도 비-root
+#                    (uid 1000)가 쓸 수 있도록 미리 만들어 소유권을 맞춰 둔다.
 ENV HOME=/home/app
 RUN useradd --create-home --uid 1000 --shell /bin/bash app \
-    && mkdir -p /home/app/.claude /app/state /app/workspace \
-    && chown -R 1000:1000 /home/app /app
+    && mkdir -p /home/app/.claude /app/state /app/workspace /run/secrets \
+    && chown -R 1000:1000 /home/app /app /run/secrets \
+    && chmod 700 /run/secrets
 
 WORKDIR /app
 

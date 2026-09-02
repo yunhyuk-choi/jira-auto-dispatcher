@@ -20,12 +20,15 @@ from app import setup_schema as S
 # --- 선언 일관성 -------------------------------------------------------------
 
 
-def test_sections_are_the_declared_six():
+def test_sections_are_the_declared_eight():
     assert [s.name for s in S.SETUP_SCHEMA] == [
-        "forge", "notifier", "jira", "docs_repo", "deploy", "consent",
+        "forge", "notifier", "jira", "webhook", "dlc_meta", "docs_repo",
+        "deploy", "consent",
     ]
-    # docs_repo 만 섹션 전체가 선택이다.
-    assert [s.name for s in S.SETUP_SCHEMA if s.optional] == ["docs_repo"]
+    # 섹션 전체를 건너뛸 수 있는 것은 웹훅 수신과 설계문서 레포뿐이다.
+    # ⚠️ dlc_meta 는 선택이 아니다 — central 이 사이클로그를 쓰고 REPO-MAP 을 읽는 곳이고,
+    #    그 URL 이 forge base_url·kind 판정의 근거이기도 하다.
+    assert [s.name for s in S.SETUP_SCHEMA if s.optional] == ["webhook", "docs_repo"]
 
 
 def test_field_keys_unique_and_documented():
@@ -56,9 +59,10 @@ def test_secret_flags_are_mutually_exclusive_and_refs_only():
         assert not (f.secret and f.secret_ref), f"{f.key}: 두 시크릿 성격을 동시에 주장한다"
     # 이 시스템은 시크릿 "값"을 config.yaml 에 담지 않는다 — 스키마에도 값 시크릿은 없다.
     assert [f.key for f in S.iter_fields() if f.secret] == []
-    # 참조 시크릿은 forge/notifier/jira 각각 하나씩 있다.
+    # 참조 시크릿은 forge/notifier/jira/webhook 각각 하나씩 있다.
     assert sorted(f.key for f in S.iter_fields() if f.secret_ref) == [
         "forge.token_ref", "jira.watcher_token_file", "notifier.webhook_ref",
+        "webhook.secret_ref",
     ]
 
 
@@ -91,12 +95,29 @@ def test_legacy_key_map_covers_renamed_keys():
 def test_profile_defaults_cover_every_declared_profile():
     for profile in S.DEPLOY_PROFILES:
         d = S.PROFILE_DEFAULTS[profile]
-        assert set(d) == {
-            "docker_host", "host_deploy_dir", "secrets_base_dir", "workspace_volume",
-        }
-    # local 만 도커 소켓 직결이고 서버 프로파일은 socket-proxy 경유(특권 축소).
-    assert S.PROFILE_DEFAULTS["local"]["docker_host"].startswith("unix://")
-    assert S.PROFILE_DEFAULTS["cloud_vm"]["docker_host"].startswith("tcp://")
+        assert set(d) == {"docker_host", "secrets_base_dir", "workspace_volume"}
+    # ⚠️ **모든** 프로파일이 socket-proxy 경유다(소켓 직결은 호스트 root 동치라
+    # 기본값이 될 수 없고, 이 리포가 배포하는 compose 도 socket-proxy 를 선언한다).
+    # local 만 예외로 두면 배포되는 compose 와 모순되는 config 가 파생된다(실측 결함).
+    for profile in S.DEPLOY_PROFILES:
+        assert S.PROFILE_DEFAULTS[profile]["docker_host"].startswith("tcp://"), profile
+    # 프로파일이 실제로 갈리는 자리는 시크릿 루트다(로컬 디렉토리 vs 컨테이너 경로).
+    assert S.PROFILE_DEFAULTS["local"]["secrets_base_dir"] == ""
+    assert S.PROFILE_DEFAULTS["cloud_vm"]["secrets_base_dir"] == "/run/secrets"
+
+
+def test_profile_derived_values_are_dotted_and_drop_empties():
+    """파생값은 점 표기 키로 나오고, 빈 값('의견 없음')은 싣지 않는다."""
+    local = S.profile_derived_values("local")
+    assert local["deploy.docker_host"] == "tcp://socket-proxy:2375"
+    assert local["deploy.workspace_volume"] == "jad-workspace"
+    # local 의 secrets_base_dir 은 "" → 렌더에 쓰면 템플릿의 ${SECRETS_DIR} 을 지운다.
+    assert "deploy.secrets_base_dir" not in local
+    assert S.profile_derived_values("cloud_vm")["deploy.secrets_base_dir"] == "/run/secrets"
+    # 대소문자·공백은 흡수하고, 모르는 프로파일은 빈 dict.
+    assert S.profile_derived_values("  CLOUD_VM ") == S.profile_derived_values("cloud_vm")
+    assert S.profile_derived_values("없는프로파일") == {}
+    assert S.profile_derived_values(None) == {}
 
 
 def test_jira_custom_field_keys_match_todays_constants():
@@ -108,6 +129,11 @@ def test_jira_custom_field_keys_match_todays_constants():
     assert defaults["due_date"] == J.FIELD_DUE_DATE
     assert defaults["actual_start"] == J.FIELD_ACTUAL_START
     assert defaults["actual_end"] == J.FIELD_ACTUAL_END
+    assert set(defaults) == set(J.DEFAULT_CUSTOM_FIELDS)
+    # ★ 조직 고유 워크플로우 필드에는 **기본값을 두지 않는다** — 어떤 id 도 남의
+    # 인스턴스에서 맞다고 보장할 수 없다(실측: 옛 기본값 customfield_10187/10186 은 그
+    # 사이트에 존재하지 않았고 실제 값은 10352/10353 이었다). 미설정 = 미전송.
+    assert defaults["actual_start"] == "" and defaults["actual_end"] == ""
 
 
 # --- 스키마 ↔ 파서 드리프트 방지 ---------------------------------------------
@@ -124,7 +150,9 @@ _KEY_TO_ATTR = {
     "notifier.notify_cancelled": "notifier.notify_cancelled",
     "jira.base_url": "jira.base_url",
     "jira.project": "jira.project",
+    "jira.projects": "jira.projects",
     "jira.poll_interval_sec": "jira.poll_interval_sec",
+    "jira.auth_recheck_sec": "jira.auth_recheck_sec",
     "jira.watcher_token_file": "jira.watcher_token_file",
     "jira.watcher_email": "jira.watcher_email",
     "jira.trigger_statuses": "jira.trigger_statuses",
@@ -133,10 +161,12 @@ _KEY_TO_ATTR = {
     "jira.custom_fields": "jira.custom_fields",
     "jira.done_transition_id": "jira.done_transition_id",
     "jira.done_transition_names": "jira.done_transition_names",
+    "webhook.enabled": "webhook.enabled",
+    "webhook.secret_ref": "webhook.secret_ref",
+    "run.dlc_meta_repo_url": "run.dlc_meta_repo_url",
     "run.docs_repo": "run.docs_repo",
     "run.docs_repo_url": "run.docs_repo_url",
     "deploy.profile": "deploy.profile",
-    "deploy.host_deploy_dir": "deploy.host_deploy_dir",
     "deploy.docker_host": "deploy.docker_host",
     "deploy.secrets_base_dir": "deploy.secrets_base_dir",
     "deploy.workspace_volume": "deploy.workspace_volume",

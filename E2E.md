@@ -30,7 +30,7 @@
 ### 0.1 사전 조건
 
 - INSTALL.md(또는 온프렘이면 DEPLOY.md 1~5단계) 완료 — 이미지 빌드 → `config.yaml` →
-  시크릿(`service/jira-token`, `.env` 의 `WORKER_SHARED_SECRET`) → `docker compose up -d`.
+  시크릿(`service/jira-token`, `.env` 의 `CLAUDE_CODE_OAUTH_TOKEN`) → `docker compose up -d`.
 - 서버 SSH 접근(`<deploy-user>@<서버>`). 로컬(갈래 A)이면 SSH 없이 그냥 로컬 셸이다.
 - 관리 UI는 **신뢰 네트워크 한정**이므로 SSH 터널로 연다:
 
@@ -77,12 +77,28 @@ ssh <deploy-user>@<서버> 'cd /opt/jira-auto-dispatcher && docker compose logs 
 
 ## 1. 온보딩 (사용자 직접) → worker 자동 spawn
 
+> ⚠️ 실제 합류는 **2단**이다 — 여기(웹 등록) 말고 로컬에서 `ai-dlc-orchestrator` 의
+> SETTER 를 합류 모드로 돌려 `dlc-meta` 를 clone 하는 단계가 앞에 있다
+> ([INSTALL.md §8](INSTALL.md)). 이 문서는 **배포 플로우 검증**이 목적이라 웹 쪽만 다룬다.
+
 ### 1.1 조작 — 자격증명 입력 → 등록
 
-UI 온보딩 폼(또는 `POST /onboard`)에 입력한다. **필수**: `username`, `jira_account_id`,
-`jira_email`, `jira_token`, `claude_setup_token`. **선택**: `forge_token`(브랜치 push·MR/PR
-생성용 — GitLab/GitHub PAT(`forge.kind` 에 맞춰). 옛 이름 `gitlab_token` 도 계속 받는다),
-`git_name`/`git_email`(커밋 author 귀속), `autonomy_mode`, `permission_level`, `scope`.
+UI 온보딩 폼(또는 `POST /onboard`)에 입력한다. 필드 목록의 **정본은 스키마 선언**
+(`app/user_schema.py`)이고, UI 는 그것을 이 인스턴스 설정과 함께 렌더한다
+(`GET /api/onboarding/guide` — forge 종류에 맞는 PAT 안내만 보인다).
+
+**필수**: `username`, `jira_account_id`, `jira_email`, `jira_token`, `forge_token`,
+`claude_setup_token`, `consent_full_permissions`.
+**선택**: `git_name`/`git_email`(커밋 author 귀속), `autonomy_mode`, `permission_level`,
+`scope`, `notify_user_id`.
+
+- `forge_token` 은 **선택이 아니다**(브랜치 push·MR/PR 생성용 — GitLab/GitHub PAT,
+  `forge.kind` 에 맞춰. 옛 이름 `gitlab_token` 도 계속 받는다). 없으면 워커가 커밋만 하고
+  변경요청을 못 만드는 조용한 반쪽 동작이 된다.
+- `consent_full_permissions` 는 **합류자 본인**의 풀 퍼미션 동의다. 서버가 강제하며
+  (400) 동의 시각은 서버 수신 시각으로 레지스트리에 남는다.
+- `jira_account_id` 를 모르면 UI 의 `내 accountId 조회` 버튼(= `POST /api/onboarding/whoami`)
+  이 이메일+토큰으로 `GET /rest/api/3/myself` 를 대신 호출해 채워 준다.
 
 - **autonomy_mode = B 권장(최초)** — 경량 1차(트리아지+브랜치+스캐폴딩+1차 시도+`runs` 저널).
   MR을 강행하지 않아 최초 검증에서 부작용이 작다(§5). A는 컨벤션이 성숙한 FE에서 나중에.
@@ -97,8 +113,10 @@ curl -sS -X POST http://localhost:8787/onboard \
   -d '{"username":"<username>","jira_account_id":"<JIRA_ACCOUNT_ID>","jira_email":"you@example.com",
        "jira_token":"<JIRA_API_TOKEN>","claude_setup_token":"<SETUP_TOKEN>",
        "forge_token":"<FORGE_PAT>","git_name":"<git-name>","git_email":"you@example.com",
-       "autonomy_mode":"B","scope":"<PROJECT_KEY>"}'
-# 기대: HTTP 201 {"status":"ok","username":"<username>","enabled":false}
+       "autonomy_mode":"B","scope":"<PROJECT_KEY>","consent_full_permissions":true}'
+# 기대: HTTP 201 {"status":"ok","username":"<username>","enabled":false,
+#                 "consent_accepted_at":"<서버 수신 시각 ISO-8601>"}
+# 검증 실패 시: HTTP 400 {"error":...,"missing":[...],"findings":[{"key":"<필드>",...}]}
 ```
 
 ### 1.2 조작 — 활성화(enable) → worker spawn
@@ -123,7 +141,7 @@ curl -sS -X POST http://localhost:8787/users/<username>/enable
   ```bash
   ssh <deploy-user>@<서버> 'docker ps --filter name=jad-worker-'
   ```
-- worker 로그에 폴링 루프 기동(및 claude 준비):
+- worker 로그에 상주 기동(주입 materialize·사전 인가 settings 복사·헬스 서빙):
 
   ```bash
   ssh <deploy-user>@<서버> 'docker logs jad-worker-<username> --tail=50'
@@ -155,9 +173,15 @@ curl -sS -X POST http://localhost:8787/users/<username>/enable
 
 ## 2. 정상 플로우 — 티켓 생성 → 감지 → 디스패치 → 실행 → 완료
 
-> 전진축(§2·§4): central 폴러가 신규 티켓을 감지 → dedup claim → 담당자 매핑 →
-> 스케줄러가 레포락 판단 후 dispatch → worker가 `GET /dispatch/<user>/next`로 수령 →
-> `claude -p`(오케스트레이터) 자율 실행 → 채널 F(`POST .../status`)로 회신.
+> 전진축(§2·§4): central 폴러가 신규 티켓을 감지 → dedup claim → 담당자 매핑
+> (+ per-user 프로젝트 범위 게이트) → **상주 센트럴 라이브 세션에 이벤트 주입** →
+> 센트럴 에이전트가 레포락을 consult 하고 사용자별 서브로 위임 →
+> `docker exec jad-worker-<user> claude -p …` 로 워커 안에서 자율 실행 →
+> 완료-리포트를 센트럴이 관찰해 알림 채널로 상신(`notify_report.py`).
+>
+> ⚠️ 워커가 `GET /dispatch/<user>/next` 로 잡을 **당겨오던** 레거시 경로는 은퇴했다
+> (같은 티켓을 두 번 실행해 중복 브랜치·중복 변경요청이 났다). 워커는 이제 밀어
+> 넣어지는 대상이다.
 
 ### 2.1 조작 — 테스트 티켓 생성(사용자 직접)
 
@@ -176,7 +200,7 @@ curl -sS -X POST http://localhost:8787/users/<username>/enable
 | 감지·claim | `docker compose logs central | grep -i poll` | 폴링 주기(기본 60s)·티켓 claim 흔적 |
 | 매핑 | central 로그 | assignee accountId → 등록 사용자 매핑(enabled만) |
 | enqueue·dispatch | `GET /api/jobs` | 잡이 `queued` → `running`(레포락 획득) |
-| 수령 | `docker logs jad-worker-<user>` | `GET /dispatch/<user>/next` 200 수신 + `claude -p` 실행 |
+| 주입 | `docker logs jad-worker-<user>` | 센트럴이 `docker exec` 로 밀어 넣은 `claude -p` 실행 흔적 |
 | Jira 착수 전이 | Jira 티켓 | `해야 할 일` → `진행 중` (worker 안 오케스트레이터가 사용자 토큰으로 전이) |
 | 산출 | forge | 브랜치 `auto/<TICKET>` 생성(커밋 author = 사용자 identity) |
 | MR/PR(A모드만) | forge | MR/PR 초안 생성(사용자 forge 토큰). **B모드는 MR 없음**(1차 산출+저널) |
@@ -193,9 +217,13 @@ bash scripts/observe-job.sh <TICKET> <user> http://localhost:8787   # /api/jobs 
 
 - `/api/jobs`에서 해당 티켓 잡의 상태 전이: `queued` → `running` → `done`.
 - Jira 티켓: `해야 할 일` → `진행 중` → (성공 시) `완료`.
-  - ⚠️ **착수(진행 중) 전이 시 필수필드**: `duedate`, `customfield_10015`(시작 날짜).
-    **완료 전이 전 필수필드**: `customfield_10186`, `customfield_10187`. 이 채움/전이는
-    worker 안 오케스트레이터가 ISSUE-TRACKER-ADAPTER 규율로 수행한다(누락 시 전이 실패 → 2.4).
+  - ⚠️ **필수필드는 인스턴스마다 다르다** — 아래는 이 코드가 처음 운영된 인스턴스의 값이다.
+    착수(진행 중) 전이 시 `duedate` + 시작 날짜(`jira.custom_fields.start_date`, 그 인스턴스는
+    `customfield_10015`), 완료 전이 시 실제 시작/종료일(`actual_start`·`actual_end`, 그
+    인스턴스는 `customfield_10187`/`customfield_10186`). `actual_*` 는 **코드 기본값이 없으므로**
+    자기 인스턴스 값을 `jira.custom_fields` 에 적어야 전이에 실린다(안 적으면 보내지 않는다 —
+    워크플로우가 요구하면 Jira 가 "필수입니다"로 막는다). 실측: `discover --only custom_fields`.
+    이 채움/전이는 worker 안 오케스트레이터가 ISSUE-TRACKER-ADAPTER 규율로 수행한다(→ 2.4).
 - forge(GitLab/GitHub): `auto/<TICKET>` 브랜치 존재. 커밋 author = 사용자 이름/이메일
   (README "per-user attribution").
 - autonomy=A면 MR 초안 + `/api/jobs`의 `mr_url` 채워짐. **자동 머지는 없다**(사람 리뷰 게이트).
@@ -209,11 +237,15 @@ bash scripts/observe-job.sh <TICKET> <user> http://localhost:8787   # /api/jobs 
   ```
   - assignee accountId 불일치 / 사용자 `enabled=false` / 상태가 `해야 할 일`이 아님 /
     프로젝트가 `config.jira.project` 와 다름 중 하나. 폴링 주기(60s) 대기했는지 확인.
-- 잡이 `running`인데 worker가 안 받음:
+- 잡이 `queued`인데 워커에서 아무 일도 안 일어남:
   ```bash
   ssh <deploy-user>@<서버> 'docker logs jad-worker-<user> --tail=100'
+  ssh <deploy-user>@<서버> 'docker compose logs central | grep -i central-inject'
   ```
-  - `X-Worker-Secret` 불일치(401) → central `.env`와 worker env의 `WORKER_SHARED_SECRET` 정합 확인.
+  - 센트럴 세션 미성립 → central 부팅 로그의 "프랙탈 센트럴 세션이 성립하지 않습니다"
+    경고 + `GET /api/doctor` 확인(`run.persistent_session`·stream-json 포맷). 이 경우
+    티켓이 감지돼도 **실행되지 않는다** — 레거시 폴백 경로는 없다.
+  - 워커 컨테이너가 `unhealthy` → `/healthz` 서빙 실패. `docker exec` 대상에서 밀려난다.
   - claude 인증 실패 → setup-token 재발급/재온보딩(1.4).
 - Jira 전이 실패(진행 중/완료로 안 넘어감):
   - **필수필드 누락**이 가장 흔함(duedate·10015 착수 / 10186·10187 완료). worker 로그의
@@ -274,10 +306,12 @@ bash scripts/observe-job.sh <TICKET> <user>    # reset_at·status 추적
 
 - **큐 대기(queued/interrupted)였던 잡** → 즉시 `cancelled`(드롭) + 레포락 해제 + dedup 해제.
   롤백 대상 없음(아직 산출 없음).
-- **실행 중(running)이던 잡** → central이 worker에 **취소 플래그** 세팅(제어 채널
-  `GET /dispatch/<user>/<job>/control`이 `{"cancel":true}`) → worker의 claude subprocess **abort**
-  → worker **롤백**(best-effort): 로컬/원격 `auto/<TICKET>` 브랜치 삭제 + MR 있으면 close →
-  `cancelled` 회신 → central이 레포락 해제 + dedup 해제로 확정.
+- **실행 중(running)이던 잡** → central 이 잡에 **취소 플래그**를 세우고 센트럴 세션이
+  그 사용자 서브에게 중단을 지시한다 → 워커 안의 claude 세션이 멈추고, 되돌릴 산출
+  (브랜치·변경요청)이 있으면 **그 에이전트가 자기 토큰으로** 되돌린다 → `cancelled` 확정
+  시 central 이 레포락 + dedup 을 해제한다.
+  ⚠️ 파이썬 워커 루프가 롤백하던 레거시 경로(`app/worker.py::rollback_job` + 제어 채널
+  `GET /dispatch/<user>/<job>/control`)는 그 루프와 함께 삭제됐다.
 - `/api/jobs`에서 잡 `status=cancelling`(잠시) → `cancelled`. `audit_refs`에
   `branch_deleted`/`mr_closed` 흔적.
 
@@ -340,10 +374,10 @@ match.statuses 밖이지만 **웹훅 경로는 상태 게이트와 무관하게 
 
 - **큐 대기(queued/interrupted, WIP 없음)** → X 슬롯을 **Y로 재-소유**하고 즉시 재-dispatch
   (Y 미가용이면 드롭 + park). 롤백/체크포인트 없음(아직 산출 없음).
-- **실행 중(running, WIP 존재)** → central이 worker에 **핸드오프 플래그**(제어 채널
-  `GET /dispatch/<user>/<job>/control` 이 `{"cancel":false,"action":"handoff"}`) → worker의
-  claude subprocess abort → worker **checkpoint**(롤백 아님): `git add -A` + commit(비면 스킵)
-  + `git push <branch>` + 이관 저널 노트 → `handed_off` 회신 → central이 **롤백 없이** 레포락
+- **실행 중(running, WIP 존재)** → central 이 잡에 **핸드오프 플래그**
+  (`control_action=handoff` + `status=handing_off`)를 세우고 센트럴 세션이 그 사용자
+  서브에게 **checkpoint**(롤백 아님)를 지시한다: `git add -A` + commit(비면 스킵)
+  + `git push <branch>` + 이관 저널 노트 → `handed_off` 확정 시 central 이 **롤백 없이** 레포락
   해제 후, 같은 티켓/브랜치로 **Y에게 continue 잡을 dispatch**(continue_from_wip 힌트로
   "이전 담당자 WIP 리뷰 후 이어서 완성"). dedup은 이관이므로 유지.
 - **Y가 enabled 사용자가 아님** → X는 **checkpoint로 WIP 보존**하되 dispatch하지 않고
@@ -394,12 +428,12 @@ match.statuses 밖이지만 **웹훅 경로는 상태 게이트와 무관하게 
   부하가 오르기 전 버스트를 과다 admit하기 쉬운데, **메모리 예약**이 이를 선제 차단한다.
   → 메모리는 즉각·PRIMARY, loadavg-per-core는 2차 거친 상한.
 - **정확성은 별개** — 전역 **레포락**(같은 레포 = 전 사용자 직렬)은 그대로다. 이는 잡 수
-  cap이 아니라 **공유 워크스페이스 충돌 방지**다. dedup 게이트·`next_for_user(exclude=)`도 유지.
+  cap이 아니라 **공유 워크스페이스 충돌 방지**다. dedup 게이트도 그대로 유지된다.
 - **토큰/레이트는 central 관심사 아님** — 각 per-user worker 컨테이너의 오케스트레이터가
   자기 계정의 토큰/레이트를 스스로 관리한다. central은 이를 모델링하지 않는다.
-- **worker**: central이 dispatch한 잡을 **모두** 동시에 스레드 풀로 실행한다(진짜 스로틀은
-  위 자원 어드미션). worker는 runaway 방지용 **안전 상한**(`worker_max_concurrency`, 기본 64
-  — 정책 cap 아님)만 둔다. 각 잡은 기존 `_process_job` 경로 그대로(자기 상태회신·제어/취소/
+- **worker**: 센트럴이 `docker exec` 로 밀어 넣는 잡을 동시에 굴린다(진짜 스로틀은
+  위 자원 어드미션). runaway 방지용 **안전 상한**(`worker_max_concurrency`, 기본 64
+  — 정책 cap 아님)만 둔다. 각 잡은 워커 안의 claude 세션 그대로(자기 상태회신·제어/취소/
   핸드오프·재개·completed 캐시). 잡이 하나뿐일 때의 동작은 단일 잡 경로와 동치다.
 
 ### 4C.2 조작 — 서로 다른 레포 티켓 여러 개를 한 사용자에게
@@ -432,7 +466,7 @@ grep MemAvailable /proc/meminfo ; cat /proc/loadavg ; nproc
 | 서버 자원 | `grep MemAvailable /proc/meminfo` · `cat /proc/loadavg` | 어드미션 입력(호스트 메모리·부하) |
 | central admit | `GET /api/jobs` | 자원 여유 시 다른-레포 잡 다수 동시 `running`(사용자 무관) |
 | central queue | central 로그 | 압박 시 `queue: mem pressure` / `queue: load pressure` |
-| worker fetch | `GET /dispatch/Y/next?exclude=<처리중 티켓>` | 처리 중 잡을 뺀 **다른** running 잡 반환 |
+| worker 주입 | `docker logs jad-central | grep -i "docker exec"` | 처리 중 잡과 **다른** 잡이 같은 워커로 추가 주입 |
 | 동시 실행 | `docker logs jad-worker-Y` | 여러 잡의 `진행중`이 겹쳐서 관측 |
 | 예약 회수 | 한 잡 `완료` 후 | 대기분이 다음 tick에 `running`으로 |
 
@@ -569,12 +603,11 @@ ssh <deploy-user>@<서버> 'docker ps --filter name=jad-worker-'
 | `/users/<user>/disable` | POST | 비활성화 + worker stop | 없음 |
 | `/users/<user>/autonomy` | POST | A\|B 전환 | 없음 |
 | `/users/<user>/container/<start\|stop>` | POST | worker 컨테이너 제어 | 없음 |
-| `/dispatch/<user>/next` | GET | (worker) 다음 잡 수령 | `X-Worker-Secret` |
-| `/dispatch/<user>/<job>/status` | POST | (worker) 채널 F 회신 | `X-Worker-Secret` |
-| `/dispatch/<user>/<job>/control` | GET | (worker) 제어 폴링 `{"cancel":bool,"action":"none\|cancel\|handoff"}` | `X-Worker-Secret` |
 
-> ⚠️ `/dispatch/*`는 worker 전용(공유 시크릿 필요) — E2E 검증은 UI/관리 API와 관측으로 하고,
-> dispatch 라우트를 사람이 직접 호출하지 않는다(worker가 담당).
+> ⚠️ **은퇴**: `/dispatch/<user>/next`(GET) · `/dispatch/<user>/<job>/status`(POST) ·
+> `/dispatch/<user>/<job>/control`(GET) 과 그 `X-Worker-Secret` 인증은 레거시 워커 폴링
+> 프로토콜이었고, 프랙탈 경로와 **이중 실행**(같은 티켓 두 번 → 중복 브랜치·변경요청)을
+> 일으켜 제거됐다. central→worker 는 이제 `docker exec` 주입 한 방향뿐이다.
 
 ## 부록 B — 잡 상태 & Jira 상태 대응
 
@@ -591,7 +624,5 @@ ssh <deploy-user>@<서버> 'docker ps --filter name=jad-worker-'
 | 루프 | 기본 주기 | 출처 |
 |---|---|---|
 | Jira 폴러/상태 워처 | 60s | `config.jira.poll_interval_sec` |
-| worker 잡 폴링 | 5s | `WORKER_POLL_INTERVAL_SEC` |
-| worker 취소 제어 폴링 | 3s | `WORKER_CONTROL_POLL_SEC` |
 | 스케줄러 tick(재개 재적격) | 30s | `start_central_background(tick_interval_sec)` |
 | 재개 버퍼 | 120s | `config.resume.reset_buffer_sec` |

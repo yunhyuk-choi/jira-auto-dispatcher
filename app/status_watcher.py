@@ -26,7 +26,9 @@ import threading
 from datetime import datetime
 from typing import Optional
 
+from app import central_dispatch
 from app import queue as q
+from app import scope as scope_mod
 from app.poller import build_job
 
 log = logging.getLogger("jad.status_watcher")
@@ -57,17 +59,32 @@ class StatusWatcher:
     # 취소 신호를 실제로 반영할 대상 잡 상태(이미 종결/취소중이면 건너뜀 — 멱등).
     _CANCELABLE = frozenset({q.QUEUED, q.RUNNING, q.INTERRUPTED})
 
-    _WATCH_FIELDS = ["status", "updated", "assignee", "summary", "components", "labels"]
+    # ``project`` 를 함께 받는다 — 재오픈 재-디스패치의 범위 게이트가 티켓의 프로젝트
+    # 키를 응답에서 직접 읽게 하기 위해서다(:func:`app.scope.project_key_of`).
+    _WATCH_FIELDS = ["status", "updated", "assignee", "summary", "components",
+                     "labels", "project"]
 
     def __init__(self, config, jira_client, gate, registry, dispatcher,
-                 now_provider=None) -> None:
-        """의존성 주입(설정·Jira·게이트·레지스트리·디스패처)."""
+                 now_provider=None, *, central_sink=None, job_queue=None) -> None:
+        """의존성 주입(설정·Jira·게이트·레지스트리·디스패처).
+
+        ``central_sink``(프랙탈, 기본 None): 상주 센트럴 라이브 세션 핸들. **재오픈**은
+        재-디스패치이므로 정상 폴링 티켓과 동일 seam(센트럴 세션 주입)으로 라우팅한다 —
+        구 ``scheduler.reopen`` → tick → running 은 실행자가 없어 스턱나던 경로라 은퇴했다.
+        미주입(오설정 배포)이면 재오픈 방출을 조용히 건너뛴다(다음 주기 재시도).
+        ``job_queue``(관측성): 프랙탈 재오픈 잡을 같은 store 에 fractal 표식으로 기록하는
+        핸들. 미주입이면 ``dispatcher.scheduler.jobs`` 로 폴백한다(같은 인스턴스).
+        """
         self.config = config
         self.jira = jira_client
         self.gate = gate
         self.registry = registry
         self.dispatcher = dispatcher
         self.scheduler = dispatcher.scheduler
+        self._central_sink = central_sink
+        self._job_queue = job_queue
+        if self._job_queue is None:
+            self._job_queue = getattr(self.scheduler, "jobs", None)
         self._stop = threading.Event()
         self._now = now_provider
         from app import state
@@ -114,8 +131,16 @@ class StatusWatcher:
     # ------------------------------------------------------------------
 
     def _project_clause(self) -> str:
-        project = getattr(self.config.jira, "project", "")
-        return f"project = {project} AND " if project else ""
+        """감시 JQL 의 project 절 — **폴러와 같은 합집합**(:mod:`app.scope`).
+
+        ⚠️ 예전에는 ``jira.project`` 하나만 걸었다. per-user scope 가 여러 프로젝트를
+        허용하게 된 지금 그대로 두면, 기본 프로젝트가 아닌 곳의 티켓이 취소돼도 감시축이
+        그것을 보지 못해 추적 잡이 계속 돈다. 합집합이 비면 예전처럼 빈 문자열을 돌려
+        (프로젝트 무관 감시) 기존 동작을 보존한다 — 이 경로는 **이미 추적 중인 잡**에만
+        작용하므로 새 티켓을 긁어 오지 않는다.
+        """
+        clause = scope_mod.project_clause(scope_mod.union_projects(self.registry, self.config))
+        return f"{clause} AND " if clause else ""
 
     def _detect_cancellations(self, result: dict) -> None:
         """`취소 상태`(config) + updated 워터마크 JQL → 추적 중인 잡을 cancel_job."""
@@ -219,14 +244,16 @@ class StatusWatcher:
     # 재오픈 감지
     # ------------------------------------------------------------------
 
-    def _resolve_user(self, issue: dict):
-        """이슈 담당자 account_id → enabled 등록 사용자(없으면 None)."""
-        fields = (issue or {}).get("fields", {}) or {}
-        assignee = fields.get("assignee") or {}
-        account_id = assignee.get("accountId") if isinstance(assignee, dict) else None
-        if not account_id:
-            return None
-        return self.registry.get_by_account_id(account_id)
+    def _resolve_user(self, key: str, issue: dict):
+        """담당자 account_id → enabled 등록 사용자 **+ 프로젝트 범위 게이트**.
+
+        재오픈은 **재-디스패치**다 — 폴러·웹훅과 같은 게이트를 통과해야 한다
+        (:func:`app.scope.resolve_user_in_scope`). 그러지 않으면 "취소됐다 되살아난
+        티켓"이 per-user scope 를 우회하는 뒷문이 된다.
+        """
+        user, _reason = scope_mod.resolve_user_in_scope(
+            self.registry, self.config, key, issue)
+        return user
 
     def _detect_reopens(self, result: dict) -> None:
         """취소 확정 잡의 티켓이 `해야 할 일`로 오면 재-claim + 재-enqueue(§10.4)."""
@@ -260,20 +287,41 @@ class StatusWatcher:
                 log.info("재오픈 skip(opt-out 라벨 잔존): %s", key)
                 continue
 
-            user = self._resolve_user(issue)
+            user = self._resolve_user(key, issue)
             if user is None:
-                log.info("재오픈 매핑 실패(미등록/비활성) — skip: %s", key)
+                log.info("재오픈 매핑 실패(미등록/비활성/범위 밖) — skip: %s", key)
                 continue
             # 취소 확정 시 dedup가 풀렸으므로 재-claim(멱등; 결과 무시).
             self.gate.claim(key)
             job = build_job(self.config, key, issue, user)
-            self.scheduler.reopen(job)
+            self._reopen_dispatch(job)
             result["reopened"] += 1
-            log.info("재오픈 → 재-enqueue: %s → user=%s", key, user.username)
+            log.info("재오픈 → 재-dispatch: %s → user=%s", key, user.username)
 
         if max_updated and max_updated != self.reopen_watermark:
             self.reopen_watermark = max_updated
             self._state.save_reopen_watermark(self.reopen_watermark)
+
+    def _reopen_dispatch(self, job) -> None:
+        """재오픈된 티켓 슬롯을 재작업으로 방출 — 정상 폴링 티켓과 동일 프랙탈 seam 으로 통일.
+
+        취소 확정 잡의 store 레코드에 **먼저 fractal 표식**을 찍어(mark_fractal — 리셋~주입
+        윈도우에서 구 tick 이 running 으로 dispatch 하지 못하게) 슬롯을 새 실행으로
+        리셋(``jobs.reopen``)한 뒤, 정상 폴링과 동일한 ``emit_to_central`` 로 센트럴 세션에
+        주입한다(센트럴이 워커 spawn/inject → 실행 + Jira 코멘트 등 정상 작동). 주입 실패는
+        :class:`app.central_dispatch.CentralInjectFailed` 로 전파돼 상위 루프가 다음 주기에
+        재시도한다.
+
+        ⚠️ fractal-OFF 폴백 은퇴 완료: 레거시 ``scheduler.reopen``(리셋 + tick) 경로는
+        삭제됐다 — 그 잡을 실행할 워커 폴링 소비자가 더 이상 없다.
+        """
+        if central_dispatch.central_active(self.config, self._central_sink):
+            # 리셋(queued) 전에 fractal 표식을 확정해 tick 이 이 잡을 집지 못하게 한다.
+            central_dispatch.mark_fractal(self._job_queue, job.ticket)
+            self.scheduler.jobs.reopen(job)
+            fresh = self.scheduler.jobs.get(job.ticket) or job
+            central_dispatch.emit_to_central(
+                self.config, self._central_sink, self._job_queue, self.gate, fresh)
 
     # ------------------------------------------------------------------
     # 백그라운드 루프

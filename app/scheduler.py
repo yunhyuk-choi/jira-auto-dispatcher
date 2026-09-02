@@ -25,8 +25,9 @@
 설계 메모:
     - 레포 락/전역 락/active 수는 **active 잡 상태의 순수 함수**로 매 tick 재계산한다
       (별도 락 테이블을 영속하지 않음 → 재시작 후에도 jobs.json에서 자동 복원).
-    - dispatch = 잡을 running으로 표시(해당 레포를 사실상 점유). worker는
-      GET /dispatch/<user>/next 로 자기 running 잡을 수령한다.
+    - dispatch = 잡을 running으로 표시(해당 레포를 사실상 점유). 실제 실행은 프랙탈
+      센트럴 세션이 워커 컨테이너에 docker exec 로 주입한다 — 워커가 중앙을 폴링해
+      잡을 당겨오던 레거시 경로는 은퇴했다(이중 실행 근본 차단).
     - reset_at 비교 기준 시각은 now_provider로 주입 가능(테스트 결정성).
     - 자원 프로브(resource_probe)는 주입 가능(테스트 결정성). 기본은 호스트 /proc를 읽는다
       (컨테이너 안에서도 /proc/meminfo·/proc/loadavg는 **호스트 값**을 보고한다 = 서버 상태).
@@ -344,14 +345,17 @@ class Scheduler:
 
     def reassign_or_handoff(self, ticket: str, new_user: str, *,
                             enabled: bool = True,
-                            autonomy_mode: Optional[str] = None) -> str:
+                            autonomy_mode: Optional[str] = None,
+                            on_redispatch: Optional[Callable[[str], None]] = None) -> str:
         """티켓 담당자가 X→Y로 바뀐 상황을 잡 상태에 따라 처리(재배정 ≠ 취소).
 
         - 추적 잡 없음/종결 → ``REASSIGN_NO_JOB``(호출부가 일반 신규 dispatch).
         - 같은 소유자(Y==X) → ``REASSIGN_SAME_OWNER``(중복 트리거 흡수, no-op).
         - 큐 대기(queued/interrupted, WIP 없음):
-            · Y 가용(enabled) → 같은 슬롯을 Y로 재-소유(queued) + tick → ``REASSIGN_REDISPATCH``.
-              (dedup claim은 유지 — 같은 티켓을 Y가 이어받는다.)
+            · Y 가용(enabled) → 같은 슬롯을 Y로 재-소유(queued) → 재-dispatch → ``REASSIGN_REDISPATCH``.
+              (dedup claim은 유지 — 같은 티켓을 Y가 이어받는다.) 재-dispatch 는 ``on_redispatch``
+              훅이 주어지면 **그 훅**(프랙탈: 센트럴 세션 주입)에 위임하고, 없으면 구 경로
+              ``tick()``(레거시 스케줄러 dispatch)으로 처리한다.
             · Y 미가용 → 즉시 드롭(cancelled) + dedup 해제 → park → ``REASSIGN_PARKED``.
         - 실행 중(running/cancelling, WIP 존재):
             · **롤백 없이 핸드오프** — control_action=handoff + status=handing_off(레포락 유지).
@@ -360,9 +364,11 @@ class Scheduler:
               → ``REASSIGN_HANDOFF_REQUESTED``.
 
         ``new_user`` 는 username 문자열. ``enabled``/``autonomy_mode`` 는 Y의 가용성/모드
-        (레지스트리를 모르는 스케줄러에 주입).
+        (레지스트리를 모르는 스케줄러에 주입). ``on_redispatch``(선택)은 REDISPATCH 시 재-소유된
+        슬롯을 프랙탈 센트럴 세션으로 라우팅하는 훅(호출부 poller 주입) — 락 밖에서 호출된다.
         """
         do_tick = False
+        redispatch = False
         signal = REASSIGN_SAME_OWNER
         with self._lock:
             job = self.jobs.get(ticket)
@@ -387,7 +393,7 @@ class Scheduler:
                 self.jobs.reassign(job, new_user, autonomy_mode=autonomy_mode,
                                    continue_from_wip=False, prev_user=job.user)
                 signal = REASSIGN_REDISPATCH
-                do_tick = True
+                redispatch = True
             else:
                 # Y 미가용 → 드롭 + dedup 해제 → park(나중에 enable/재배정 시 재트리거).
                 # 재배정으로 유발된 취소 → 사유 기록(status_cancelled/opt-out과 구별).
@@ -397,14 +403,18 @@ class Scheduler:
                 self._release_dedup(ticket)
                 signal = REASSIGN_PARKED
                 do_tick = True
+        # 재-dispatch(REDISPATCH): 프랙탈 훅이 있으면 센트럴 세션으로 라우팅(구 tick 아님).
+        # 훅이 없으면(레거시 배포) 구 경로 tick 으로 재-dispatch. 둘 다 락 밖에서 수행.
+        if redispatch:
+            if on_redispatch is not None:
+                on_redispatch(ticket)
+            else:
+                self.tick()
+        # PARKED: 슬롯을 드롭·dedup 해제했으니 다른 대기 잡 admit 을 위해 tick(레거시 경로에서만
+        # 실효 — 프랙탈 잡은 tick 이 건너뛴다). 프랙탈 배포에선 무해 no-op.
         if do_tick:
             self.tick()
         return signal
-
-    def is_handoff_requested(self, job_id: str) -> bool:
-        """worker control 폴링용 — 이 잡에 핸드오프가 요청됐는지."""
-        job = self.jobs.get(job_id)
-        return bool(job and job.control_action == "handoff")
 
     def confirm_handed_off(self, job_id: str, **fields) -> list:
         """worker의 handed_off 회신 확정(담당자 변경 핸드오프) — 롤백 없이 락 해제 + 이관/park.
@@ -441,53 +451,11 @@ class Scheduler:
                 self._release_dedup(job_id)
         return self.tick()
 
-    def reopen(self, job: Job) -> list:
-        """취소된 티켓을 재작업으로 재-enqueue(§10.4) → tick.
-
-        호출부(status_watcher)가 gate.claim으로 dedup 재확보한 뒤 부른다. 잡 슬롯을
-        새 실행으로 초기화(queued)하고 스케줄링에 다시 태운다.
-        """
-        with self._lock:
-            self.jobs.reopen(job)
-        return self.tick()
-
-    def rerun(self, job_id: str) -> list:
-        """종결(done/failed/cancelled)·중단(interrupted) 잡을 **사람이 수동 재실행**한다.
-
-        UI '재실행' 버튼의 백엔드(§UI). 같은 티켓 슬롯을 새 실행으로 초기화(queued)하고
-        재-dispatch한다 — 재개 잔재(session_id/reset_at/mr_url/cancel_requested/attempts)를
-        비운다(queue.reopen 재사용). 취소 확정 시 dedup가 풀렸을 수 있으므로 gate.claim으로
-        **재확보**(멱등)해 폴러 재트리거와 무관히 재작업 슬롯을 잠근다.
-
-        Raises: KeyError(미존재 잡).
-        Returns: 이 재실행으로 즉시 dispatch된 잡 id 목록.
-        """
-        with self._lock:
-            job = self.jobs.get(job_id)
-            if job is None:
-                raise KeyError(f"알 수 없는 잡: {job_id}")
-            if self.gate is not None:
-                self.gate.claim(job_id)  # 멱등 재확보(취소로 풀렸을 수 있음)
-            self.jobs.reopen(job)
-        return self.tick()
-
-    def next_for_user(self, user: str, exclude: Optional[set] = None) -> Optional[Job]:
-        """그 user에게 dispatch된(running) 잡 **1개** 반환(worker GET /next 용).
-
-        per-user cap≥2(Increment 2)에서는 한 사용자에게 동시에 여러 running 잡이
-        있을 수 있다. worker가 이미 처리 중인 티켓들을 ``exclude`` 로 넘기면, 그와
-        **다른** running 잡을 반환한다 → worker가 서로 다른 잡을 동시에 수령한다.
-        exclude가 없으면(단일 잡 경로/구 worker) 첫 running 잡을 반환한다.
-
-        없으면 None. 재폴링 시 (exclude에 없는) 같은 잡을 멱등 반환한다(worker가
-        --resume/session_id로 이어감). 결정적 순서(삽입 순서)로 첫 적격을 고른다.
-        """
-        exclude = exclude or set()
-        with self._lock:
-            for j in self.jobs.list_jobs():
-                if j.user == user and j.status == q.RUNNING and j.ticket not in exclude:
-                    return j
-        return None
+    # ⚠️ fractal-OFF 은퇴(chore/remove-legacy-serving): 레거시 재-dispatch 진입 래퍼
+    # ``reopen(job)``(status_watcher 구 경로)·``rerun(job_id)``(관리 UI 구 경로)는
+    # 삭제됐다 — 재오픈/수동 재실행은 이제 프랙탈 seam(``jobs.reopen`` + ``emit_to_central``)
+    # 으로 수렴한다(status_watcher._reopen_dispatch / main.api_rerun). 슬롯 리셋 프리미티브는
+    # ``JobQueue.reopen`` 이 그대로 제공한다(프랙탈 경로가 사용).
 
     # ------------------------------------------------------------------
     # 읽기 전용 상태 접근자 (Phase 3b-0 — 무동작변경 기반)

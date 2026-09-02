@@ -75,8 +75,6 @@ admission: { min_free_mem_mb: 2048, per_job_mem_reserve_mb: 1536, max_load_per_c
 
 def test_env_overrides(tmp_path, monkeypatch):
     monkeypatch.setenv("SECRETS_DIR", "/run/secrets")
-    monkeypatch.setenv("WORKER_SHARED_SECRET", "s3cr3t")
-    monkeypatch.setenv("CENTRAL_URL", "http://central:9999")
     monkeypatch.setenv("ROLE", "central")
     cfg = C.load_config(_write(tmp_path, """
 role: worker
@@ -84,9 +82,31 @@ jira: { base_url: https://x, project: PROJ, watcher_token_file: t }
 secrets: { base_dir: "${SECRETS_DIR}" }
 """))
     assert cfg.role == "central"          # env ROLE 우선
-    assert cfg.worker_shared_secret == "s3cr3t"
-    assert cfg.spawn.central_url == "http://central:9999"
     assert cfg.secrets.base_dir == "/run/secrets"
+
+
+def test_retired_worker_polling_knobs_are_ignored_without_breaking_boot(tmp_path,
+                                                                       monkeypatch):
+    """은퇴한 노브(spawn.central_url · worker_shared_secret)가 남아 있어도 부팅은 깨지지 않는다.
+
+    둘 다 워커가 중앙의 dispatch HTTP 를 폴링하던 시절의 값이다(폴링 대상 주소 ·
+    ``X-Worker-Secret`` 공유 시크릿). 그 서빙 표면과 폴링 소비자가 프랙탈 seam 으로
+    대체되며 읽는 곳이 사라졌으므로 **조용히 무시**한다 — 값이 아무 동작도 바꾸지
+    않아 왜곡할 사용자 의도가 없다(동작이 달라지는 fractal_central 은퇴와는 다르다).
+    """
+    monkeypatch.setenv("SECRETS_DIR", "/run/secrets")
+    monkeypatch.setenv("WORKER_SHARED_SECRET", "s3cr3t")
+    monkeypatch.setenv("CENTRAL_URL", "http://central:9999")
+    cfg = C.load_config(_write(tmp_path, """
+role: central
+jira: { base_url: https://x, project: PROJ, watcher_token_file: t }
+secrets: { base_dir: "${SECRETS_DIR}" }
+worker_shared_secret: leftover-value
+spawn: { image: jira-auto-dispatcher:latest, central_url: http://central:8787 }
+"""))
+    assert cfg.spawn.image == "jira-auto-dispatcher:latest"   # 같은 섹션의 현역 키는 그대로
+    assert not hasattr(cfg, "worker_shared_secret")
+    assert not hasattr(cfg.spawn, "central_url")
 
 
 def test_tier2_pilot_user_defaults_off(tmp_path, monkeypatch):
@@ -182,8 +202,18 @@ run: {}
     assert central_fractal_enabled(cfg) is True   # config.yaml 만으로 게이트 ON
 
 
-def test_fractal_central_env_override_still_off(tmp_path, monkeypatch):
-    # 승격 후에도 env FRACTAL_CENTRAL 명시가 여전히 우선 — falsy 로 끌 수 있다.
+def test_fractal_central_off_is_ignored_with_a_loud_warning(tmp_path, monkeypatch, caplog):
+    """⚠️ fractal-OFF 은퇴: 명시 false(yaml·env)는 **무시**되고 경고만 남는다.
+
+    예전에 OFF 는 "스케줄러 큐 → 워커 HTTP 폴링(구 경로)로 돈다"는 뜻이었지만, 그 폴링
+    소비자(app/worker.py)가 프랙탈 경로와 이중 실행(같은 티켓 두 번 → 중복 브랜치·변경
+    요청·완료알림)을 일으켜 제거됐다. 소비자가 없는 지금 OFF 는 **아무것도 실행되지
+    않음**을 뜻하므로, 옛 설정을 그대로 존중하면 조용한 무실행이 된다.
+
+    부팅 거부 대신 **무시 + 경고**를 택했다 — 이 키는 남의 배포에 이미 적혀 있을 수 있는
+    옛 키라 부팅을 막으면 업그레이드가 곧 장애가 되고(설정을 고칠 관리 UI 조차 안 뜬다),
+    OFF 로 얻을 동작이 더 이상 존재하지 않아 무시가 의도를 왜곡하지도 않는다.
+    """
     monkeypatch.setenv("SECRETS_DIR", "/tmp/jad-secrets")
     body = """
 role: central
@@ -192,17 +222,21 @@ match: { statuses: ["해야 할 일"] }
 secrets: { base_dir: "${SECRETS_DIR}" }
 run: {}
 """
+    # (1) env 로 끄려 해도 무시된다.
     monkeypatch.setenv("FRACTAL_CENTRAL", "false")
-    cfg = C.load_config(_write(tmp_path, body))
-    assert cfg.run.fractal_central is False   # env 우선(명시 falsy → OFF)
+    with caplog.at_level("ERROR", logger="jad.config"):
+        cfg = C.load_config(_write(tmp_path, body))
+    assert cfg.run.fractal_central is True
+    assert "무시" in caplog.text          # 조용히 뒤집지 않는다 — 추적 가능해야 한다
 
     from app.central_session import central_fractal_enabled
-    assert central_fractal_enabled(cfg) is False
+    assert central_fractal_enabled(cfg) is True
 
-    # 명시 yaml false 도 존중(env 없을 때).
+    # (2) yaml 로 끄려 해도 무시된다(옛 config.yaml 하위호환).
     monkeypatch.delenv("FRACTAL_CENTRAL", raising=False)
-    cfg2 = C.load_config(_write(tmp_path, body.replace("run: {}", "run: { fractal_central: false }")))
-    assert cfg2.run.fractal_central is False
+    cfg2 = C.load_config(
+        _write(tmp_path, body.replace("run: {}", "run: { fractal_central: false }")))
+    assert cfg2.run.fractal_central is True
 
 
 def test_missing_required_key_fails(tmp_path):
@@ -226,30 +260,37 @@ secrets: { base_dir: "${SECRETS_DIR}" }
     assert "SECRETS_DIR" in str(exc.value) or "미치환" in str(exc.value)
 
 
-def test_host_deploy_dir_env_override_priority(tmp_path, monkeypatch):
+def test_legacy_host_deploy_dir_key_is_ignored_harmlessly(tmp_path, monkeypatch):
+    """제거된 host_deploy_dir 이 기존 config.yaml/env 에 남아 있어도 무해하다.
+
+    워커 마운트가 전부 named 볼륨이 되어(나머지는 스폰 시 주입) 호스트 경로가 필요
+    없어졌으므로 이 키는 사라졌다. 기존 배포를 깨지 않도록 **조용히 무시**한다
+    (설치 검증 `python -m app.setup validate` 는 "선언되지 않은 항목" 경고로 알려 준다).
+    """
     monkeypatch.setenv("SECRETS_DIR", "/run/secrets")
-    monkeypatch.setenv("HOST_DEPLOY_DIR", "/home/<deploy-user>/deploy/jad")
+    monkeypatch.setenv("HOST_DEPLOY_DIR", "/home/deploy/jad")
     cfg = C.load_config(_write(tmp_path, """
 role: central
 jira: { base_url: https://x, project: PROJ, watcher_token_file: t }
 secrets: { base_dir: "${SECRETS_DIR}" }
 spawn: { host_deploy_dir: "/from/yaml" }
+deploy: { host_deploy_dir: "/also/from/yaml" }
 """))
-    # env HOST_DEPLOY_DIR 폴백 우선 — yaml 값을 덮는다.
-    assert cfg.spawn.host_deploy_dir == "/home/<deploy-user>/deploy/jad"
+    assert not hasattr(cfg.spawn, "host_deploy_dir")
+    assert not hasattr(cfg.deploy, "host_deploy_dir")
+    # 나머지 값은 정상 로드된다(부팅이 깨지지 않는다).
+    assert cfg.secrets.base_dir == "/run/secrets"
 
 
-def test_host_deploy_dir_unresolved_token_becomes_empty(tmp_path, monkeypatch):
+def test_load_config_records_source_path_for_worker_injection(tmp_path, monkeypatch):
+    """spawner 가 워커에 주입할 **config 원문** 위치를 설정 자신이 들고 있다."""
     monkeypatch.setenv("SECRETS_DIR", "/run/secrets")
-    monkeypatch.delenv("HOST_DEPLOY_DIR", raising=False)
-    cfg = C.load_config(_write(tmp_path, """
+    path = _write(tmp_path, """
 role: central
 jira: { base_url: https://x, project: PROJ, watcher_token_file: t }
 secrets: { base_dir: "${SECRETS_DIR}" }
-spawn: { host_deploy_dir: "${HOST_DEPLOY_DIR}" }
-"""))
-    # env 미설정으로 토큰 미치환 → 빈 값(폴백). broken bind 방지.
-    assert cfg.spawn.host_deploy_dir == ""
+""")
+    assert C.load_config(path).config_path == path
 
 
 def test_repo_resolution_defaults_and_override(tmp_path, monkeypatch):
@@ -390,3 +431,157 @@ def test_read_secret(tmp_path):
     (tmp_path / "sub" / "token").write_text("abc123\n", encoding="utf-8")
     assert C.read_secret(str(tmp_path), "sub/token") == "abc123"
     assert C.read_secret(str(tmp_path), "sub/missing") is None
+
+
+# ---------------------------------------------------------------------------
+# 상태·전이의 {id, name} — **id 와 name 을 함께** 보존하되 소비처 타입은 안 바꾼다
+# ---------------------------------------------------------------------------
+
+
+def test_named_refs_keep_names_for_consumers_and_ids_on_the_side(tmp_path, monkeypatch):
+    monkeypatch.setenv("SECRETS_DIR", "/tmp/jad-secrets")
+    cfg = C.load_config(_write(tmp_path, """
+role: central
+jira:
+  base_url: https://x
+  project: PROJ
+  watcher_token_file: t
+  trigger_statuses: [{"id": "10000", "name": "해야 할 일"}, "선택 대기"]
+  cancel_statuses: [{"id": "10002", "name": "취소됨"}]
+secrets: { base_dir: "${SECRETS_DIR}" }
+"""))
+    # 소비처(폴러·워처·웹훅)는 예전 그대로 **이름 목록**을 본다.
+    assert cfg.jira.trigger_statuses == ["해야 할 일", "선택 대기"]
+    assert cfg.match.statuses == ["해야 할 일", "선택 대기"]     # 레거시 미러도 동일
+    assert cfg.jira.cancel_statuses == ["취소됨"]
+    # id 는 곁에 남아 진단이 짝을 검증할 수 있다.
+    assert cfg.jira.status_ids == {"취소됨": "10002", "해야 할 일": "10000"}
+
+
+def test_plain_string_statuses_still_work(tmp_path, monkeypatch):
+    """하위호환 — 옛 설정은 아무것도 안 바꿔도 오늘과 동일하게 읽힌다."""
+    monkeypatch.setenv("SECRETS_DIR", "/tmp/jad-secrets")
+    cfg = C.load_config(_write(tmp_path, """
+role: central
+jira: { base_url: https://x, project: PROJ, watcher_token_file: t }
+match: { statuses: ["해야 할 일"], cancel_statuses: ["취소됨"] }
+secrets: { base_dir: "${SECRETS_DIR}" }
+"""))
+    assert cfg.jira.trigger_statuses == ["해야 할 일"]
+    assert cfg.jira.status_ids == {}
+
+
+def test_done_transition_id_comes_from_the_single_named_ref(tmp_path, monkeypatch):
+    """discover 가 적어 준 {id, name} 하나면 전이 id 를 따로 관리하지 않아도 된다."""
+    monkeypatch.setenv("SECRETS_DIR", "/tmp/jad-secrets")
+    cfg = C.load_config(_write(tmp_path, """
+role: central
+jira:
+  base_url: https://x
+  project: PROJ
+  watcher_token_file: t
+  done_transition_names: [{"id": "41", "name": "완료"}]
+secrets: { base_dir: "${SECRETS_DIR}" }
+"""))
+    assert cfg.jira.done_transition_id == "41"
+    assert cfg.jira.done_transition_names == ["완료"]
+    assert cfg.jira.done_transition_ids == {"완료": "41"}
+
+
+def test_explicit_done_transition_id_wins_over_the_named_ref(tmp_path, monkeypatch):
+    monkeypatch.setenv("SECRETS_DIR", "/tmp/jad-secrets")
+    cfg = C.load_config(_write(tmp_path, """
+role: central
+jira:
+  base_url: https://x
+  project: PROJ
+  watcher_token_file: t
+  done_transition_id: "99"
+  done_transition_names: [{"id": "41", "name": "완료"}]
+secrets: { base_dir: "${SECRETS_DIR}" }
+"""))
+    assert cfg.jira.done_transition_id == "99"
+
+
+def test_ambiguous_named_transition_ids_are_left_to_name_matching(tmp_path, monkeypatch):
+    """id 가 여럿이면 어느 것이 '완료'인지 모른다 — 런타임 이름 매칭에 맡긴다."""
+    monkeypatch.setenv("SECRETS_DIR", "/tmp/jad-secrets")
+    cfg = C.load_config(_write(tmp_path, """
+role: central
+jira:
+  base_url: https://x
+  project: PROJ
+  watcher_token_file: t
+  done_transition_names: [{"id": "41", "name": "완료"}, {"id": "42", "name": "Done"}]
+secrets: { base_dir: "${SECRETS_DIR}" }
+"""))
+    assert cfg.jira.done_transition_id == ""
+    assert cfg.jira.done_transition_names == ["완료", "Done"]
+
+
+def test_named_ref_without_a_name_is_dropped(tmp_path, monkeypatch):
+    """이름이 없으면 JQL 에도 미러에도 실을 수 없다 — 조용히 버린다(검증기가 먼저 막는다)."""
+    monkeypatch.setenv("SECRETS_DIR", "/tmp/jad-secrets")
+    cfg = C.load_config(_write(tmp_path, """
+role: central
+jira:
+  base_url: https://x
+  project: PROJ
+  watcher_token_file: t
+  trigger_statuses: [{"id": "10000"}, "해야 할 일"]
+secrets: { base_dir: "${SECRETS_DIR}" }
+"""))
+    assert cfg.jira.trigger_statuses == ["해야 할 일"]
+
+
+# --- 감시 프로젝트 복수화(하위호환) -------------------------------------------
+
+
+def test_jira_projects_extends_the_primary_project(tmp_path, monkeypatch):
+    """``jira.project``(대표) 는 그대로 문자열, ``jira.projects`` 가 나머지를 더한다."""
+    monkeypatch.setenv("SECRETS_DIR", "/tmp/jad-secrets")
+    cfg = C.load_config(_write(tmp_path, """
+role: central
+jira:
+  base_url: https://x.atlassian.net
+  project: PROJ
+  projects: ["TEAM", "OPS"]
+  watcher_token_file: service/jira-token
+match: { statuses: ["해야 할 일"] }
+secrets: { base_dir: "${SECRETS_DIR}" }
+"""))
+    assert cfg.jira.project == "PROJ"
+    assert cfg.jira.projects == ["TEAM", "OPS"]   # 설정 파일이 말한 그대로(대표 제외)
+    from app import scope as SC
+    assert SC.instance_projects(cfg) == ["PROJ", "TEAM", "OPS"]   # 합집합은 scope 가 만든다
+
+
+def test_jira_projects_defaults_to_empty_and_drops_malformed_keys(tmp_path, monkeypatch):
+    monkeypatch.setenv("SECRETS_DIR", "/tmp/jad-secrets")
+    cfg = C.load_config(_write(tmp_path, """
+role: central
+jira:
+  base_url: https://x.atlassian.net
+  project: PROJ
+  projects: ["TEAM", "not a key"]
+  watcher_token_file: service/jira-token
+match: { statuses: ["해야 할 일"] }
+secrets: { base_dir: "${SECRETS_DIR}" }
+"""))
+    assert cfg.jira.projects == ["TEAM"]          # 모양이 아닌 값은 JQL 에 실리지 않는다
+
+
+def test_jira_project_given_as_a_list_is_absorbed_not_stringified(tmp_path, monkeypatch):
+    """옛 설정이 ``project`` 에 목록을 적었어도 "['A', 'B']" 라는 유령 키를 만들지 않는다."""
+    monkeypatch.setenv("SECRETS_DIR", "/tmp/jad-secrets")
+    cfg = C.load_config(_write(tmp_path, """
+role: central
+jira:
+  base_url: https://x.atlassian.net
+  project: ["PROJ", "TEAM"]
+  watcher_token_file: service/jira-token
+match: { statuses: ["해야 할 일"] }
+secrets: { base_dir: "${SECRETS_DIR}" }
+"""))
+    assert cfg.jira.project == "PROJ"
+    assert cfg.jira.projects == ["TEAM"]

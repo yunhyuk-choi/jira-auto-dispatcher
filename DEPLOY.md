@@ -93,13 +93,13 @@ cp config/config.example.yaml config/config.yaml
 ```
 
 온프렘은 `deploy.profile: onprem_server` 다. **socket-proxy를 쓰는 기본 구성이면 반드시**
-`deploy.docker_host` 를 프록시로 맞추고, `deploy.host_deploy_dir` 를 **호스트 절대경로**로
-채운다(central 컨테이너 내부 경로가 아니다 — 이 값이 틀리면 worker 마운트가 조용히 깨진다):
+`deploy.docker_host` 를 프록시로 맞춘다. 호스트 절대경로를 적을 항목은 없다 — worker 에
+거는 마운트는 전부 named 볼륨이고, config·시크릿·알림 웹훅은 central 이 컨테이너 스펙에
+**주입**한다(`app/inject.py`, INSTALL §2.2):
 
 ```yaml
 deploy:
   profile: onprem_server
-  host_deploy_dir: /opt/jira-auto-dispatcher   # ← 이 서버의 실제 배포 경로
   docker_host: tcp://socket-proxy:2375         # ← socket-proxy 기본 구성. (직결 시 unix:///var/run/docker.sock)
   secrets_base_dir: /run/secrets
   workspace_volume: jad-workspace
@@ -107,12 +107,13 @@ deploy:
 spawn:
   image: jira-auto-dispatcher:latest
   network: jad-net
-  central_url: http://central:8787
   run_as: "1000:1000"
 ```
 
-> 레거시 키(`spawn.docker_host`·`spawn.host_deploy_dir`·`spawn.workspace_volume`·
-> `secrets.base_dir`)도 계속 읽으므로 기존 `config.yaml` 은 그대로 둬도 동작한다.
+> 레거시 키(`spawn.docker_host`·`spawn.workspace_volume`·`secrets.base_dir`)도 계속 읽으므로
+> 기존 `config.yaml` 은 그대로 둬도 동작한다. 제거된 `host_deploy_dir`(과 env
+> `HOST_DEPLOY_DIR`)·`spawn.central_url`(과 env `CENTRAL_URL`)이 남아 있어도 **무시**된다
+> — 지우지 않아도 무해하다.
 
 `config/config.yaml`은 compose가 `/app/config:ro` 로 마운트한다(gitignore·이미지 미포함).
 
@@ -120,12 +121,18 @@ spawn:
 
 ## 3. 시크릿 배치 (`secrets.base_dir`)
 
-컨테이너는 `SECRETS_DIR=/run/secrets` 로 주입되고, 호스트 `./secrets/` 를 마운트한다.
-여기에 **service 시크릿**(central 공용)과 **per-user 시크릿**을 파일로 둔다.
+**central** 컨테이너는 `SECRETS_DIR=/run/secrets` 로 주입되고, 호스트 `./secrets/` 를
+마운트한다. 여기에 **service 시크릿**(central 공용)과 **per-user 시크릿**을 파일로 둔다 —
+이 저장 위치는 예나 지금이나 같다.
 ⚠️ **central은 rw로 마운트한다** — 온보딩 UI가 새 사용자 시크릿을 `secrets.base_dir/<user>/`
-에 직접 쓰기 때문(`:ro`면 온보딩이 `Read-only file system` 500으로 실패). worker는
-spawner가 **자기 per-user 시크릿만 ro**로 마운트하므로 워커측 격리는 유지된다.
+에 직접 쓰기 때문(`:ro`면 온보딩이 `Read-only file system` 500으로 실패).
 호스트 `./secrets/` 소유는 컨테이너 uid(1000:1000)에 맞춘다.
+
+**worker** 는 이 디렉토리를 **마운트하지 않는다.** central 이 spawn 시 그 사용자 몫만
+컨테이너 스펙에 실어 보내고(`app/inject.py`), worker 가 부팅 시 자기 `/run/secrets`
+tmpfs(RAM 전용, 0600)에 기록한다. 그래서 워커 사이에는 공유 부모 디렉토리 자체가 없다
+— A 가 B 의 시크릿에 닿을 경로가 존재하지 않는다. 알림 웹훅도 같은 채널로 **파일 하나만**
+간다(`service/` 디렉토리 전체는 절대 안 간다 — 거기엔 central watcher 의 Jira 토큰이 있다).
 
 ```bash
 cd /opt/jira-auto-dispatcher
@@ -134,8 +141,9 @@ mkdir -p secrets/service
 # (a) central Jira watcher 토큰 (config.jira.watcher_token_file = service/jira-token)
 printf '%s' 'ATLASSIAN_API_TOKEN_값' > secrets/service/jira-token
 
-# (b) 웹훅을 쓸 때만 — 웹훅 공유 시크릿 (config.webhook.secret_ref)
-# printf '%s' '웹훅시크릿' > secrets/service/webhook-secret
+# (b) 웹훅을 쓸 때만 — 웹훅 토큰 (config.webhook.secret_ref, 기본 service/jira-webhook)
+#     ⚠️ 파일 이름은 secret_ref 값과 **같아야 한다**(다르면 엔드포인트가 503).
+# printf '%s' "$(openssl rand -hex 32)" > secrets/service/jira-webhook
 
 # (c) 알림을 쓸 때만 — 웹훅 URL (config.notifier.webhook_ref).
 #     provider별 URL 획득법은 config/config.example.yaml 의 notifier: 절 주석이 정본.
@@ -146,14 +154,11 @@ chmod -R go-rwx secrets
 find secrets -type f -exec chmod 600 {} \;
 ```
 
-- **worker 공유시크릿**(`WORKER_SHARED_SECRET`, dispatch HTTP 인증)은 파일이 아니라
-  **env**로 주입한다. `.env` 에 두거나 셸 env로 export 한다:
-
-  ```bash
-  # /opt/jira-auto-dispatcher/.env  (compose가 자동 로드; 0600 권장)
-  echo "WORKER_SHARED_SECRET=$(openssl rand -hex 24)" > .env
-  chmod 600 .env
-  ```
+- ⚠️ **worker 공유시크릿(`WORKER_SHARED_SECRET`)은 은퇴했다** — 만들지 않는다.
+  이 값이 인증하던 worker→central HTTP 디스패치 프로토콜(`X-Worker-Secret`)이 프랙탈
+  seam(중앙 → `docker exec` 푸시)으로 대체되며 사라졌고, 지금은 **아무것도 인증하지
+  않는다**. 설치 관문(`render`)도 더 이상 만들지 않고, `doctor` 도 더 이상 검사하지
+  않는다. 기존 배포의 `.env` 에 남아 있어도 무시되므로 지워도 되고 그냥 둬도 된다.
 
 - **per-user 시크릿**(각자 Jira/forge 토큰·claude setup-token)은 여기서 손으로 만들지
   않는다 — **온보딩(5단계)**에서 관리 UI가 `secrets/<username>/` 하위에 0600으로 기록한다.
@@ -191,8 +196,10 @@ find secrets -type f -exec chmod 600 {} \;
 - **폴링만** 쓰면(`webhook.enabled: false`) central이 Jira로 **아웃바운드**만 하므로
   인바운드 개방 **불필요**. 관리 UI(8787)는 신뢰 네트워크에서만 접근한다(SSH 터널 권장).
 - **웹훅**을 켜면(`webhook.enabled: true`) Jira → central 로의 인바운드가 필요하다.
-  리버스 프록시(TLS)를 앞단에 두고 `webhook.path` **하나만** 노출, 나머지(8787 관리 UI)는
-  절대 외부 노출하지 않는다. 방화벽에서 출처를 Jira IP로 제한한다.
+  리버스 프록시(TLS)를 앞단에 두고 경로 `POST /webhook/jira` **하나만** 노출, 나머지
+  (8787 관리 UI)는 절대 외부 노출하지 않는다. 방화벽에서 출처를 Jira IP로 제한한다.
+  인증은 헤더 `X-Jira-Webhook-Token` **전용**이다 — 쿼리 `?token=` 은 access 로그 유출
+  표면이라 401 로 거부한다(헤더를 못 붙이면 앞단 프록시가 붙이게 한다).
 
 관리 UI 접근은 포트를 여는 대신 SSH 터널을 권장:
 
@@ -226,8 +233,8 @@ central·모든 worker는 **하나의 named 볼륨**(`jad-workspace` → `/app/w
 
 - **볼륨 공유**: compose가 `jad-workspace` 를 `name: jad-workspace` 로 고정 선언하고,
   spawner가 워커에 **같은 이름의 named 볼륨**을 `run.workspace_dir` 로 마운트한다
-  (`config.deploy.workspace_volume`, 기본 `jad-workspace`). named 볼륨이라 `host_deploy_dir`
-  와 무관하게 볼륨명으로 docker가 해석한다.
+  (`config.deploy.workspace_volume`, 기본 `jad-workspace`). named 볼륨이라 호스트 경로와
+  무관하게 볼륨명으로 docker가 해석한다.
 - **경로 파생**: `run.orchestrator_repo`/`dlc_meta_repo`/`docs_repo` 를 비우면
   `<workspace_dir>/orchestrator|dlc-meta|docs` 로 자동 파생한다(명시하면 존중).
   ⚠️ 파생 디렉토리명이 옛 `dataspace_docs` → 범용 `docs` 로 바뀌었다. 경로를 **명시한**
@@ -253,17 +260,25 @@ central·모든 worker는 **하나의 named 볼륨**(`jad-workspace` → `/app/w
 시크릿을 `secrets/<username>/` 에 0600으로 저장하고 레지스트리에 참조만 남긴 뒤
 (`enabled=false` 안전 기본), **활성화 시** Docker SDK로 worker 컨테이너를 동적 spawn 한다.
 
-온보딩 폼 필수 필드(`app/onboarding.py`):
+> ⚠️ **웹 등록은 합류의 2단 중 하나다.** 합류자는 로컬에서 `ai-dlc-orchestrator` 의
+> SETTER 를 합류 모드로 돌려 `dlc-meta` 를 clone 해야 그 사람의 로컬 오케스트레이터가
+> 정체성을 갖는다. 팀원에게는 [INSTALL.md §8](INSTALL.md) 을 준다.
 
-| 필드 | 내용 |
-|---|---|
-| `username` | 내부 식별자(컨테이너·볼륨·시크릿 경로 키) |
-| `jira_account_id` | 담당자 매핑 키(티켓 assignee accountId) |
-| `jira_email` | Jira actor 이메일(Basic auth) |
-| `jira_token` | 사용자 Jira API 토큰 → `secrets/<user>/jira-token` |
-| `claude_setup_token` | `claude setup-token` 발급 값 → `secrets/<user>/claude-oauth-token` |
-| (선택) `forge_token` | 브랜치 push·MR/PR 생성용 → `secrets/<user>/forge-token` (옛 폼 필드 이름 `gitlab_token` 도 계속 받는다) |
-| (선택) `git_name`/`git_email` | 커밋 author 귀속 |
+온보딩 폼 필드 — **정본은 스키마 선언**(`app/user_schema.py`)이며 관리 UI 는 그것을 이
+인스턴스 설정과 함께 렌더한다(`GET /api/onboarding/guide`). 아래 표는 요약이다:
+
+| 필드 | 필수 | 내용 |
+|---|---|---|
+| `username` | ✔ | 내부 식별자(컨테이너·볼륨·시크릿 경로 키) |
+| `jira_account_id` | ✔ | 담당자 매핑 키(티켓 assignee accountId). 폼의 `내 accountId 조회` 버튼이 `GET /rest/api/3/myself` 로 대신 찾아 준다(`POST /api/onboarding/whoami`) |
+| `jira_email` | ✔ | Jira actor 이메일(Basic auth) |
+| `jira_token` | ✔ | 사용자 Jira API 토큰 → `secrets/<user>/jira-token` |
+| `forge_token` | ✔ | 브랜치 push·MR/PR 생성용 → `secrets/<user>/forge-token` (옛 폼 필드 이름 `gitlab_token` 도 계속 받는다). **선택이 아니다** — 없으면 워커가 커밋만 하고 변경요청을 못 만드는 조용한 반쪽 동작이 된다 |
+| `claude_setup_token` | ✔ | `claude setup-token` 발급 값 → `secrets/<user>/claude-oauth-token` |
+| `consent_full_permissions` | ✔ | **본인**의 풀 퍼미션 동의(체크박스). 서버가 강제하며(400) 수신 시각이 레지스트리 `consent.accepted_at` 에 남는다. 설치자의 `consent.full_permissions` 로 갈음하지 않는다 |
+| `git_name`/`git_email` | | 커밋 author 귀속(⚠️ `git_email` 은 forge 에 인증된 이메일이어야 연결된다) |
+| `autonomy_mode` | | A(완전자율) / B(경량 1차, 기본) |
+| `notify_user_id` | | 완료 알림 @멘션용 채널 사용자 id(옛 이름 `google_chat_user_id`) |
 
 활성화(worker 기동): UI의 enable 버튼 = `POST /users/<username>/enable` →
 central이 per-user 볼륨 `jad-<username>` 보장 + 사전 인가 `settings.json` 기록 +
@@ -296,7 +311,7 @@ docker inspect jad-central --format '{{json .Mounts}}'   # docker.sock 바인드
 
 # (4) 온보딩·활성화 후 worker 컨테이너 기동
 docker ps --filter name=jad-worker-               # jad-worker-<user> 가 Up
-docker logs jad-worker-<user> --tail=50           # 폴링 루프·claude 준비 로그
+docker logs jad-worker-<user> --tail=50           # 워커 상주·주입 실행 로그
 
 # (5) worker 헬스(내부망)
 docker exec jad-worker-<user> curl -fsS http://localhost:8787/healthz
@@ -339,7 +354,30 @@ docker ps --filter name=jad-worker-     # 동적 worker 목록
 docker stop jad-worker-<user>           # 개별 worker 중지(또는 UI disable)
 ```
 
-- config.yaml·시크릿 변경 후에는 `docker compose restart central`. worker 토큰 갱신은
-  6단계의 재기동 절차를 따른다.
-- 이미지 갱신(재빌드) 시 `docker compose up -d --build central` 후, 기존 worker는
-  UI에서 stop→start(또는 `docker rm -f jad-worker-<user>` 후 재활성화)로 새 이미지 반영.
+- config.yaml·시크릿 변경 후에는 `docker compose restart central`. central 은 부팅 시
+  각 워커에 **구워진 주입 페이로드**(config·시크릿)를 지금 값과 대조해, 달라졌으면 그
+  워커를 재생성한다 — 활성 잡이 있으면 그 잡이 끝난 뒤로 미룬다(드레인). 그래서 별도
+  조작 없이 다음 재기동에서 새 값이 반영된다.
+- 이미지 갱신(재빌드) 시 `docker compose up -d --build central` 후, 기존 worker는 central
+  이 같은 reconcile 로 재생성한다(수동으로 하려면 UI stop→start 또는
+  `docker rm -f jad-worker-<user>` 후 재활성화).
+
+### 9.1 업그레이드 — `host_deploy_dir` 제거 (기존 배포)
+
+worker 의 bind 마운트가 전부 사라지면서 `deploy.host_deploy_dir` / env `HOST_DEPLOY_DIR`
+이 **없어졌다**(INSTALL §2.2). 기존 배포의 이관 절차는 사실상 없다:
+
+1. **시크릿을 옮기지 않는다.** `./secrets/` 는 central 이 계속 쓰는 그대로다 — 바뀐 것은
+   *워커에게 전달하는 방법*뿐이다.
+2. `docker compose build && docker compose up -d` 로 **central 과 이미지를 같이** 올린다
+   (central·worker 는 같은 이미지다). central 이 부팅 시 낡은 워커를 감지해 재생성한다.
+3. `.env` 의 `HOST_DEPLOY_DIR=`, `config.yaml` 의 `deploy.host_deploy_dir:` 는 **지워도 되고
+   둬도 된다** — 아무도 읽지 않는다. `python -m app.setup validate` 가 "선언되지 않은
+   항목" 경고로 남아 있음을 알려 준다.
+4. 확인: `docker inspect jad-worker-<user> --format '{{json .HostConfig.Binds}}'` 가
+   `null` 이면(=bind 없음) 새 방식으로 뜬 것이다. central 로그에 `주입 config
+   materialize` / `주입 시크릿 materialize` 라인이 워커 부팅마다 남는다.
+
+> ⚠️ **부분 업그레이드 금지**: 새 central + 낡은 워커 이미지 조합이면, 워커가 주입 env 를
+> 해석하지 못해 config 없이 부팅한다(크래시 루프 — 조용하지 않고 로그에 바로 뜬다).
+> 위 2번처럼 이미지를 함께 올리면 발생하지 않는다.

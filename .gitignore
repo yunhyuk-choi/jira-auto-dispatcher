@@ -2,10 +2,20 @@
 config/config.yaml
 
 # --- 런타임 영속/작업 산출물 ---
+# ⚠️ gitignore 에서 `#` 는 **줄 첫 칸**에서만 주석이다 — 패턴 뒤에 붙이면 그 텍스트까지
+#    패턴의 일부가 되어 **아무것도 무시하지 않는다.** 실제로 아래 `secrets/` 는 그렇게
+#    무력화돼 있었다(시크릿 **값** 디렉토리가 추적 가능한 상태였다). 그래서 설명은
+#    전부 패턴 위 줄로 올린다.
 state/
-state/secrets/           # 사용자 시크릿 파일(값) — 절대 추적 금지
-state/registry.json      # 등록 사용자(운영 데이터, 온보딩으로 채워짐)
-secrets/                 # 컨테이너 마운트용 시크릿 파일(값)
+# 사용자 시크릿 파일(값) — 절대 추적 금지
+state/secrets/
+# 등록 사용자(운영 데이터, 온보딩으로 채워짐)
+state/registry.json
+# 컨테이너 마운트용 시크릿 파일(값)
+secrets/
+# 설치 마법사가 모은 답변(중단·재개용). 시크릿 값은 없지만 그 조직의 URL·프로젝트 키·
+# 계정이 들어 있으므로 추적하지 않는다.
+setup-answers.json
 workspace/
 .env
 
@@ -27,7 +37,13 @@ __pycache__/
 /dataspace_docs/
 /workspace/docs/
 
-# --- 로컬 Claude 세션/인증 (볼륨으로 영속) ---
+# --- 로컬 Claude 세션/인증·스킬 (전부 개인 영역) ---
+# ⚠️ 여기에 negation(`!.claude/skills/`)으로 구멍을 뚫지 말 것. `.claude/` 아래는 **그
+#    머신의 개인 영역**이다 — 세션 인증·로컬 설정·머신별 절대경로가 섞이므로 공유하면
+#    서로의 환경을 덮어쓴다. 프로젝트 스킬도 예외가 아니다: 리포가 추적하는 것은
+#    `skill-templates/` 의 **템플릿**뿐이고, 실제 `.claude/skills/<이름>/SKILL.md` 는
+#    클론한 사람이 `python -m app.setup skill` 로 자기 머신에 만든다(app/setup_skill.py).
+#    짝 프레임워크 `ai-dlc-orchestrator` 의 SETTER S8.7 과 같은 규율(POLICY-TRACKING).
 .claude/
 
 # --- 추적 유지: 디렉토리 골격 표식 ---

@@ -20,7 +20,39 @@
 >
 > 위험 모델·보완 통제의 정본은 **[SECURITY.md](SECURITY.md)**, 설치는 **[INSTALL.md](INSTALL.md)**.
 
-Jira(`jira.project` 로 지정) 티켓이 **등록 사용자**에게 새로 할당되면 이를 감지해, **그 사용자
+## 설치 — 여기서 시작
+
+```bash
+python -m app.setup wizard      # 대화로 물어보고 config.yaml·시크릿·진단까지 이끈다
+```
+
+물어본 값은 `setup-answers.json` 에 계속 저장되므로 **중간에 그만두고 나중에 이어서**
+해도 된다. 검증·생성·판정은 전부 설치 관문 CLI(`python -m app.setup validate|render|
+doctor`)가 하고, 통과하지 못하면 `config.yaml` 이 만들어지지 않는다.
+
+**이 CLI 가 1차 진입점이다 — `claude` 가 없어도 설치가 끝난다.** 손으로 채우는 절차도
+[INSTALL.md](INSTALL.md) 에 그대로 유효하다.
+
+<details><summary>선택 — <code>claude</code> 를 쓴다면 슬래시 커맨드로도 시작할 수 있다</summary>
+
+```bash
+python -m app.setup skill          # skill-templates/ → 내 .claude/skills/ (멱등)
+python -m app.setup skill --list   # 어떤 스킬이 있는지만 보기
+```
+
+만들어진 스킬은 `claude` 세션에서 `/install-jira-auto-dispatcher` 로 부른다. 스킬도 결국
+같은 CLI(`validate`/`render`/`doctor`)를 태우므로 **게이트는 하나다.**
+
+`.claude/` 아래는 그 머신의 **개인 영역**이라 리포가 추적하지 않는다(세션 인증·로컬 설정이
+섞이는 자리다). 추적되는 것은 `skill-templates/` 의 템플릿뿐이고 — 템플릿을 하나 더 넣으면
+코드 수정 없이 설치 대상이 하나 더 된다 — 실제 파일은 머신마다 위 명령으로 만든다.
+만들지 못해도(권한 없음·읽기전용 FS) **설치에는 아무 지장이 없다** — 스킬은 편의지 필수
+경로가 아니다.
+
+</details>
+
+Jira(`jira.project` + `jira.projects` 로 지정, 사용자별로는 온보딩의 `scope` 로 좁힌다)
+티켓이 **등록 사용자**에게 새로 할당되면 이를 감지해, **그 사용자
 정체성으로** 오케스트레이터(`claude` CLI = ai-dlc-orchestrator)를 자율 실행해
 브랜치·MR을 만드는 시스템이다.
 
@@ -37,9 +69,10 @@ Jira(`jira.project` 로 지정) 티켓이 **등록 사용자**에게 새로 할�
   티켓 담당자를 등록 사용자에 매핑 → 그 사용자 worker에 잡 배포. + 사용자
   레지스트리/온보딩/관리 UI + 사용자 worker 컨테이너 동적 spawn(Docker SDK).
 - **worker** (사용자별 동적 컨테이너, `ROLE=worker DISPATCH_USER=<user>`): Jira를
-  직접 보지 않는다. 중앙을 HTTP 폴링 → 잡 수신 → 그 사용자 정체성(Claude 계정·
-  Jira 토큰·forge 토큰·git author)으로 `claude -p` 실행 → 상태/로그 회신.
-  토큰 한도 감지 시 interrupted + reset_at으로 회신하고 재개한다.
+  직접 보지 않고, **중앙에 아무것도 요청하지 않는다**. 그냥 살아 있는 실행 자리다 —
+  중앙이 `docker exec` 로 그 컨테이너 안에 세션을 **밀어 넣고**, 그 사용자 정체성
+  (Claude 계정·Jira 토큰·forge 토큰·git author)으로 `claude -p` 가 돈다.
+  토큰 한도 감지 시 interrupted + reset_at 으로 기록되고 재개한다.
 
 베이스는 `claude-web-wrapper`(claude-hacker): Flask로 `claude` CLI를 감싼 웹 래퍼
 (브라우저 로그인 + `claude -p` 스트리밍)에서 재사용 자산을 이식했다.
@@ -72,32 +105,39 @@ Jira(jira.project)          │                                                 
                         │    ▼ (2) 담당자 account_id → registry 매핑(enabled만)         │
                         │  registry ── 등록 사용자 CRUD(state/registry.json)            │
                         │    │                                                         │
-                        │    ▼ (3) dispatch.enqueue(user, job)                          │
-                        │  dispatch ── 사용자별 잡 큐 + HTTP                            │
-                        │    │  GET /dispatch/<user>/next   POST /dispatch/<u>/<job>/status
+                        │    ▼ (3) dispatch.enqueue(user, job) → scheduler              │
+                        │  central_session ── 상주 라이브 세션(사용자별 서브 스폰)      │
                         │  spawner ── 온보딩 시 worker 컨테이너 동적 spawn(Docker SDK)  │
                         └────┼─────────────────────────────────────────────────────────┘
-                             │ (4) HTTP (worker가 폴링/회신)
+                             │ (4) docker exec — 중앙이 워커 안으로 **밀어 넣는다**
               ┌──────────────┼──────────────┐  ...사용자마다 1개
         ┌─────▼─────┐  ┌─────▼─────┐   worker (동적, ROLE=worker DISPATCH_USER=<u>)
-        │ worker A  │  │ worker B  │   ── central 폴링 → agent_runner → claude -p → 회신
+        │ worker A  │  │ worker B  │   ── 상주만 한다(/healthz) → 주입된 claude -p 실행
         └───────────┘  └───────────┘      토큰 한도 감지 → interrupted(reset_at) → 재개
 ```
 
 - **영속(state/)**: jobs·watermark·dedup·registry를 JSON으로 영속(central만).
   worker는 무상태 실행체다.
+- **디스패치 seam 은 하나뿐**: 중앙 → `docker exec`(프랙탈 푸시). 워커가 중앙을 폴링하던
+  옛 HTTP 경로(`app/worker.py::worker_loop` + `GET /dispatch/<user>/next` 계열)는 프랙탈
+  경로와 **이중 실행**(같은 티켓 두 번 → 중복 MR·브랜치·Jira 코멘트)을 일으켜 삭제됐다.
 - **웹훅-레디**: 폴러가 기본. 웹훅은 켜면 동일 게이트/매핑으로 수렴(중복 안전).
 - **재개**: 중앙이 interrupted 잡을 reset_at에 사용자 큐로 재-enqueue → 그 worker가
   `claude -p --resume`로 이어간다(야간 드레인 / UI "지금 재개" 동일 경로).
 
-## central ↔ worker HTTP 프로토콜
+## HTTP 표면
 
 | 메서드 | 경로 | 방향 | 내용 |
 |---|---|---|---|
-| GET | `/dispatch/<user>/next` | worker→central | 다음 잡 1건(JSON) 수신, running 전이. 없으면 204 |
-| POST | `/dispatch/<user>/<job>/status` | worker→central | `{status, log?, reset_at?, branch?, session_id?, mr_url?, error?}` 회신 |
-| GET | `/healthz` | 프로브 | 역할/사용자 헬스 |
-| POST | `/onboard` | UI→central | 사용자 등록 + worker spawn (Phase 3) |
+| GET | `/healthz` | 프로브 | 역할/사용자 헬스 (워커 컨테이너의 **유일한** 서빙 표면) |
+| POST | `/webhook/jira` | Jira→central | 이벤트 구동 단일 티켓 트리거(헤더 토큰 인증, 폴링은 백스톱) |
+| POST | `/onboard` | UI→central | 사용자 등록 + worker spawn |
+
+> ⚠️ **은퇴**: `GET /dispatch/<user>/next` · `POST /dispatch/<user>/<job>/status` ·
+> `GET /dispatch/<user>/<job>/control` 과 그 `X-Worker-Secret` 인증은 레거시 워커 폴링
+> 프로토콜이었고, 이중 실행의 원인이라 소비자(`app/worker.py`)와 함께 제거됐다. 그래서
+> `WORKER_SHARED_SECRET` 과 `CENTRAL_URL`(`spawn.central_url`)도 함께 은퇴했다 — 옛
+> `.env`·`config.yaml` 에 남아 있어도 조용히 무시된다.
 
 ## 실행
 
@@ -105,13 +145,15 @@ Jira(jira.project)          │                                                 
 pip install -r requirements.txt
 
 # 설정 준비(시크릿 값은 넣지 말 것 — 파일 참조만)
-cp config/config.example.yaml config/config.yaml
+python -m app.setup wizard            # 대화로 채우기(권장)
+# 또는 손으로: cp config/config.example.yaml config/config.yaml
 
 # central (관리 콘솔 + 감시/디스패치)
 ROLE=central python -m app.main       # http://127.0.0.1:8787
 
 # worker (보통 central이 동적 spawn; 수동 기동 시)
-ROLE=worker DISPATCH_USER=<username> CENTRAL_URL=http://central:8787 \
+# ⚠️ 워커는 중앙 주소를 알 필요가 없다 — 중앙이 docker exec 로 밀어 넣는다.
+ROLE=worker DISPATCH_USER=<username> \
   CLAUDE_CODE_OAUTH_TOKEN=... python -m app.main
 ```
 

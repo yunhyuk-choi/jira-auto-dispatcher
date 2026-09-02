@@ -22,27 +22,33 @@ consent:
   accepted_at: ""            # 동의 시각(ISO-8601, 예: 2026-08-25T09:00:00+09:00) — 감사 흔적
 
 # 어디에 세우는가. profile 하나만 고르면 나머지가 파생된다(app/setup_schema.PROFILE_DEFAULTS):
-#   local         개발자 노트북 — 도커 소켓 직결, 시크릿은 로컬 디렉토리(env SECRETS_DIR)
-#   cloud_vm      클라우드 VM  — compose + socket-proxy 경유, 시크릿 /run/secrets
+#   local         개발자 노트북 — 시크릿은 로컬 디렉토리(env SECRETS_DIR)
+#   cloud_vm      클라우드 VM  — 시크릿 /run/secrets
 #   onprem_server 사내 온프렘  — cloud_vm 과 같은 형태(다른 건 네트워크·정책이지 이 값들이 아니다)
+# ⚠️ **도커 접근은 세 프로파일 모두 socket-proxy 경유**다 — 이 리포의 docker-compose.yml 이
+#    그렇게 배포되고(Docker Desktop 포함, compose 를 한 글자도 안 고쳐도 뜬다), 소켓 직결은
+#    central 에 호스트 root 동치 권한을 준다(SECURITY.md §4). 굳이 직결하려면 아래
+#    docker_host 를 명시하고 compose 도 함께 바꾼다(INSTALL.md §3 의 "고급" 대안).
 # 아래 개별 값을 명시하면 프로파일 파생보다 우선한다. 레거시 키(spawn.docker_host·
-# spawn.host_deploy_dir·spawn.workspace_volume·secrets.base_dir)도 계속 읽는다.
+# spawn.workspace_volume·secrets.base_dir)도 계속 읽는다.
+# ⚠️ `python -m app.setup render` 는 프로파일 파생값을 **실제로 이 파일에 써 넣는다** —
+#    프로파일과 모순되는 예시 값이 남지 않는다.
+#
+# ⚠️ 예전에 여기 있던 host_deploy_dir(호스트 배포 절대경로)은 **없어졌다**. 워커에 거는
+# 마운트가 전부 named 볼륨이 되고, config·per-user 시크릿·알림 웹훅은 central 이 워커
+# 컨테이너 스펙에 **주입**하기 때문이다(app/inject.py) — 호스트 경로를 아무도 알 필요가
+# 없다. 기존 config.yaml 에 그 키가 남아 있어도 무시된다(무해).
 deploy:
   profile: cloud_vm
-  # ⚠️ 호스트 배포 디렉토리의 절대경로(central 컨테이너 내부 경로 아님).
-  # central이 socket-proxy 경유로 worker를 띄우면 바인드 source는 호스트 docker
-  # 데몬이 해석한다(sibling container) → worker 바인드 source가 호스트 경로여야 한다.
-  # 예: /home/<deploy-user>/deploy/jira-auto-dispatcher. env HOST_DEPLOY_DIR 폴백 우선.
-  # 비우면(로컬 개발) 직접 경로 폴백. worker의 config/시크릿 마운트에 필수.
-  host_deploy_dir: "${HOST_DEPLOY_DIR}"
-  docker_host: tcp://socket-proxy:2375     # 직결 대안: unix:///var/run/docker.sock (특권 확대)
+  docker_host: tcp://socket-proxy:2375     # 전 프로파일 공통 기본. 직결 대안:
+                                           # unix:///var/run/docker.sock (호스트 root 동치)
   # 시크릿 파일들의 루트(값 아님, 경로). 호스트 OS 무관 — 로컬 개발이면 임의의 로컬
   # 디렉토리(예: ~/.jad/secrets), 컨테이너면 /run/secrets 또는 마운트 볼륨.
   # env SECRETS_DIR 로 주입하는 것을 권장한다(아래는 그 치환 형태).
   secrets_base_dir: "${SECRETS_DIR}"
   # 공유 워크스페이스 named 볼륨 이름(단일 클론·단일 pull 지점, 설계 §4). central
   # compose가 이 이름으로 선언하고 spawner가 워커에 **같은 named 볼륨**을 run.workspace_dir
-  # 에 마운트 → central·모든 워커가 레포 한 벌 공유. named 볼륨이라 host_deploy_dir 무관.
+  # 에 마운트 → central·모든 워커가 레포 한 벌 공유. named 볼륨이라 호스트 경로 무관.
   workspace_volume: jad-workspace
 
 # 브랜치를 push 하고 MR/PR 을 만들 코드 호스팅. ⚠️ 사용자 **개인** forge 토큰은 여기가
@@ -68,7 +74,12 @@ forge:
 #    에러로 실패한다(app/jira_client.py).
 #
 # 🔎 **자기 인스턴스 값 알아내는 법**(여기가 남들이 가장 많이 막히는 지점이다).
-#    아래는 감시 계정 이메일 + API 토큰으로 Basic auth 해서 호출한다:
+#    가장 쉬운 길은 이 리포의 조회 명령이다 — base_url·watcher_email·watcher_token_file 만
+#    채운 상태에서 돌리면 **실제로 존재하는 값만** 후보로 뽑아 주고, 지금 설정에 적힌 id·
+#    상태 이름이 이 인스턴스에 실재하는지까지 검증한다:
+#      python -m app.setup discover              # 전부(계정·필드·상태·전이·라벨)
+#      python -m app.setup discover --only custom_fields
+#    직접 REST 를 부르고 싶으면 아래(감시 계정 이메일 + API 토큰으로 Basic auth):
 #      # 커스텀필드 id — 이름으로 찾는다(예: '시작날짜'·'Start date')
 #      curl -u "<email>:<api-token>" "$JIRA/rest/api/3/field" | jq '.[] | {id, name}'
 #      # 완료 전이의 id/이름 — 실제 티켓 하나로 실측한다
@@ -76,11 +87,35 @@ forge:
 #    (jq 가 없으면 그냥 눈으로 읽어도 된다. $JIRA = 아래 base_url.)
 jira:
   base_url: https://your-org.atlassian.net   # ⚠️ Jira Cloud 사이트만 지원(Server/DC 미지원)
-  project: <PROJECT_KEY>
+  project: <PROJECT_KEY>          # 대표 프로젝트 키(JQL 에 항상 포함)
+  # 추가 감시 프로젝트(선택). 대표 프로젝트는 항상 포함되므로 여기 다시 적지 않는다.
+  # 사람마다 담당 프로젝트가 다르면 여기 전부 적어 두고, 사용자별 범위는 관리 UI 온보딩의
+  # scope 로 좁힌다 — 폴러는 **전 사용자 범위의 합집합**으로 JQL 을 한 번만 던지고
+  # (project in (...)), 담당자 매핑 단계에서 그 사람 범위 밖 티켓을 버린다(app/scope.py).
+  # ⚠️ 사용자 scope 가 비어 있으면 "제한 없음"이 아니라 **여기 값을 상속**한다.
+  #    합집합이 비면(기본값도 없고 사용자 범위도 없음) 폴러는 JQL 을 아예 던지지 않고
+  #    WARNING 을 남긴다 — 예전처럼 project 절만 빠져 전 프로젝트를 긁지 않는다.
+  projects: []
   poll_interval_sec: 60
+  # 감시 토큰 **생존 확인** 주기(초, 0=끔). ⚠️ Jira Cloud 는 자격이 틀려도 JQL 검색에
+  # 200 + 빈 배열을 돌려준다(401 은 /myself 에서만 난다) — 토큰이 만료·회수되면 시스템이
+  # 영원히 "할 일 없음" 상태로 조용히 돈다. 그래서 **티켓이 하나도 안 걸린 폴**에서만,
+  # 이 주기마다 GET /rest/api/3/myself 로 자격을 다시 확인한다(티켓이 돌아온 폴은 그
+  # 자체가 자격 증거라 확인하지 않는다). 실패는 로그 + /api/doctor(관리 UI 배너)로 뜬다.
+  auth_recheck_sec: 1800
   watcher_token_file: service/jira-token   # 중앙이 Jira를 감시하는 토큰(내 것/봇). secrets.base_dir 상대
+  # ⚠️ Basic auth 는 **(이메일, 토큰) 쌍**이다 — 토큰만으로는 인증되지 않는다. 위 토큰을
+  # 발급받은 Atlassian 계정의 이메일을 적는다(비우면 env JIRA_WATCHER_EMAIL 폴백).
+  watcher_email: ""
   # 트리거/역-트리거 — **이 워크플로우의 상태 이름 그대로** 적는다(언어·명명이 조직마다 다르다).
   # (레거시 이름 match.statuses / match.cancel_statuses / match.optout_labels 도 계속 읽음)
+  #
+  # ⚠️ 이름을 손으로 옮겨 적지 말 것. 화면 표시명과 API 의 name 이 어긋날 수 있고, 어긋나면
+  #    폴러는 **에러 없이 아무 티켓도 못 찾는다**(가장 알아채기 어려운 실패). 실측:
+  #      python -m app.setup discover --only statuses
+  #    id 를 함께 적어 두는 형태도 받는다(권장 — discover 가 그 형태로 뱉는다):
+  #      trigger_statuses: [{"id": "10000", "name": "해야 할 일"}]
+  #    문자열 목록도 그대로 읽는다(하위호환). 어느 쪽이든 런타임은 이름으로 JQL 을 건다.
   trigger_statuses: ["해야 할 일"]     # 신규 착수(트리거) 상태 화이트리스트
   cancel_statuses: ["취소됨"]          # 이 상태로 오면 추적 잡을 즉시 취소(폴러·워처·웹훅 공유)
   optout_labels: ["자동화_추적_해제"]   # 이 라벨이 붙으면 신규 착수 안 함 + 추적 중이면 취소로 수렴
@@ -90,35 +125,51 @@ jira:
   #   - 값을 **주면**      → 그 필드 id 로 전송
   #   - 값을 **비우면("")** → "이 인스턴스엔 그런 필드가 없다" → 그 필드를 **아예 안 보낸다**
   #     (없는 커스텀필드를 보내면 Jira 가 400 을 낸다. 예: 다른 조직에는 '시작날짜'가 없다.)
+  # ⚠️ actual_start·actual_end 는 **기본값이 없다**(조직 고유 필드 — 어떤 id 도 남의
+  #    인스턴스에서 맞다고 보장할 수 없다. 실측: 옛 기본값 10187/10186 은 다른 사이트에
+  #    아예 없었고 실제 값은 10352/10353 이었다). 비워 두면 완료 전이에 그 필드를 보내지
+  #    않고, 워크플로우가 요구하면 Jira 가 "필수입니다"라고 정확히 말해 준다.
   custom_fields:
     start_date: customfield_10015    # 착수 시 필수인 '시작날짜'  (없으면 "" 로 두면 미전송)
     due_date: duedate                # 착수 시 필수인 '마감일'    (duedate 는 표준 필드라 대개 그대로)
-    actual_start: customfield_10187  # 완료 전이 시 필수인 '실제 시작일'
-    actual_end: customfield_10186    # 완료 전이 시 필수인 '실제 종료일'
+    actual_start: ""                 # 완료 전이 시 필수인 '실제 시작일' (실측해 채운다. 없으면 그대로 둔다)
+    actual_end: ""                   # 완료 전이 시 필수인 '실제 종료일' (실측해 채운다. 없으면 그대로 둔다)
   # 완료 전이 식별 — 우선순위: (1) 아래 id → (2) 아래 이름 매칭 → (3) done 카테고리 단일
   # 후보 → (4) 설정을 아예 안 준 레거시 배포만 모듈 상수 폴백 → 그래도 못 정하면 **가능한
   # 전이 목록을 담은 에러**(조용한 실패 금지). id 는 인스턴스마다 다르니 모르면 비워 두고
   # 이름만 자기 워크플로우에 맞춰도 된다(실측: GET /rest/api/2/issue/{key}/transitions).
+  # (실측 한 방: python -m app.setup discover --only transitions — id·이름·목표 상태를 함께 뱉는다.
+  #  done_transition_names 에 [{"id": "41", "name": "완료"}] 형태로 적으면 id 를 따로 관리하지
+  #  않아도 된다 — done_transition_id 가 비어 있고 id 가 하나뿐이면 그것을 쓴다.)
   done_transition_id: ""                    # 예: "41" — 위 실측 목록의 id
   done_transition_names: ["완료", "Done"]   # 이 워크플로우의 완료 전이(또는 목표 상태) 이름
 
 # Jira 웹훅 수신(이벤트 구동) — 신규/담당자-변경 티켓을 폴링 주기(위 poll_interval_sec)를
 # 기다리지 않고 **즉시** 트리거한다. 폴러와 동일한 dedup 게이트/매핑 수렴점을 재사용하며
 # 폴링은 백스톱으로 남는다. 엔드포인트: POST /webhook/jira
-#   - 인증: 헤더 X-Jira-Webhook-Token 또는 쿼리 ?token= (secret_ref 파일값과 상수시간 비교)
+#   - 인증: 헤더 X-Jira-Webhook-Token **전용**(secret_ref 파일값과 상수시간 비교).
+#     ⚠️ 쿼리 ?token= 은 **거부한다**(401) — 프록시·서버 access 로그에 평문으로 남는
+#        유출 표면이다. Jira 자동화에서 헤더를 못 넣으면 앞단 프록시가 헤더를 붙이게 한다.
 #   - 페이로드: {"issueKey":"PROJ-1"}(커스텀 Automation) 또는 {"issue":{"key":"PROJ-1"}}(표준)
 # ⚠️ 토큰은 "값"이 아니라 참조(secrets.base_dir 상대 파일)만 둔다 — 그 파일에 토큰을 0600으로
 #    저장. secret_ref 파일이 없으면 엔드포인트는 503으로 거부한다(무인증 자율 실행 금지 — RCE 표면).
-webhook: { enabled: true, secret_ref: service/jira-webhook }
+webhook:
+  enabled: true
+  secret_ref: service/jira-webhook   # 토큰 "값"이 아니라 secrets.base_dir 상대 파일 참조
+                                     # (값은 아무 고엔트로피 문자열: openssl rand -hex 32)
 
 resume: { work_hours: "08:00-18:00", timezone: Asia/Seoul, nightly_drain: "01:00-05:00", reset_buffer_sec: 120 }
 
-# worker 컨테이너 기동 파라미터. ⚠️ docker_host·host_deploy_dir·workspace_volume 은
-# 위 deploy 섹션으로 옮겼다(레거시로 여기 둬도 계속 읽지만, 새 설정은 deploy 를 쓴다).
+# worker 컨테이너 기동 파라미터. ⚠️ docker_host·workspace_volume 은 위 deploy 섹션으로
+# 옮겼다(레거시로 여기 둬도 계속 읽지만, 새 설정은 deploy 를 쓴다).
+# ⚠️ 예전의 spawn.central_url 은 **은퇴했다**(env CENTRAL_URL 도 마찬가지). 워커가 중앙을
+# 폴링하던 시절의 대상 주소인데, 지금 워커는 HTTP 로 중앙에 말하지 않는다(중앙이
+# docker exec 로 밀어 넣는다). 옛 config 에 남아 있어도 조용히 무시된다.
+# ⚠️ run_as 는 워커의 실행 uid 이자 **주입 시크릿 tmpfs(/run/secrets)의 소유 uid** 다
+# — spawner 가 이 값에서 파생하므로 둘이 어긋날 수 없다(app/spawner.py secrets_tmpfs).
 spawn:
   image: jira-auto-dispatcher:latest
   network: jad-net
-  central_url: http://central:8787
   mem_limit: 4g
   run_as: "1000:1000"                         # worker 컨테이너 비-root 실행(특권 축소)
 
@@ -187,6 +238,12 @@ run:
   # 위 레포들의 clone 원본 URL(토큰 없는 형태). worker가 사용자 forge 토큰으로
   # clone(없으면)/pull(있으면)한다(app/repos.py). 비우면 그 레포 프로비저닝 skip+경고.
   orchestrator_repo_url: https://github.com/yunhyuk-choi/ai-dlc-orchestrator.git   # 필수 공개 프레임워크(리터럴 유지)
+  # ⚠️ 이 값은 **손으로 적지 않는다.** 설치 관문이 dlc-meta 클론의 origin 에서 읽어 채운다:
+  #   python -m app.setup render answers.json --dlc-meta <dlc-meta 클론 경로>
+  # (경로를 안 줘도 흔한 위치 — 배포 디렉토리·그 상위·cwd·홈의 dlc-meta — 를 탐색한다.)
+  # 아래 예시 값이 그대로 남아 있으면 `doctor --only config` 가 자리표시자로 잡아 실패시킨다.
+  # 남겨 두면 안 되는 이유: 이 URL 이 forge base_url·kind 판정의 근거라(app/forge.py),
+  # 남의 조직 호스트가 적혀 있으면 사내 토큰이 그리로 나갈 수 있다.
   dlc_meta_repo_url: https://gitlab.example.com/<your-group>/dlc-meta.git
   # 설계 문서 레포는 **완전 선택**이다 — 비우면(또는 키를 지우면) 프로비저닝을 조용히
   # 건너뛰고 경고만 남긴다(잡은 정상 진행). 레거시 키 dataspace_docs_repo_url 도 계속 읽음.
@@ -208,15 +265,17 @@ run:
   # 지속 세션(persistent_session)이 꺼져 있으면 켜도 무시된다.
   fractal_worker: false
 
-  # --- 프랙탈 P2(센트럴 계층) 신경로 피처 플래그(기본 ON — 승격됨) ---
-  # true 면 central 이 신규/갱신 티켓을 스케줄러 큐 대신 **상주 센트럴 라이브 세션**
-  # (app/central_session.CentralSession)에 이벤트로 주입한다(설계 §3.1·§9 P2). 센트럴
-  # 세션이 사용자별 서브를 스폰해 워커로 위임하고, 리치 완료-리포트를 관찰해 gchat 으로
-  # 상신한다. **기본 ON 으로 승격**(라이브 검증 완료): 예전엔 비영속 env FRACTAL_CENTRAL=1
-  # override 로만 켜져 배포마다 꺼졌으나, 이제 코드/설정 기본이 true 라 override 없이
-  # 배포만으로 fractal ON 이 유지된다. env FRACTAL_CENTRAL 명시 시 그게 여전히 우선(끌 수도
-  # 있음). 지속 세션(persistent_session)+양방향 stream-json 이 꺼져 있으면 켜도 무시된다.
-  fractal_central: true
+  # --- 프랙탈 센트럴 실행 경로 — 토글 없음(항상 ON) ---
+  # central 은 신규/갱신 티켓을 **상주 센트럴 라이브 세션**(app/central_session)에
+  # 이벤트로 주입하고, 그 세션이 사용자별 서브를 스폰해 워커 컨테이너로 위임한다.
+  # ⚠️ 예전의 run.fractal_central 키는 **은퇴했다**. 옛 config 에 남아 있어도 값은
+  # 무시되고 경고만 남는다(OFF 로 얻던 구 경로 — 워커 HTTP 폴링 — 는 이중 실행,
+  # 즉 중복 변경요청·중복 완료알림의 원인이라 코드에서 제거됐다).
+  # 이 경로가 성립하려면 **지속 세션**(아래 두 키의 기본값)이 살아 있어야 한다.
+  # 끄면 티켓이 감지돼도 실행되지 않으며, 부팅 로그와 자가진단(/api/doctor)이 그
+  # 사실을 드러낸다. 특별한 이유가 없으면 그대로 둔다.
+  persistent_session: true
+  input_format: stream-json
 
   # --- central LLM 레포 리졸버(신규 티켓 → target_repos 판단) ---
   # "llm"(기본): central이 claude로 dlc-meta REPO-MAP + 티켓을 읽어 "이 티켓이

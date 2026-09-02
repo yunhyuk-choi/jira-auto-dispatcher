@@ -38,7 +38,8 @@ worker 컨테이너의 `claude` 는 `--dangerously-skip-permissions` 를 **헤�
 
 - 이는 **시스템 레벨 인가**다 — 모든 worker 컨테이너에 공통 적용되며, **사용자 입력이
   필요 없다**. 온보딩은 자격증명만 받고 **권한 승인 단계는 없다**.
-- 이 파일은 read-only 바인드로 주입되어 컨테이너 런타임이 되돌릴 수 없다.
+- 이 파일은 컨테이너 **생성 시점에** 그 스펙으로 주입되고(`app/inject.py`) worker 가
+  부팅 시 `~/.claude/settings.json` 으로 기록한다 — 매 spawn 마다 최신 내용으로 덮어쓴다.
 
 ### 1.1 동의를 설정에 남긴다
 
@@ -74,7 +75,7 @@ consent:
 | **신뢰 네트워크 한정** | 사설망/VPN 안에서만. 클라우드 VM 이면 **보안그룹 인바운드를 전부 차단**하고 **SSH 터널**로 접근한다([INSTALL.md](INSTALL.md) 갈래 B). |
 | **전용 호스트** | 실효 권한이 호스트 root 동치이므로(§4) 다른 워크로드와 호스트를 공유하지 않는다. |
 | **토큰 최소권한** | forge/Jira 토큰은 전용 계정 + 필요한 레포·프로젝트로 스코프를 좁힌다. |
-| **웹훅만 예외** | 인바운드가 꼭 필요하면 리버스 프록시(TLS)로 `webhook.path` **하나만** 노출하고 출처 IP 를 제한한다. 8787 관리 UI 는 절대 함께 열지 않는다. |
+| **웹훅만 예외** | 인바운드가 꼭 필요하면 리버스 프록시(TLS)로 `POST /webhook/jira` **하나만** 노출하고 출처 IP 를 제한한다. 인증은 헤더 `X-Jira-Webhook-Token` 전용(쿼리 `?token=` 은 access 로그 유출 표면이라 401). 8787 관리 UI 는 절대 함께 열지 않는다. |
 
 ### 3.1 코드가 강제하는 통제
 
@@ -88,11 +89,27 @@ consent:
 | **자원 어드미션** | 잡 수 cap 이 아니라 호스트 메모리·부하로 dispatch 를 조절(폭주 완충). | `app/scheduler.py`·`config.admission` |
 | **컨테이너 격리** | 사용자마다 별도 컨테이너. `mem_limit`(기본 4g)는 하드 백스톱. | `app/spawner.py` |
 | **비-root 실행** | worker 컨테이너는 `user=1000:1000`(`spawn.run_as`)로 실행 — 특권 축소. | `app/spawner.py` |
-| **시크릿 볼륨(ro)** | 토큰은 값이 아니라 per-user 시크릿 디렉토리를 **read-only** 마운트로 노출. 다른 사용자 시크릿은 안 보인다. Jira/forge 는 값 대신 **파일경로**로 주입. | `app/spawner.py` |
-| **시크릿 미노출** | 시크릿 값은 `config.read_secret` 로만 읽고, env dict·예외·로그에 절대 싣지 않는다. 온보딩 응답에도 토큰 값 없음. | `app/onboarding.py`·`app/spawner.py` |
+| **per-user 시크릿 격리** | worker 컨테이너에는 **그 사용자 자신의 시크릿만** 스폰 시 주입되고, 다른 사용자 시크릿은 값도 경로도 마운트도 존재하지 않는다(공유 부모 디렉토리 자체가 없다). 컨테이너 안 소비자에게는 여전히 `*_FILE`/`*_REF` **파일경로**로 준다. | `app/spawner.py`·`app/inject.py` |
+| **시크릿 tmpfs(RAM)** | 주입된 시크릿은 워커의 `/run/secrets` **tmpfs** 에만 materialize 된다(0600, 부모 0700, 소유 uid = `spawn.run_as`). 디스크에 남지 않고 컨테이너와 함께 사라진다. | `app/spawner.py`·`app/inject.py` |
+| **시크릿 미노출(로그)** | 시크릿 값은 `config.read_secret`/주입 경로로만 다루고, env dict·예외·로그에 절대 싣지 않는다. 온보딩 응답에도 토큰 값 없음. | `app/onboarding.py`·`app/spawner.py` |
 | **서비스 토큰 격리** | central **서비스 자신**의 토큰은 worker env 에서 상속분까지 제거 — 산출물이 서비스 계정으로 오염되지 않는다. | `app/agent_runner.py` |
 | **안전 기본 enabled=false** | 온보딩 사용자는 비활성으로 시작. 운영자가 검토 후 명시적으로 활성화. | `app/onboarding.py` |
 | **향후 조임** | `permission_level` 로 사용자별 권한을 조일 수 있다(현재 `bypass` 만; `sandbox`·`allowlist` 는 TODO 분기). | `app/spawner.py` |
+
+### 3.1 스폰 시 주입의 노출 면 (정직한 기술)
+
+worker 는 config·per-user 시크릿·알림 웹훅을 **컨테이너 스펙(env)** 으로 받는다. 즉 그
+값들은 `docker inspect jad-worker-<user>` 로 보인다. 이 트레이드오프를 감수한 이유:
+
+- **이미 같은 수준이다.** `CLAUDE_CODE_OAUTH_TOKEN` 은 전부터 env 로
+  전달됐고, 워커 안에서는 `claude` 프로세스 env 에 사용자 forge 토큰이 주입된다(설계상
+  push/PR 을 하려면 필요하다 — `app/agent_runner.py`).
+- **공격자 비용이 달라지지 않는다.** docker API 에 닿을 수 있는 주체는 이미 호스트 root
+  동치라(§4) 호스트의 `secrets/` 를 직접 읽거나 아무 경로나 마운트할 수 있다.
+- **대신 두 가지가 나아졌다.** (a) 워커 사이의 격리가 *구조적*이 됐다 — 공유 부모
+  디렉토리가 없어 A 가 B 의 시크릿에 닿을 **경로 자체가 없다**. (b) 워커 쪽 시크릿이
+  디스크가 아니라 tmpfs 에만 존재한다.
+- **얻은 것**: 설치자가 틀리면 조용히 깨지던 호스트 경로 설정(`host_deploy_dir`)이 사라졌다.
 
 ## 4. docker.sock 특권 (별도 위험)
 

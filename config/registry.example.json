@@ -20,6 +20,7 @@
         "git_email": "you@example.com"
       },
       "scope": {
+        "_comment": "이 사용자가 받을 Jira 프로젝트 키. 비우면 '제한 없음'이 아니라 인스턴스 기본값(jira.project + jira.projects)을 상속한다 — scope 필드가 없던 시절의 레코드가 그대로 동작하는 이유. 폴러/웹훅/상태감시축이 담당자 매핑 단계에서 이 범위를 확인하고, 범위 밖 티켓은 디스패치하지 않는다(app/scope.py).",
         "projects": ["<PROJECT_KEY>"]
       },
       "container": {

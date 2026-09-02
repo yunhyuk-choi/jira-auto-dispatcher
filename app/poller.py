@@ -22,19 +22,27 @@
 
 흐름:
     1. 두 워터마크 로드(부재 시 now 시드)
-    2. (A) JQL: project=<p> AND assignee in (<enabled ids>)
+    2. (A) JQL: project in (<전 사용자 scope 합집합>) AND assignee in (<enabled ids>)
        AND status in (<match.statuses>) [AND created > "<created_wm>"]
        ORDER BY created ASC
-       (B) JQL: project=<p> AND assignee in (<enabled ids>)
+       (B) JQL: project in (<전 사용자 scope 합집합>) AND assignee in (<enabled ids>)
        AND status in (<match.statuses>)
        AND assignee CHANGED TO (<enabled ids>) [AFTER "<assignee_wm>"]
        ORDER BY updated ASC
+       ⚠️ 합집합이 비면 **JQL 을 던지지 않는다**(None) — 예전처럼 project 절만 빠져
+       전 프로젝트를 긁는 일이 없도록. 왜 안 도는지는 WARNING 으로 남는다.
     3. (A)·(B) 결과를 **티켓 키로 합집합·중복제거** 후, 각 유니크 이슈:
-       gate.claim(key) → resolve_user(enabled) → target_repos 해석 →
-       Job 생성 → dispatcher.enqueue(user, job)
+       gate.claim(key) → resolve_user(enabled + **per-user 프로젝트 범위 게이트**) →
+       target_repos 해석 → Job 생성 → _emit(user, job)(프랙탈 센트럴 세션 주입)
+       (JQL 은 합집합이라 남의 프로젝트 티켓이 섞여 온다 — 담당자 매핑 단계에서
+       :func:`app.scope.resolve_user_in_scope` 가 그것을 거른다.)
     4. created 워터마크는 처리한 max created로, assignee 워터마크는 now로 전진 후 영속
 
 참고:
+    - **자격 생존 확인(축0)**: 인증이 깨져도 Jira Cloud 의 JQL 검색은 200 + 빈 배열을
+      돌려주므로 "매칭 티켓 없음"과 구별되지 않는다. 빈 폴에서 주기적으로
+      ``GET /myself`` 를 때려 그 위장을 벗긴다(:meth:`Poller._verify_auth_if_due`,
+      ``jira.auth_recheck_sec``). 감지되면 로그 + ``/api/doctor`` 로 드러난다.
     - 백그라운드 스레드로 상시 구동(main.py의 central 분기가 기동).
     - 웹훅과 동일하게 반드시 gate를 통과한 뒤 매핑/디스패치(직접 큐잉 금지).
     - 매핑 실패/미등록/비활성 사용자면 enqueue하지 않고 로그만 남긴다(가역성을
@@ -48,8 +56,11 @@ import threading
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
+from app import central_dispatch
 from app import queue as q
 from app import scheduler as sched
+from app import scope as scope_mod
+from app.central_dispatch import CentralInjectFailed  # noqa: F401 — 공용 seam 으로 이관, 재-export(하위호환)
 from app.queue import Job
 from app.repo_resolver import CentralAIRateLimited
 
@@ -60,17 +71,6 @@ _DEFAULT_TIMEZONE = "Asia/Seoul"
 
 # 한 드레인 사이클에서 해석·디스패치할 pending 티켓 상한(한꺼번에 몰아치지 않도록).
 _DRAIN_BATCH_DEFAULT = 10
-
-
-def _central_enabled(config) -> bool:
-    """프랙탈 P2 센트럴 신경로 활성 여부(지연 import — 순환/로드 오버헤드 회피).
-
-    ``run.fractal_central`` 기본 OFF. OFF면 이 함수만 False 를 돌려 poller 의 방출
-    seam 이 오늘과 **byte-for-byte 동일**하게 enqueue 로 수렴한다(무동작변경).
-    """
-    from app.central_session import central_fractal_enabled
-
-    return central_fractal_enabled(config)
 
 
 class AICooldown:
@@ -205,12 +205,12 @@ class Poller:
         로더가 공유 워크스페이스 dlc-meta를 pull·read 한다.
         ``llm_runner``: repo_resolver의 claude 실행자 주입(테스트 격리).
 
-        ``central_sink``(프랙탈 P2, 기본 None): 상주 센트럴 라이브 세션 핸들
+        ``central_sink``(프랙탈, 기본 None): 상주 센트럴 라이브 세션 핸들
         (``inject_event(job)`` 을 노출하는 :class:`app.central_session.CentralSession`).
-        ``run.fractal_central`` ON 이고 이 핸들이 주입돼 있으면, 해석된 티켓을
-        ``dispatcher.enqueue`` **대신** 센트럴 세션에 이벤트로 주입한다(설계 §3.1). OFF/
-        미주입이면 오늘과 **byte-for-byte 동일**하게 enqueue 한다(무동작변경). main.py 가
-        플래그 ON 일 때만 이 핸들을 주입한다.
+        해석된 티켓은 이 핸들을 통해 센트럴 세션에 이벤트로 주입된다(설계 §3.1) — 이것이
+        **유일 실행 경로**다. 미주입(오설정 배포)이면 방출을 조용히 건너뛴다(레거시
+        ``dispatcher.enqueue`` 폴백은 은퇴했다 — 그 소비자가 더 이상 없다). main.py 가
+        지속 세션이 성립할 때만 이 핸들을 주입한다.
         """
         self.config = config
         self.jira = jira_client
@@ -218,10 +218,10 @@ class Poller:
         self.registry = registry
         self.dispatcher = dispatcher
         self._central_sink = central_sink
-        # 프랙탈 P2 관측성(A.1): 프랙탈 경로에서 잡을 JobQueue(같은 store)에 queued 로
-        # 기록해 대시보드에 뜨게 하는 뼈대용 핸들. 미주입이면 dispatcher.scheduler.jobs 로
-        # 폴백한다(같은 인스턴스). 프랙탈 잡만 meta.fractal 표식으로 기록한다(구 경로 스케줄러
-        # 는 이 표식을 건너뛰어 이중 실행하지 않는다). None 이면 기록을 건너뛴다(뼈대 없음).
+        # 프랙탈 관측성(A.1): 프랙탈 경로에서 잡을 JobQueue(같은 store)에 queued 로
+        # 기록해 대시보드에 뜨게 하는 핸들. 미주입이면 dispatcher.scheduler.jobs 로
+        # 폴백한다(같은 인스턴스). 잡에 meta.fractal 표식을 달아 구 경로 스케줄러 tick 이
+        # 이를 running 으로 올리지 않게 한다. None 이면 기록을 건너뛴다.
         self._job_queue = job_queue
         if self._job_queue is None:
             self._job_queue = getattr(getattr(dispatcher, "scheduler", None), "jobs", None)
@@ -268,55 +268,116 @@ class Poller:
         self._pending_lock = threading.RLock()
         self._pending: list = list(state.load_pending_resolution([]) or [])
 
+        # --- Jira 자격 생존 확인(축0) ---------------------------------------
+        # 인증이 깨져도 JQL 검색은 200 + 빈 배열이라 "할 일 없음"과 구별되지 않는다.
+        # _verify_auth_if_due 가 주기적으로 /myself 를 때려 그 위장을 벗긴다.
+        self._auth_reporter: Optional[Callable] = None   # 진단에 알리는 콜백(주입)
+        self._auth_checked_ts: float = 0.0               # 마지막 확인 시각(epoch, 0=미확인)
+        self._auth_broken: bool = False                  # 직전 확인이 실패였나(로그 소음 억제)
+
+    # ------------------------------------------------------------------
+
+    def set_auth_reporter(self, reporter: Optional[Callable]) -> None:
+        """Jira 자격 상태를 알릴 콜백을 주입한다 — ``reporter(ok: bool, detail: str)``.
+
+        central 조립부(:func:`app.main.build_central_components`)가 부팅 자가진단
+        (:meth:`app.doctor_runtime.DoctorRuntime.note_jira_auth`)을 물려, 폴링 중 감지한
+        인증 실패가 ``/api/doctor`` → 관리 UI 배너로 드러나게 한다. 미주입이면 로그만
+        남는다(폴러는 진단 모듈을 몰라도 된다 — 결합 최소화).
+        """
+        self._auth_reporter = reporter
+
+    def _auth_recheck_sec(self) -> float:
+        """자격 재확인 최소 간격(초). 0 이하면 재확인 안 함(``jira.auth_recheck_sec``)."""
+        return float(getattr(self.config.jira, "auth_recheck_sec", 1800) or 0)
+
+    def _note_auth(self, ok: bool, detail: str = "") -> None:
+        """자격 확인 결과를 로그 + 진단에 반영(상태가 바뀔 때만 로그를 남긴다)."""
+        if ok:
+            if self._auth_broken:
+                log.info("Jira 자격 회복 확인 — 폴링이 다시 티켓을 읽을 수 있습니다")
+        elif not self._auth_broken:
+            log.error(
+                "⚠️ Jira 자격이 거부됩니다(%s) — JQL 검색은 오류가 아니라 **빈 결과**를 "
+                "돌려주므로 겉으로는 '할 일 없음'처럼 보이지만 실제로는 아무 티켓도 "
+                "읽지 못합니다. jira.watcher_token_file 의 토큰과 jira.watcher_email 을 "
+                "갱신하세요.", detail or "사유 불명",
+            )
+        self._auth_broken = not ok
+        reporter = self._auth_reporter
+        if reporter is None:
+            return
+        try:
+            reporter(ok, detail)
+        except Exception:  # noqa: BLE001 — 보고 실패가 폴 루프를 죽이지 않게 격리
+            log.warning("Jira 자격 상태 보고 실패(격리)")
+
+    def _verify_auth_if_due(self, now_ts: float, *, saw_issues: bool) -> None:
+        """빈 폴이 **인증 실패의 위장**인지 주기적으로 확인한다.
+
+        Jira Cloud 실측:
+            ``GET  /rest/api/3/myself``     → 401
+            ``POST /rest/api/3/search/jql`` → 200 ``{"issues": [], "isLast": true}``
+
+        즉 자격이 틀려도 검색은 성공한 척한다. 응답 **형태**로는 구별할 수 없으므로
+        (:mod:`app.jira_client` 가 이미 잡는 "200 + HTML" 과 달리 이건 정상 JSON 이다)
+        별도의 읽기 요청으로만 벗길 수 있다.
+
+        빈도 판단(``jira.auth_recheck_sec``, 기본 30분):
+            - **티켓이 하나라도 돌아온 폴은 그 자체가 자격 증거**다 → 요청 없이 OK 로 기록.
+            - 빈 폴에서만, 그것도 재확인 주기가 지났을 때만 ``/myself`` 를 부른다. 매 폴
+              (기본 60초)마다 부르면 하루 1,440회가 늘지만 30분 간격이면 48회다. 그
+              대가는 최악의 감지 지연 30분인데, 지금은 **영원히 감지되지 않는다.**
+
+        예외는 전부 삼킨다 — 이 확인은 *진단*이지 폴링의 전제 조건이 아니다.
+        """
+        if saw_issues:
+            self._auth_checked_ts = now_ts
+            self._note_auth(True, "검색 결과로 확인(티켓 수신)")
+            return
+        interval = self._auth_recheck_sec()
+        if interval <= 0:
+            return
+        if self._auth_checked_ts and (now_ts - self._auth_checked_ts) < interval:
+            return
+        myself = getattr(self.jira, "myself", None)
+        if myself is None:
+            return                      # 이 클라이언트로는 확인할 수단이 없다(대역 등)
+        self._auth_checked_ts = now_ts
+        try:
+            myself()
+        except Exception as exc:  # noqa: BLE001 — 진단 호출이 폴 루프를 죽이지 않게 격리
+            # ⚠️ 예외 **본문**을 싣지 않는다(응답에 뭐가 섞여 올지 모른다). 상태코드만.
+            code = getattr(exc, "status_code", None)
+            self._note_auth(False, f"HTTP {code}" if code else type(exc).__name__)
+        else:
+            self._note_auth(True, "/myself 확인")
+
     # ------------------------------------------------------------------
 
     def _emit(self, user, job) -> None:
-        """해석된 잡을 하류로 방출 — 센트럴 신경로면 라이브 세션 주입, 아니면 enqueue.
+        """해석된 잡을 프랙탈 센트럴 라이브 세션에 이벤트로 주입(유일 실행 경로).
 
-        프랙탈 P2 주입 seam(설계 §3.1): ``run.fractal_central`` ON 이고 센트럴 세션
-        핸들(``_central_sink``)이 주입돼 있으면, 스케줄러 큐(``dispatcher.enqueue``) **대신**
-        상주 센트럴 라이브 세션에 이벤트로 주입한다(센트럴 에이전트가 레포락 consult →
-        사용자별 서브 스폰/이어위임 → 완료-리포트 수신 시 gchat). 그 외(플래그 OFF/핸들
-        미주입)면 오늘과 **byte-for-byte 동일**하게 enqueue 한다.
+        프랙탈 주입 seam(설계 §3.1): 공용 :mod:`app.central_dispatch` seam 으로 상주 센트럴
+        라이브 세션에 이벤트를 주입한다(센트럴 에이전트가 레포락 consult → 사용자별 서브
+        스폰/이어위임 → 완료-리포트 수신 시 알림 채널 상신). 재오픈/재배정/rerun 도 같은
+        seam 으로 수렴한다(진입점 통일).
 
-        ⚠️ 안전 폴백: 플래그 ON 이어도 주입이 실패하면(파이프 깨짐 등) 유실을 막기 위해
-        스케줄러 enqueue 로 폴백한다(잡을 떨어뜨리지 않는다). 재사용 원칙상 job.user 태깅
-        시맨틱은 dispatcher.enqueue 와 동일하게 유지한다.
+        ⚠️ 레거시 은퇴 완료: 프랙탈이 **유일 실행 경로**다(fractal-OFF 폴백 제거됨).
+        주입이 실패해도(파이프 깨짐 등) 구 경로(``dispatcher.enqueue`` → 스케줄러 → 워커
+        폴링)로 **폴백하지 않는다** — 그 소비자는 이제 존재하지 않으며, 폴백은 이중-체인·
+        이중-통지의 근원이었다. 실패면 dedup claim 을 되돌리고 :class:`CentralInjectFailed`
+        를 올려 폴 루프가 다음 사이클에 재시도하게 한다(잡 유실 없음 — 재트리거 가능).
+
+        ``central_active`` 가드는 이 배포의 프랙탈-ON 게이트(sink 주입 + 지속 세션 성립)이며
+        항상 참이다 — 유일하게 거짓일 수 있는 오설정 배포에선 방출을 조용히 건너뛴다(다음
+        폴에서 재시도).
         """
-        sink = self._central_sink
-        if sink is not None and _central_enabled(self.config):
-            try:
-                if sink.inject_event(job):
-                    log.info("central-inject: %s → user=%s repos=%s",
-                             getattr(job, "ticket", ""), user.username, job.target_repos)
-                    # 관측성 뼈대(A.1): 프랙탈 잡을 JobQueue 에 queued 로 기록(대시보드 가시성).
-                    # 구 경로 enqueue 를 타지 않으므로 여기서 명시 기록한다(이중 생성 없음 —
-                    # inject 성공 분기에서만, meta.fractal 표식으로 스케줄러 디스패치 제외).
-                    self._record_fractal_job(job)
-                    return
-                log.warning("central-inject 실패 → enqueue 폴백: %s", getattr(job, "ticket", ""))
-            except Exception:  # noqa: BLE001 — 주입 예외가 폴 루프를 죽이지 않게 격리 + 폴백
-                log.exception("central-inject 예외 → enqueue 폴백: %s", getattr(job, "ticket", ""))
-        self.dispatcher.enqueue(user.username, job)
-
-    def _record_fractal_job(self, job) -> None:
-        """프랙탈 잡을 JobQueue(같은 store)에 queued 로 기록 — 대시보드 최소 가시성 뼈대(A.1).
-
-        ``meta.fractal=True`` 표식을 달아 구 경로 스케줄러가 이 잡을 디스패치하지 않게 한다
-        (관측성 레코드일 뿐 — 실행은 상주 센트럴 세션이 조율). enqueue 는 티켓 멱등이라
-        재트리거로 이미 있으면(예: running) 덮어쓰지 않는다. best-effort — 기록 실패가 폴
-        루프를 죽이지 않는다.
-        """
-        jq = self._job_queue
-        if jq is None:
-            return
-        try:
-            job.meta[q.FRACTAL_META_KEY] = True
-            if not job.status:
-                job.status = q.QUEUED
-            jq.enqueue(job)
-        except Exception:  # noqa: BLE001 — 관측성 기록 실패가 방출/폴을 막지 않는다
-            log.warning("fractal 잡 레코드 생성 실패(격리): %s", getattr(job, "ticket", ""))
+        if central_dispatch.central_active(self.config, self._central_sink):
+            central_dispatch.emit_to_central(
+                self.config, self._central_sink, self._job_queue, self.gate, job)
+            log.info("central-inject: %s → user=%s repos=%s",
+                     getattr(job, "ticket", ""), user.username, job.target_repos)
 
     # ------------------------------------------------------------------
 
@@ -352,15 +413,41 @@ class Poller:
             if u.enabled and u.jira_account_id
         ]
 
+    def _scope_union(self) -> list:
+        """enabled 사용자 전원의 유효 프로젝트 범위 합집합(:mod:`app.scope`)."""
+        return scope_mod.union_projects(self.registry, self.config)
+
+    def _project_clause_or_none(self, where: str) -> Optional[str]:
+        """``project in (...)`` 절. 합집합이 비면 **None** + 왜 안 도는지 로그.
+
+        합집합이 비었다는 것은 "아무도 프로젝트를 지정하지 않았고 인스턴스 기본값
+        (``jira.project``)도 없다"는 뜻이다. 예전에는 이때 project 절이 통째로 빠져
+        **등록 사용자에게 할당된 전 프로젝트** 티켓을 긁었다 — 조용히 넓어지는, 가장 나쁜
+        실패다. 지금은 JQL 을 아예 만들지 않고 이유를 남긴다(조용히 아무것도 안 하면
+        원인 추적이 불가능하다).
+        """
+        clause = scope_mod.project_clause(self._scope_union())
+        if not clause:
+            log.warning(
+                "%s: 감시할 프로젝트가 없어 JQL 을 만들지 않습니다 — 등록(enabled) 사용자의 "
+                "scope.projects 가 모두 비어 있고 인스턴스 기본값 jira.project 도 비어 "
+                "있습니다. config.yaml 의 jira.project(또는 jira.projects)를 채우거나 "
+                "관리 UI 온보딩에서 사용자 범위를 지정하세요.", where)
+            return None
+        return clause
+
     def build_jql(self) -> Optional[str]:
-        """트리거 조건 + watermark로 JQL 구성. enabled 사용자가 없으면 None."""
+        """트리거 조건 + watermark로 JQL 구성.
+
+        enabled 사용자가 없거나 **전 사용자 scope 합집합이 비면** None(폴링 안 함).
+        """
         account_ids = self._enabled_account_ids()
         if not account_ids:
             return None
-        clauses = []
-        project = getattr(self.config.jira, "project", "")
-        if project:
-            clauses.append(f"project = {project}")
+        project_clause = self._project_clause_or_none("build_jql")
+        if project_clause is None:
+            return None
+        clauses = [project_clause]
         ids = ", ".join(f'"{a}"' for a in account_ids)
         clauses.append(f"assignee in ({ids})")
         statuses = list(getattr(self.config.match, "statuses", []) or [])
@@ -385,11 +472,11 @@ class Poller:
         account_ids = self._enabled_account_ids()
         if not account_ids:
             return None
+        project_clause = self._project_clause_or_none("build_assignee_change_jql")
+        if project_clause is None:
+            return None
         ids = ", ".join(f'"{a}"' for a in account_ids)
-        clauses = []
-        project = getattr(self.config.jira, "project", "")
-        if project:
-            clauses.append(f"project = {project}")
+        clauses = [project_clause]
         clauses.append(f"assignee in ({ids})")
         statuses = list(getattr(self.config.match, "statuses", []) or [])
         if statuses:
@@ -483,14 +570,20 @@ class Poller:
             self.gate.release(key)
             log.info("reconcile(%s) → pending 드롭 + claim 해제: %s", reason, key)
 
-    def resolve_user(self, issue: dict):
-        """이슈 담당자 account_id → enabled 등록 사용자(없으면 None)."""
-        fields = (issue or {}).get("fields", {}) or {}
-        assignee = fields.get("assignee") or {}
-        account_id = assignee.get("accountId") if isinstance(assignee, dict) else None
-        if not account_id:
-            return None
-        return self.registry.get_by_account_id(account_id)
+    def resolve_user(self, issue: dict, key: str = ""):
+        """이슈 담당자 account_id → enabled 등록 사용자 **+ 프로젝트 범위 게이트**.
+
+        ⚠️ 매핑과 게이트는 **한 함수 안에** 있다(:func:`app.scope.resolve_user_in_scope`).
+        JQL 은 전 사용자 scope 의 *합집합* 으로 던지므로, 남의 프로젝트 티켓이 결과에
+        섞여 들어오는 것은 정상이다 — 그것을 걸러 내는 자리가 바로 여기다. 폴러·웹훅·
+        워처가 전부 이 수렴점을 쓴다.
+
+        ``key`` 는 이슈에 최상위 ``key`` 가 없는 호출(웹훅 재검증 응답 등)을 위한 보조
+        입력이다. 범위 밖/미등록/비활성이면 None.
+        """
+        user, _reason = scope_mod.resolve_user_in_scope(
+            self.registry, self.config, key or (issue or {}).get("key", ""), issue)
+        return user
 
     @staticmethod
     def _assignee_account_id(issue: dict) -> Optional[str]:
@@ -528,15 +621,49 @@ class Poller:
         if new_rec.username == job.user:
             return False  # 같은 소유자(중복 트리거) → 일반 스킵
         # 담당자 변경 감지 — 핸드오프/재배정으로 라우팅.
-        enabled = bool(new_rec.enabled)
+        # ⚠️ 새 담당자 Y 가 enabled 라도 **이 티켓의 프로젝트가 Y 의 범위 밖**이면 Y 에게
+        # 실행을 넘기지 않는다 — 비활성과 동일하게 다뤄 park 시킨다(실행 중 잡은
+        # checkpoint 로 보존된다). 그러지 않으면 재배정이 per-user scope 를 우회하는
+        # 구멍이 된다.
+        in_scope = scope_mod.in_user_scope(key, issue, new_rec, self.config)
+        if new_rec.enabled and not in_scope:
+            log.info("재배정 대상이 범위 밖 — park 로 처리: %s (user=%s, 프로젝트=%s)",
+                     key, new_rec.username, scope_mod.project_key_of(key, issue) or "?")
+        enabled = bool(new_rec.enabled) and in_scope
         mode = _mode_for(new_rec, job.target_repos)
+        # REDISPATCH(큐 대기분 재-소유) 는 정상 폴링 티켓과 **동일 프랙탈 seam** 으로 방출한다
+        # (재-소유된 슬롯을 센트럴 세션에 주입 — 구 tick 으로 running 만들어 스턱나지 않게).
+        # fractal-OFF 폴백 은퇴 완료: 훅을 항상 주입한다(레거시 tick 재-dispatch 분기 제거).
         signal = scheduler.reassign_or_handoff(
-            key, new_rec.username, enabled=enabled, autonomy_mode=mode)
+            key, new_rec.username, enabled=enabled, autonomy_mode=mode,
+            on_redispatch=self._central_redispatch)
         if signal == sched.REASSIGN_SAME_OWNER or signal == sched.REASSIGN_NO_JOB:
             return False  # 경계 재확인(잡 소멸 등) → 일반 스킵
         log.info("담당자 변경 감지: %s (X=%s → Y=%s, enabled=%s) → %s",
                  key, job.user, new_rec.username, enabled, signal)
         return True
+
+    def _central_redispatch(self, ticket: str) -> None:
+        """재배정(REDISPATCH)로 Y에게 재-소유된 큐 대기 슬롯을 프랙탈 센트럴 세션에 주입.
+
+        ``scheduler.reassign_or_handoff`` 이 락 밖에서 호출하는 훅. 슬롯은 이미
+        ``jobs.reassign`` 으로 queued 재초기화됐다. 리셋~주입 윈도우에서 구 경로 tick 이 이
+        잡을 비-프랙탈로 오인해 dispatch 하지 못하게 **먼저 fractal 표식**을 찍고
+        (mark_fractal), 정상 폴링 티켓과 동일 seam(emit_to_central)으로 주입한다. 주입 실패는
+        :class:`CentralInjectFailed` 로 전파돼 상위 폴/웹훅 루프가 재시도한다.
+
+        ``central_active`` 가 거짓인 오설정 배포에서는 조용히 건너뛴다 — 방출 seam
+        (:meth:`_emit`)·재오픈 seam 과 같은 게이트다. 여기서만 예외를 던지면 재배정이
+        오설정 배포에서 폴 루프를 깨뜨린다(잡은 큐 대기로 남아 다음 기회를 기다린다).
+        """
+        if not central_dispatch.central_active(self.config, self._central_sink):
+            return
+        central_dispatch.mark_fractal(self._job_queue, ticket)
+        job = self.dispatcher.scheduler.jobs.get(ticket)
+        if job is None:
+            return
+        central_dispatch.emit_to_central(
+            self.config, self._central_sink, self._job_queue, self.gate, job)
 
     def _make_job(self, key: str, issue: dict, user, target_repos: Optional[list] = None) -> Job:
         return build_job(self.config, key, issue, user, target_repos=target_repos)
@@ -654,13 +781,20 @@ class Poller:
             log.info("enabled 사용자가 없어 폴링 skip")
             return 0
 
+        # 두 번째 공통 게이트: 감시할 프로젝트가 하나도 없으면 **JQL 을 던지지 않는다**
+        # (예전에는 project 절 없이 전 프로젝트를 긁었다). 이유는 로그로 드러난다.
+        if self._project_clause_or_none("poll_once") is None:
+            return 0
+
         # assignee 워터마크 전진 기준(폴 시각). 폴 *시작* 시각으로 고정해, 폴 도중
         # 발생한 담당자-변경은 반드시 다음 폴에서 잡히게 한다(_jql_time 분 단위
         # 절삭이 경계를 과거로 당겨 gap 대신 overlap → dedup가 흡수).
         poll_now = self._now()
 
+        # ``project`` 를 함께 받는다 — 범위 게이트가 티켓의 프로젝트 키를 이슈 키 접두사
+        # 추정이 아니라 응답에서 직접 읽게 하기 위해서다(:func:`app.scope.project_key_of`).
         fields = ["assignee", "status", "created", "updated", "summary",
-                  "components", "labels"]
+                  "components", "labels", "project"]
 
         # (A) 신규-티켓 경로 — created 워터마크 + ORDER BY created ASC (현행 유지).
         jql_created = self.build_jql()
@@ -683,6 +817,9 @@ class Poller:
 
         # 이 폴 사이클 기준 쿨다운 판정 시각(epoch초). 폴 시작 시각으로 고정한다.
         now_ts = poll_now.timestamp()
+
+        # 축0: 빈 결과가 "할 일 없음"인지 "자격 만료"인지 주기적으로 가른다(위 메서드 참조).
+        self._verify_auth_if_due(now_ts, saw_issues=bool(issues_a or issues_b))
         throttled = self._resolution_mode() == "llm" and self._ai_cd.is_throttled(now_ts)
 
         # LLM 레포 해석용 REPO-MAP은 **신규 티켓이 있을 때만** 한 번 로드한다
@@ -721,10 +858,10 @@ class Poller:
                 self._handle_reassignment(key, issue)
                 continue
 
-            user = self.resolve_user(issue)
+            user = self.resolve_user(issue, key)
             if user is None:
-                # 미등록/비활성 → claim 되돌림(나중에 enabled 되면 재트리거 가능)
-                log.info("매핑 실패(미등록/비활성) — skip & release: %s", key)
+                # 미등록/비활성/범위 밖 → claim 되돌림(나중에 enabled·범위 포함되면 재트리거).
+                log.info("매핑 실패(미등록/비활성/범위 밖) — skip & release: %s", key)
                 self.gate.release(key)
                 continue
 
@@ -784,8 +921,10 @@ class Poller:
         Returns:
             디스패치했으면 True, (미조회/상태 불일치/중복/미매핑/취소·추적제외) 스킵이면 False.
         """
+        # ``project`` 를 함께 받는다 — 범위 게이트가 티켓의 프로젝트 키를 이슈 키 접두사
+        # 추정이 아니라 응답에서 직접 읽게 하기 위해서다(:func:`app.scope.project_key_of`).
         fields = ["assignee", "status", "created", "updated", "summary",
-                  "components", "labels"]
+                  "components", "labels", "project"]
         try:
             issue = self.jira.get_issue(key, fields=fields)
         except Exception as exc:  # noqa: BLE001 — 재검증 실패는 스킵(폴러 백스톱이 흡수)
@@ -832,10 +971,10 @@ class Poller:
             log.info("webhook 트리거 skip(상태 불일치 %s): %s", status_name, key)
             return False
 
-        user = self.resolve_user(issue)
+        user = self.resolve_user(issue, key)
         if user is None:
-            # 미등록/비활성 → claim 되돌림(나중에 enabled 되면 재트리거 가능).
-            log.info("webhook 트리거 매핑 실패(미등록/비활성) — release: %s", key)
+            # 미등록/비활성/범위 밖 → claim 되돌림(나중에 enabled·범위 포함되면 재트리거).
+            log.info("webhook 트리거 매핑 실패(미등록/비활성/범위 밖) — release: %s", key)
             self.gate.release(key)
             return False
 
@@ -912,11 +1051,11 @@ class Poller:
                     self._persist_pending()
                 continue
 
-            user = self.resolve_user(issue)
+            user = self.resolve_user(issue, key)
             if user is None:
-                # 담당자가 더 이상 등록/enabled 아님 → claim 되돌리고 pending 제거
-                # (나중에 다시 enabled 되면 재트리거 가능).
-                log.info("drain: 매핑 실패(미등록/비활성) — release+drop: %s", key)
+                # 담당자가 더 이상 등록/enabled 아니거나 티켓이 그 사람 범위 밖 → claim
+                # 되돌리고 pending 제거(나중에 다시 enabled·범위 포함되면 재트리거 가능).
+                log.info("drain: 매핑 실패(미등록/비활성/범위 밖) — release+drop: %s", key)
                 self.gate.release(key)
                 self._drop_pending(key)
                 continue

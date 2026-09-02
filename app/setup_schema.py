@@ -11,9 +11,15 @@
 이 모듈이 하는 일 / 하지 않는 일:
     - **한다**: 항목의 키 경로·타입·필수여부·조건부 필수·기본값·설명·시크릿 여부·
       하위호환 레거시 키를 선언한다. 조회 헬퍼(:func:`iter_fields` 등)만 제공한다.
-    - **하지 않는다**: 검증기·대화형 온보딩 CLI·config.yaml 렌더러를 구현하지 않는다
-      (후속 작업). 이 모듈은 **순수 선언**이며 I/O·전역 상태·부작용이 없다. 후속이
-      그대로 얹을 수 있도록 구조와 의도만 남긴다.
+    - **하지 않는다**: 검증·렌더링·진단을 구현하지 않는다. 이 모듈은 **순수 선언**이며
+      I/O·전역 상태·부작용이 없다. 그 선언을 **강제**하는 쪽은 따로 있다:
+      :mod:`app.setup_validate`(검증) · :mod:`app.setup_render`(config.yaml 생성) ·
+      :mod:`app.setup_doctor`(실측 진단) · :mod:`app.setup`(얇은 CLI 껍데기).
+      그리고 그 앞자리에서 **답을 어디서 얻는가**를 맡는 :mod:`app.setup_discover`(조회)
+      가 있다 — 인스턴스마다 다른 값(커스텀필드 id·상태·전이)은 사람이 옮겨 적는 대신
+      실제 인스턴스를 조회해 고르게 한다.
+      (대화형 온보딩 에이전트·웹 온보딩 확장은 여전히 후속이며, 그것들도 판정은
+      위 라이브러리에 위임한다 — 게이트가 두 벌이 되면 반드시 갈라진다.)
 
 정본 관계:
     - 이 스키마 = "무엇을 묻는가"의 정본.
@@ -50,6 +56,12 @@ class FieldType(str, Enum):
     ENUM = "enum"                 # choices 중 하나
     STRING_LIST = "string_list"   # 문자열 리스트(YAML 시퀀스)
     STRING_MAP = "string_map"     # 문자열→문자열 매핑(YAML 매핑)
+    #: 이름 목록이되 **id 를 함께 달 수 있는** 리스트 — 각 원소는 ``"이름"`` 또는
+    #: ``{id: "...", name: "..."}``. Jira 상태·전이가 여기 해당한다: 화면에 보이는 표시명과
+    #: API 의 id/name 이 어긋날 수 있고, JQL 은 name 으로 거는데 전이는 id 로 건다. 그래서
+    #: 설치 관문의 ``discover`` 가 **둘 다** 적어 주고, 런타임 소비처는 예전처럼 이름만
+    #: 본다. 문자열만 준 옛 설정도 그대로 읽는다(하위호환).
+    NAMED_REF_LIST = "named_ref_list"
 
 
 @dataclass(frozen=True)
@@ -105,6 +117,14 @@ class SchemaField:
         secret_ref: 값이 시크릿 **파일 참조**(``secrets.base_dir`` 상대) → 기록해도 된다.
         legacy_keys: 하위호환으로 계속 **읽는** 옛 키 경로들. 신규 키가 있으면 신규 우선.
         example: 예시 값(온보딩 placeholder·example.yaml 용).
+        pattern: (문자열·ENUM 전용) 값이 만족해야 하는 정규식 **원문**. 검증기
+            (:func:`app.setup_validate.validate_answers`)가 **전체 일치**(fullmatch)로
+            본다 — 부분 일치를 허용하면 "앞부분만 맞는" 값이 통과하고, 그런 값이
+            경로·컨테이너 이름 같은 자리로 흘러가면 그게 곧 취약점이다. ``choices`` 로는
+            말할 수 없는 **모양 제약**(식별자·키 형식)을 선언하는 자리다.
+        pattern_hint: 그 모양 제약을 사람 말로 설명한 한 줄. ⚠️ 거부 메시지는 **입력값을
+            되비추지 않으므로**(:func:`app.setup_validate.describe_format_violation`)
+            무엇을 고쳐야 하는지는 오직 이 문구가 알려 준다 — 비워 두지 말 것.
     """
 
     key: str
@@ -118,6 +138,9 @@ class SchemaField:
     secret_ref: bool = False
     legacy_keys: Tuple = ()
     example: Any = None
+    #: 모양 제약 — 정규식 원문(전체 일치)과 사람 말 설명. 위 Attributes 참조.
+    pattern: str = ""
+    pattern_hint: str = ""
 
 
 @dataclass(frozen=True)
@@ -145,24 +168,32 @@ class SchemaSection:
 #: 갈라지지 않게). 우선순위는 config 파서 문서 참조:
 #: 명시 ``deploy.*`` > 레거시 키 > 프로파일 파생 > 코드 기본값.
 PROFILE_DEFAULTS: dict = {
-    # 개발자 노트북 — central 도 워커도 같은 로컬 도커. 시크릿은 로컬 디렉토리(env SECRETS_DIR).
+    # 개발자 노트북 — compose 를 그대로 띄운다(Docker Desktop 포함). 시크릿만 다르다:
+    # 로컬 디렉토리(env SECRETS_DIR)로 두고, 도커 접근은 서버 프로파일과 **같은**
+    # socket-proxy 경유다.
+    # ⚠️ 예전 값은 ``unix:///var/run/docker.sock`` 이었다. 바꾼 이유:
+    #   (1) 이 리포가 배포하는 docker-compose.yml 은 socket-proxy 를 **기본으로** 선언하고
+    #       central 을 거기에 붙인다. 로컬만 소켓 직결로 파생하면 *배포되는 compose 와
+    #       모순되는 config* 가 나오고(실제로 설치 리허설에서 그렇게 나왔다), 설치자는
+    #       그걸 맞추려고 compose 를 손으로 고치게 된다 — 틀리기 쉽고 틀려도 조용하다.
+    #   (2) 소켓 직결은 central 에 호스트 root 동치 권한을 준다(SECURITY.md §4). 기본값이
+    #       가장 넓은 권한이어야 할 이유가 없다.
+    #   소켓 직결은 사라지지 않았다 — ``deploy.docker_host`` 를 **명시**하면 그게 이긴다
+    #   (INSTALL.md §3 의 "고급" 대안).
     "local": {
-        "docker_host": "unix:///var/run/docker.sock",
-        "host_deploy_dir": "",
+        "docker_host": "tcp://socket-proxy:2375",
         "secrets_base_dir": "",
         "workspace_volume": "jad-workspace",
     },
     # 클라우드 VM(EC2/GCE 등) — compose 로 socket-proxy 경유(도커 소켓 직결 금지).
     "cloud_vm": {
         "docker_host": "tcp://socket-proxy:2375",
-        "host_deploy_dir": "",
         "secrets_base_dir": "/run/secrets",
         "workspace_volume": "jad-workspace",
     },
     # 사내 온프렘 서버 — cloud_vm 과 같은 형태(다른 것은 네트워크·정책이지 이 값들이 아니다).
     "onprem_server": {
         "docker_host": "tcp://socket-proxy:2375",
-        "host_deploy_dir": "",
         "secrets_base_dir": "/run/secrets",
         "workspace_volume": "jad-workspace",
     },
@@ -176,11 +207,18 @@ DEPLOY_PROFILES: Tuple = tuple(PROFILE_DEFAULTS.keys())
 #: 뿐이다). ``jira.custom_fields`` 는 이 논리 키로 매핑을 받는다 — 온보딩은 이 테이블로
 #: 항목별 질문을 렌더하면 된다. 값이 비면 :mod:`app.jira_client` 의 모듈 상수를 그대로
 #: 쓴다(하위호환 — 기존 배포는 아무것도 안 바꿔도 오늘과 동일하게 동작).
+#:
+#: ⚠️ ``actual_start``·``actual_end`` 의 기본값은 **빈 값(미설정)** 이다. 이 둘은 Jira
+#: 표준 필드가 아니라 조직 고유 워크플로우 필드라 "대체로 맞는 id" 가 존재하지 않는다
+#: (실측: 옛 기본값 ``customfield_10187``/``customfield_10186`` 은 다른 인스턴스에 아예
+#: 없었다). 미설정이면 완료 전이에 그 필드를 **보내지 않으며**, 워크플로우가 요구하면
+#: Jira 가 "필수입니다"라고 정확히 말해 준다 — 남의 id 를 보내 400 을 맞는 것보다 낫다.
+#: 자기 값은 ``python -m app.setup discover --only custom_fields`` 로 실측해 채운다.
 JIRA_CUSTOM_FIELD_KEYS: Tuple = (
     ("start_date", "착수 시 필수인 '시작날짜' 필드 id", "customfield_10015"),
     ("due_date", "착수 시 필수인 '마감일' 필드 id", "duedate"),
-    ("actual_start", "완료 전이 시 필수인 '실제 시작일' 필드 id", "customfield_10187"),
-    ("actual_end", "완료 전이 시 필수인 '실제 종료일' 필드 id", "customfield_10186"),
+    ("actual_start", "완료 전이 시 필수인 '실제 시작일' 필드 id(없으면 비워 둔다)", ""),
+    ("actual_end", "완료 전이 시 필수인 '실제 종료일' 필드 id(없으면 비워 둔다)", ""),
 )
 
 #: 지원 forge 종류.
@@ -321,14 +359,42 @@ _JIRA = SchemaSection(
             key="jira.project",
             type=FieldType.STRING,
             required=True,
-            description="감시할 프로젝트 키. 폴러 JQL 의 project 절이 된다.",
+            description=(
+                "감시할 **대표** 프로젝트 키. 폴러 JQL 의 project 절에 항상 포함되고, "
+                "온보딩에서 사용자가 자기 범위를 비워 두면 상속하는 기본값이기도 하다. "
+                "여러 프로젝트를 감시하려면 아래 ``jira.projects`` 에 나머지를 적는다."
+            ),
             example="PROJ",
+        ),
+        SchemaField(
+            key="jira.projects",
+            type=FieldType.STRING_LIST,
+            default=[],
+            description=(
+                "**추가** 감시 프로젝트 키 목록(대표 프로젝트는 항상 포함되므로 여기 다시 "
+                "적을 필요 없다). 사람마다 담당 프로젝트가 다르면 여기 전부 적어 두고 "
+                "관리 UI 온보딩에서 사용자별 범위(``scope.projects``)를 좁힌다 — 폴러는 "
+                "전 사용자 범위의 **합집합**으로 JQL 을 던지고, 담당자 매핑 단계에서 "
+                "그 사람의 범위 밖 티켓을 버린다."
+            ),
+            example=["OTHER"],
         ),
         SchemaField(
             key="jira.poll_interval_sec",
             type=FieldType.INT,
             default=60,
             description="폴링 주기(초). 웹훅이 켜져 있으면 폴링은 백스톱이라 짧을 필요가 없다.",
+        ),
+        SchemaField(
+            key="jira.auth_recheck_sec",
+            type=FieldType.INT,
+            default=1800,
+            description=(
+                "감시 토큰 **생존 확인** 주기(초). 0 이면 끈다. Jira Cloud 는 자격이 "
+                "틀려도 JQL 검색에 200 + 빈 배열을 주므로(``/myself`` 만 401) 토큰이 "
+                "만료되면 시스템이 영원히 '할 일 없음' 상태로 조용히 돈다 — 빈 폴에서 "
+                "이 주기마다 자격을 다시 확인해 로그·``/api/doctor`` 에 드러낸다."
+            ),
         ),
         SchemaField(
             key="jira.watcher_token_file",
@@ -341,29 +407,38 @@ _JIRA = SchemaSection(
         SchemaField(
             key="jira.watcher_email",
             type=FieldType.STRING,
-            default="",
-            description="감시 계정 이메일(Basic auth actor). 비우면 env ``JIRA_WATCHER_EMAIL`` 폴백.",
+            required=True,
+            description=(
+                "감시 계정 이메일. Jira Cloud 의 Basic auth 는 **(이메일, API 토큰) 쌍**이라 "
+                "토큰만으로는 인증되지 않는다 — 토큰을 발급받은 그 Atlassian 계정의 "
+                "이메일을 적는다. env ``JIRA_WATCHER_EMAIL`` 로 줘도 되지만, 그 경우에도 "
+                "설치 시점에는 **여기서 한 번 확인**한다(둘 다 없으면 폴러가 401 로 죽는다)."
+            ),
+            example="bot@your-org.example",
         ),
         SchemaField(
             key="jira.trigger_statuses",
-            type=FieldType.STRING_LIST,
+            type=FieldType.NAMED_REF_LIST,
             required=True,
             default=[],
             legacy_keys=("match.statuses",),
             description=(
                 "신규 착수(트리거) 상태 화이트리스트. **이 워크플로우의 상태 이름 그대로** "
-                "적는다(언어·명명 규칙이 조직마다 다르다)."
+                "적는다(언어·명명 규칙이 조직마다 다르다). ``discover`` 가 실제 존재하는 "
+                "상태를 ``{id, name}`` 으로 뽑아 주므로 손으로 타이핑하지 않는 것이 좋다 — "
+                "표시명과 API 의 name 이 어긋나면 폴러는 **조용히 아무 티켓도 못 찾는다**."
             ),
             example=["해야 할 일"],
         ),
         SchemaField(
             key="jira.cancel_statuses",
-            type=FieldType.STRING_LIST,
+            type=FieldType.NAMED_REF_LIST,
             default=["취소됨"],
             legacy_keys=("match.cancel_statuses",),
             description=(
                 "'취소' 상태 이름들. 이 상태로 들어온 티켓은 추적 잡을 즉시 취소한다. "
-                "명시적으로 빈 리스트를 주면 기능을 끈다(기본값은 하위호환 유지값)."
+                "명시적으로 빈 리스트를 주면 기능을 끈다(기본값은 하위호환 유지값). "
+                "``trigger_statuses`` 와 같이 ``{id, name}`` 형태도 받는다."
             ),
             example=["취소됨"],
         ),
@@ -410,12 +485,85 @@ _JIRA = SchemaSection(
         ),
         SchemaField(
             key="jira.done_transition_names",
-            type=FieldType.STRING_LIST,
+            type=FieldType.NAMED_REF_LIST,
             default=["완료", "Done"],
             description=(
                 "id 대신 **이름**으로 완료 전이를 식별할 때의 후보 목록. id 를 모르는 "
-                "설치자가 그대로 쓸 수 있게 하는 폴백 경로."
+                "설치자가 그대로 쓸 수 있게 하는 폴백 경로. ``{id, name}`` 형태로 주면 "
+                "``done_transition_id`` 가 비어 있을 때 그 id 를 그대로 쓴다(``discover`` "
+                "가 실측한 전이를 그 형태로 적어 준다 — 이름과 id 를 따로 관리하지 않게)."
             ),
+        ),
+    ),
+)
+
+_WEBHOOK = SchemaSection(
+    name="webhook",
+    title="Jira 웹훅 수신(선택)",
+    description=(
+        "Jira 가 이벤트를 밀어 넣는 경로(``POST /webhook/jira``). 켜면 폴링 주기를 "
+        "기다리지 않고 즉시 착수한다(폴링은 백스톱으로 남는다). ⚠️ 이 엔드포인트는 "
+        "**자율 실행의 방아쇠**라 무인증으로 열면 그대로 RCE 표면이 된다 — 그래서 수신 "
+        "토큰 참조가 없으면 엔드포인트가 503 으로 거부한다."
+    ),
+    optional=True,
+    fields=(
+        SchemaField(
+            key="webhook.enabled",
+            type=FieldType.BOOL,
+            default=True,
+            description=(
+                "웹훅 수신 엔드포인트를 열지. 끄면 폴링만으로 동작한다(기능은 그대로, "
+                "반응이 ``jira.poll_interval_sec`` 만큼 늦어질 뿐)."
+            ),
+        ),
+        SchemaField(
+            key="webhook.secret_ref",
+            type=FieldType.STRING,
+            secret_ref=True,
+            required_if=RequiredIf("webhook.enabled", truthy=True),
+            # ⚠️ 스키마 기본값을 두지 **않는다**. 파서(app/config.py)에는 하위호환용 기본
+            # 경로가 있지만, 여기에 같은 기본값을 두면 "답하지 않아도 채워진 것"이 되어
+            # 조건부 필수가 영원히 발동하지 않는다 — 그러면 토큰 없이 웹훅을 켠 설정이
+            # 게이트를 통과하고, 운영에서 503 으로만 드러난다.
+            default=None,
+            description=(
+                "Jira 웹훅 수신 토큰이 담긴 **파일의 secrets.base_dir 상대 참조**(값이 "
+                "아니다). Jira 쪽 Automation/웹훅이 헤더 ``X-Jira-Webhook-Token`` 또는 "
+                "쿼리 ``?token=`` 으로 같은 값을 보내야 하며, 상수시간 비교로 검사한다. "
+                "값은 아무 고엔트로피 문자열이면 된다(예: ``openssl rand -hex 32``)."
+            ),
+            example="service/jira-webhook",
+        ),
+    ),
+)
+
+_DLC_META = SchemaSection(
+    name="dlc_meta",
+    title="dlc-meta 레포(사이클로그·REPO-MAP)",
+    description=(
+        "central 이 사이클로그를 커밋·push 하고(단일 라이터) 레포 리졸버가 REPO-MAP 을 "
+        "읽는 인스턴스 레포. ⚠️ **설치자가 손으로 적을 값이 아니다** — 이 시스템의 설치는 "
+        "``ai-dlc-orchestrator`` 프레임워크의 SETTER 가 dlc-meta 를 만들어 원격에 push 한 "
+        "직후에 이어지므로, 그 클론이 이미 로컬에 있다. 설치 관문이 "
+        "``git -C <클론> remote get-url origin`` 으로 읽어 채운다"
+        "(:mod:`app.setup_autofill`)."
+    ),
+    fields=(
+        SchemaField(
+            key="run.dlc_meta_repo_url",
+            type=FieldType.STRING,
+            required=True,
+            description=(
+                "dlc-meta 레포의 clone URL(**토큰 없는 형태**). 빈 레포여도 된다. "
+                "``python -m app.setup validate|render --dlc-meta <클론 경로>`` 로 "
+                "자동 주입되며, 경로를 주지 않아도 흔한 위치(형제 디렉토리 등)를 "
+                "탐색한다. ⚠️ 이 값은 forge base_url·kind 판정의 근거이기도 하다"
+                "(:func:`app.forge.resolve_base_url` · "
+                ":func:`app.forge.infer_kind_from_url`) — 다른 조직의 예시 URL 이 남으면 "
+                "사내 토큰이 엉뚱한 호스트로 나갈 수 있어, 채우지 못하면 게이트가 막는다."
+            ),
+            example="https://gitlab.example.com/<your-group>/dlc-meta.git",
         ),
     ),
 )
@@ -476,26 +624,17 @@ _DEPLOY = SchemaSection(
             example="local",
         ),
         SchemaField(
-            key="deploy.host_deploy_dir",
-            type=FieldType.STRING,
-            default="",
-            required_if=RequiredIf("deploy.profile", equals=("cloud_vm", "onprem_server")),
-            legacy_keys=("spawn.host_deploy_dir",),
-            description=(
-                "**호스트**의 배포 디렉토리 절대경로(central 컨테이너 내부 경로가 아니다). "
-                "central 이 sibling 컨테이너로 워커를 띄울 때 바인드 source 를 호스트 "
-                "docker 데몬이 해석하기 때문에 필요하다. env ``HOST_DEPLOY_DIR`` 이 우선."
-            ),
-            example="/home/<deploy-user>/deploy/jira-auto-dispatcher",
-        ),
-        SchemaField(
             key="deploy.docker_host",
             type=FieldType.STRING,
-            default="unix:///var/run/docker.sock",
+            # ⚠️ 이 기본값은 **아무 프로파일도 안 골랐을 때**의 값이며, 프로파일 파생
+            #    (:data:`PROFILE_DEFAULTS`)과 어긋나면 안 된다(tests/test_setup_schema.py
+            #    가 파서와의 드리프트를 잡는다).
+            default="tcp://socket-proxy:2375",
             legacy_keys=("spawn.docker_host",),
             description=(
-                "워커를 띄울 docker 엔드포인트. 서버 프로파일은 socket-proxy 경유를 "
-                "기본으로 한다(소켓 직결은 특권 확대)."
+                "워커를 띄울 docker 엔드포인트. 기본은 **모든 프로파일에서** socket-proxy "
+                "경유다(이 리포의 docker-compose.yml 이 그렇게 배포된다). 소켓 직결"
+                "(``unix:///var/run/docker.sock``)은 호스트 root 동치라 명시할 때만 쓴다."
             ),
             example="tcp://socket-proxy:2375",
         ),
@@ -555,7 +694,8 @@ _CONSENT = SchemaSection(
 )
 
 #: 온보딩이 물어야 하는 항목 **전체**(선언 순서 = 권장 온보딩 진행 순서).
-SETUP_SCHEMA: Tuple = (_FORGE, _NOTIFIER, _JIRA, _DOCS_REPO, _DEPLOY, _CONSENT)
+SETUP_SCHEMA: Tuple = (_FORGE, _NOTIFIER, _JIRA, _WEBHOOK, _DLC_META, _DOCS_REPO,
+                       _DEPLOY, _CONSENT)
 
 
 # ---------------------------------------------------------------------------
@@ -563,40 +703,103 @@ SETUP_SCHEMA: Tuple = (_FORGE, _NOTIFIER, _JIRA, _DOCS_REPO, _DEPLOY, _CONSENT)
 # ---------------------------------------------------------------------------
 
 
-def iter_sections() -> Iterator[SchemaSection]:
-    """선언 순서대로 섹션을 순회한다."""
-    yield from SETUP_SCHEMA
+# ⚠️ 아래 조회 헬퍼는 **두 벌**이다:
+#   - ``*_in(sections, ...)``  임의의 섹션 묶음을 대상으로 하는 순수 함수. 이 자료구조
+#     (:class:`SchemaSection`/:class:`SchemaField`)를 쓰는 **다른 스키마**도 같은 검증·
+#     렌더 기계를 그대로 재사용할 수 있게 하려고 열어 둔다 — 지금은 per-user 온보딩
+#     스키마(:mod:`app.user_schema`)가 이걸 쓴다. 설치 스키마와 필드 집합이 다르므로
+#     스키마를 억지로 합치지 않고 **메커니즘만** 공유한다.
+#   - 인자 없는 옛 이름들. :data:`SETUP_SCHEMA` 를 대상으로 하는 얇은 위임이며 기존
+#     호출부(설치 관문 CLI·검증기·렌더러)는 아무것도 바뀌지 않는다.
 
 
-def iter_fields() -> Iterator[SchemaField]:
-    """모든 섹션의 모든 필드를 선언 순서대로 순회한다."""
-    for section in SETUP_SCHEMA:
+def iter_sections_in(sections: Tuple) -> Iterator[SchemaSection]:
+    """주어진 섹션 묶음을 선언 순서대로 순회한다."""
+    yield from sections
+
+
+def profile_derived_values(profile: Any) -> dict:
+    """``deploy.profile`` 에서 **파생되는 답**을 ``{점 표기 키: 값}`` 으로 돌려준다.
+
+    프로파일을 고른 순간 ``deploy.docker_host``·``deploy.workspace_volume`` 은 이미
+    정해진 것이다 — 그건 *스키마 dataclass 기본값*이 아니라 **답의 일부**다. 그래서
+    검증기(:func:`app.setup_validate.resolve_values`)가 이 함수로 파생값을 "답한 값"에
+    합치고, 렌더러가 그것을 실제 ``config.yaml`` 에 쓴다. 이 함수가 없으면 "프로파일
+    하나면 끝난다"는 약속이 깨진다 — ``local`` 을 골랐는데 예시 파일에 남아 있던
+    ``cloud_vm`` 값이 그대로 렌더되는 실측 결함이 그 증상이었다.
+
+    우선순위는 :func:`app.config._build_deploy` 와 **같다**:
+        명시 ``deploy.<key>`` > 레거시 키(``spawn.*``·``secrets.base_dir``) > 여기 파생값.
+    (이 함수는 파생값만 알려주고, 우선순위 적용은 호출부가 한다.)
+
+    Args:
+        profile: 프로파일 이름(대소문자·공백 무시). 모르는 값이면 빈 dict.
+
+    Returns:
+        점 표기 키 → 파생값. **빈 파생값은 싣지 않는다** — 빈 문자열은 "이 프로파일은
+        이 항목에 의견이 없다"는 뜻이지 "빈 값으로 써라"가 아니다(``local`` 의
+        ``secrets_base_dir`` 이 그렇다 — 그 값은 env ``SECRETS_DIR`` 로 온다).
+    """
+    derived = PROFILE_DEFAULTS.get(str(profile or "").strip().lower())
+    if not derived:
+        return {}
+    return {f"deploy.{k}": v for k, v in derived.items() if v not in (None, "")}
+
+
+def iter_fields_in(sections: Tuple) -> Iterator[SchemaField]:
+    """주어진 섹션 묶음의 모든 필드를 선언 순서대로 순회한다."""
+    for section in sections:
         yield from section.fields
 
 
-def get_section(name: str) -> Optional[SchemaSection]:
-    """섹션 이름으로 조회(없으면 None)."""
-    for section in SETUP_SCHEMA:
+def get_section_in(sections: Tuple, name: str) -> Optional[SchemaSection]:
+    """주어진 섹션 묶음에서 섹션 이름으로 조회(없으면 None)."""
+    for section in sections:
         if section.name == name:
             return section
     return None
 
 
-def get_field(key: str) -> Optional[SchemaField]:
-    """점 표기 키 경로로 필드 조회(없으면 None)."""
-    for f in iter_fields():
+def get_field_in(sections: Tuple, key: str) -> Optional[SchemaField]:
+    """주어진 섹션 묶음에서 점 표기 키 경로로 필드 조회(없으면 None)."""
+    for f in iter_fields_in(sections):
         if f.key == key:
             return f
     return None
 
 
-def legacy_key_map() -> dict:
-    """``{레거시 키 경로: 신규 키 경로}`` — 하위호환 매핑 한눈에 보기.
-
-    후속 마이그레이션 도구가 옛 config.yaml 을 신규 키로 옮길 때 쓰라고 노출한다.
-    """
+def legacy_key_map_in(sections: Tuple) -> dict:
+    """주어진 섹션 묶음의 ``{레거시 키 경로: 신규 키 경로}``."""
     out: dict = {}
-    for f in iter_fields():
+    for f in iter_fields_in(sections):
         for old in f.legacy_keys:
             out[old] = f.key
     return out
+
+
+def iter_sections() -> Iterator[SchemaSection]:
+    """선언 순서대로 섹션을 순회한다(설치 스키마)."""
+    yield from iter_sections_in(SETUP_SCHEMA)
+
+
+def iter_fields() -> Iterator[SchemaField]:
+    """모든 섹션의 모든 필드를 선언 순서대로 순회한다(설치 스키마)."""
+    yield from iter_fields_in(SETUP_SCHEMA)
+
+
+def get_section(name: str) -> Optional[SchemaSection]:
+    """섹션 이름으로 조회(없으면 None — 설치 스키마)."""
+    return get_section_in(SETUP_SCHEMA, name)
+
+
+def get_field(key: str) -> Optional[SchemaField]:
+    """점 표기 키 경로로 필드 조회(없으면 None — 설치 스키마)."""
+    return get_field_in(SETUP_SCHEMA, key)
+
+
+def legacy_key_map() -> dict:
+    """``{레거시 키 경로: 신규 키 경로}`` — 하위호환 매핑 한눈에 보기(설치 스키마).
+
+    후속 마이그레이션 도구가 옛 config.yaml 을 신규 키로 옮길 때 쓰라고 노출한다.
+    """
+    return legacy_key_map_in(SETUP_SCHEMA)

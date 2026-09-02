@@ -9,9 +9,8 @@
 #   - (docker 접근 가능 시) 컨테이너 상태 출력: jad-central / jad-socket-proxy / jad-worker-*
 #
 # 무엇을 안 하나:
-#   - 배포/기동/온보딩/dispatch 등 쓰기·라이브 조작 없음(전부 GET).
-#   - 시크릿(토큰·WORKER_SHARED_SECRET)을 인자로 받지도, 출력하지도 않는다.
-#   - /dispatch/* (worker 전용, 공유 시크릿 필요)는 건드리지 않는다.
+#   - 배포/기동/온보딩 등 쓰기·라이브 조작 없음(전부 GET).
+#   - 시크릿(토큰)을 인자로 받지도, 출력하지도 않는다.
 #
 # 사용법:
 #   bash scripts/smoke-deployed.sh [BASE_URL]

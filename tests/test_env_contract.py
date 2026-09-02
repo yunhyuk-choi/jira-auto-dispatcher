@@ -25,14 +25,11 @@ def _cfg(base_dir: str):
         spawn=SimpleNamespace(
             image="jira-auto-dispatcher:latest",
             network="jad-net",
-            central_url="http://central:8787",
             mem_limit="4g",
             docker_host="unix:///var/run/docker.sock",
             run_as="1000:1000",
-            host_deploy_dir="",
         ),
         secrets=SimpleNamespace(base_dir=base_dir),
-        worker_shared_secret="s3cr3t",
     )
 
 
@@ -154,12 +151,25 @@ def test_build_env_omits_google_chat_user_id_when_absent(tmp_path):
     assert creds.google_chat_user_id == ""
 
 
-def test_build_env_does_not_leak_token_values(tmp_path):
-    """토큰 '값'은 참조/파일경로로만 넘기고 env에 실리지 않는다(Claude 값 제외)."""
+def test_build_env_keeps_token_values_out_of_ordinary_env_keys(tmp_path):
+    """토큰 '값'은 일반 env 키에 실리지 않는다 — 참조/파일경로 + 전용 주입 채널뿐.
+
+    ⚠️ 계약 변화: bind 마운트를 없애면서 토큰 **값**은 전용 주입 env
+    (``JAD_INJECT_SECRETS``, base64)로 이동했다(app/inject.py — spawn.host_deploy_dir 제거).
+    노출 수준은 전부터 env 로 넘기던 CLAUDE_CODE_OAUTH_TOKEN 과 같다. 여기서 지키는 것은
+    "``*_REF``/``*_FILE`` 같은 **포인터 키에 값이 섞여 들어가지 않는다**" 는 원래 의도와,
+    "주입 페이로드에 **그 사용자 것만** 들어간다" 는 격리 불변식이다.
+    """
+    from app import inject
+
     base = str(tmp_path / "secrets")
     _write(base, "testuser/jira-token", "JIRA-SECRET-VAL")
     _write(base, "testuser/gitlab-token", "GL-SECRET-VAL")
     env = Spawner(_cfg(base)).build_env(_user())
-    joined = "\n".join(str(v) for v in env.values())
+    joined = "\n".join(str(v) for k, v in env.items() if k != inject.ENV_SECRETS)
     assert "JIRA-SECRET-VAL" not in joined
     assert "GL-SECRET-VAL" not in joined
+    # 주입 채널에는 값이 있지만 base64 이고, 그 사용자 것만 들어 있다.
+    files = inject.decode_secrets(env[inject.ENV_SECRETS])
+    assert files["testuser/jira-token"] == "JIRA-SECRET-VAL"
+    assert all(ref.startswith("testuser/") for ref in files)

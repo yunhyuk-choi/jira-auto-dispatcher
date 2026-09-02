@@ -62,11 +62,11 @@
 
 런타임이 아니라 이 디스패처 시스템 자체를 개발/수정하러 온 개발 에이전트라면
 → **`docs/DISPATCHER-DEV.md`** 를 읽어라. 2-역할(central/worker) 아키텍처,
-central↔worker HTTP 디스패치 프로토콜, 설계 불변식, per-user attribution 등 이
+central→worker `docker exec` 주입 경로, 설계 불변식, per-user attribution 등 이
 시스템을 이해·수정하는 데 필요한 온보딩이 모두 거기 있다(자동 로드되지 않으므로
 런타임 에이전트를 오염시키지 않는다).
 
-## central 런타임 세션 운영규약 (프랙탈-센트럴, `run.fractal_central` ON 일 때)
+## central 런타임 세션 운영규약 (프랙탈-센트럴 — **유일 실행 경로**)
 
 > **역할 가드 — 이 섹션(및 그 안의 멀티레포 dispatch·조율·사이클로그 기록 규약 전체)은
 > `ROLE=central` 일 때만 적용된다. `ROLE=worker`(또는 `DISPATCH_USER` 설정)면 이 섹션
@@ -76,7 +76,7 @@ central↔worker HTTP 디스패치 프로토콜, 설계 불변식, per-user attr
 > **범위 주의 — 이 섹션은 특정 독자를 위한 것이다.** 이 섹션은 **런타임 상주 central
 > 라이브 세션**이 컨테이너 안에서 Jira 이벤트를 조율할 때 따르는 **운영 규약**이다.
 > 위의 런타임 오리엔테이션과 섞지 말 것 — 이 규약은 그 라이브 세션에만 적용된다. 이
-> 규약이 `run.fractal_central` ON 경로의 정본이며, `app/prompts/central_agent_frame.md`·
+> 규약이 실행 경로의 정본이며, `app/prompts/central_agent_frame.md`·
 > `user_sub_frame.md` 는 이 규약과 정합하는 상세 운영 프레임이다.
 
 이 섹션은 런타임 상주 central 라이브 세션의 운영 규약이다. 그 세션은
@@ -167,12 +167,16 @@ sid 로 잇는다; 같은 `--session-id` 재사용은 "already in use" 하드에
    정상 종료 대기로 들어간다. 유휴 상태에서 억지로 일을 만들지 말라 — 다음 이벤트가
    오면 이어서 처리한다. 좀비 방지는 tini(PID1 리퍼)+killpg 가 기계적으로 보장한다.
 
-### 결정적 경로와의 관계 (두 모드)
+### 레거시 결정적 경로 (은퇴)
 
-기본 **결정적 HTTP-디스패치 모드**(`fractal_central` OFF)의 정본은 개발 온보딩
-`docs/DISPATCHER-DEV.md`(2-역할 디스패처 + HTTP 디스패치 프로토콜 절)다. 이 섹션은
-그와 **별개의 두 번째 모드**(`fractal_central` ON)이며 서로 대체·모순하지 않는다. OFF
-면 이 라이브 세션은 아예 인스턴스화되지 않는다.
+예전에는 두 모드가 공존했다 — `fractal_central` OFF 면 central 이 잡을 스케줄러 큐에
+넣고 워커가 중앙을 HTTP 폴링해 가져다 실행하는 **결정적 HTTP-디스패치** 모드였다
+(엔드포인트 계약은 `docs/DISPATCHER-DEV.md` 참조). 그 소비자(`app/worker.py::worker_loop`)가 이 라이브 세션 경로와 **동시에
+살아 있으면서 같은 티켓을 두 번 실행**(중복 브랜치·중복 변경요청·중복 완료알림)했기
+때문에, 소비자와 worker-facing 서빙 표면을 함께 제거했다. **지금 이 섹션의 경로가
+유일한 실행 경로다.** 옛 `run.fractal_central` 키는 남아 있어도 무시되고 경고만 남는다
+(`app/config.py::_retire_fractal_central`). 개발 온보딩의 정본은 여전히
+`docs/DISPATCHER-DEV.md` 다.
 
 ## POLICY-ENCODING
 

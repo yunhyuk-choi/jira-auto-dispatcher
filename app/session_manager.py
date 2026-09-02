@@ -21,8 +21,8 @@
         백스톱을 그대로 재사용한다(:func:`app.agent_runner._terminate_proc`).
 
 역할 소속: **worker**(신경로). 기본 OFF 피처 플래그(``run.fractal_worker``) 뒤에서만
-동작한다 — OFF면 이 모듈은 아예 인스턴스화되지 않고 기존 per-ticket 경로가 byte-for-byte
-그대로 돈다(app/worker.py).
+동작한다 — OFF면 이 모듈은 아예 인스턴스화되지 않고 티켓당 프로세스 스폰 경로가 그대로
+돈다(:mod:`app.agent_runner`).
 
 ⚠️ 재사용 원칙(설계 §6): 주입 프리미티브(``_encode_user_message``)·지속형
 ``build_command``·좀비 teardown(``_terminate_proc``/killpg)·스트림 파싱 유틸은 이미

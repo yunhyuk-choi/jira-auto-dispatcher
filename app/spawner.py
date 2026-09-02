@@ -17,26 +17,38 @@
     env:
         ROLE=worker
         DISPATCH_USER=<username>
-        CENTRAL_URL=<spawn.central_url>          # 예: http://central:8787
-        WORKER_SHARED_SECRET=<주입>              # dispatch HTTP 인증(X-Worker-Secret)
         CLAUDE_CODE_OAUTH_TOKEN=<주입>            # setup-token(값은 시크릿 참조에서)
-        SECRETS_DIR=/run/secrets                  # 컨테이너 내부 시크릿 마운트 루트
+        SECRETS_DIR=/run/secrets                  # 컨테이너 내부 시크릿 루트(tmpfs)
         JIRA_TOKEN_FILE / FORGE_TOKEN_FILE        # per-user 토큰 "파일경로"(값 아님)
                                                   # (GITLAB_TOKEN_FILE 도 같은 값으로 방출)
         JIRA_EMAIL                                # Jira actor 이메일
-    volumes:
+        JAD_INJECT_CONFIG / JAD_INJECT_SECRETS    # 스폰 시 주입 페이로드(app.inject)
+    volumes (**named 볼륨 2개뿐 — bind 마운트 없음**):
         jad-<username>:/home/app/.claude (rw)          # 사용자 ~/.claude 영속(인증/세션)
-        <settings.json>:/home/app/.claude/settings.json (ro)  # 사전 인가(아래)
-        <secrets>/<user>:/run/secrets/<user> (ro)      # per-user 시크릿 파일(값)
+        jad-workspace:<run.workspace_dir> (rw)         # 공유 워크스페이스(단일 클론)
+    tmpfs:
+        /run/secrets                                   # 주입 시크릿이 사는 곳(RAM 전용)
     restart_policy  unless-stopped (상시 폴링)
     mem_limit       spawn.mem_limit (예: 4g)
+
+⚠️ **bind 마운트를 쓰지 않는 이유**(``spawn.host_deploy_dir`` 제거의 근거):
+    central은 워커를 직접 만들지 않고 socket-proxy 경유로 **호스트 docker 데몬**에게
+    요청한다(sibling container). 그래서 바인드 source는 호스트가 해석한다 — central
+    안의 경로(/run/secrets · /app/config)를 그대로 넘기면 호스트의 다른 것(또는 없는
+    것)이 마운트되고, 워커는 **에러 없이 뜬 다음** 잡 실행 시점에야 죽는다. 그래서
+    예전엔 설치자가 호스트 배포 절대경로를 정확히 적어야 했고, 틀리면 조용히 깨졌다.
+    지금은 config·시크릿·웹훅을 전부 **스폰 시 주입**(:mod:`app.inject`)으로 넘기고
+    마운트는 named 볼륨만 남겼다 — 볼륨은 *이름* 으로 해석되므로 호스트 경로 개념이
+    아예 없다. 설치자가 틀릴 값이 사라졌다.
 
 컨테이너 사전 인가(중요):
     worker의 ``claude``는 ``--dangerously-skip-permissions`` 를 헤드리스로 쓰므로
     bypass 수락 다이얼로그가 **사람 입력 없이** 통과해야 한다. 이를 위해 spawner가
-    컨테이너 생성 시 그 사용자 ``~/.claude/settings.json``(CLAUDE_CONFIG_DIR)에
-    **사전 인가 설정**을 써 넣는다(:func:`render_settings`). 이는 시스템 레벨 인가로
-    모든 컨테이너 공통이며, 온보딩은 권한 단계 없이 자격증명만 받는다.
+    그 사용자 사전 인가 ``settings.json`` 내용(:func:`render_settings`)을 주입
+    페이로드에 ``<user>/claude-settings.json`` 으로 실어 보내고, worker가 부팅 시
+    이를 ``~/.claude/settings.json``(CLAUDE_CONFIG_DIR)으로 복사한다
+    (:func:`app.main.copy_worker_settings`). 이는 시스템 레벨 인가로 모든 컨테이너
+    공통이며, 온보딩은 권한 단계 없이 자격증명만 받는다.
     사용자별 ``permission_level``(기본 ``bypass``)로 조일 수 있다(SECURITY.md 참조).
 
 ⚠️ 보안(docker.sock 특권):
@@ -58,9 +70,11 @@ import json
 import logging
 import os
 import posixpath
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
-from app.config import read_secret
+from app import inject
+from app.config import DEFAULT_CONFIG_PATH, read_secret
+from app.registry import USERNAME_HINT, is_valid_username
 
 log = logging.getLogger("jad.spawner")
 
@@ -70,10 +84,18 @@ DEFAULT_RUN_AS = "1000:1000"
 # 컨테이너 내부 경로 상수.
 CLAUDE_CONFIG_DIR = "/home/app/.claude"
 SETTINGS_PATH_IN_CONTAINER = CLAUDE_CONFIG_DIR + "/settings.json"
-SECRETS_MOUNT = "/run/secrets"
+# ⚠️ 아래 두 상수는 :mod:`app.inject` 에서 **파생**한다 — 주입을 쓰는 쪽(spawner)과
+# 되살리는 쪽(worker)이 같은 경로를 봐야 하므로 값을 두 곳에 적지 않는다.
+SECRETS_MOUNT = inject.DEFAULT_SECRETS_DIR
 # worker가 load_config로 읽는 config 디렉토리(컨테이너 내부). worker 워킹디렉토리는
 # /app 이라 DEFAULT_CONFIG_PATH(config/config.yaml)가 /app/config/config.yaml 로 해석된다.
-CONFIG_DIR_IN_CONTAINER = "/app/config"
+CONFIG_DIR_IN_CONTAINER = posixpath.dirname(inject.DEFAULT_CONFIG_DEST)
+
+# 주입 시크릿이 사는 tmpfs 크기(토큰 몇 개 + settings.json — 넉넉).
+SECRETS_TMPFS_SIZE = "8m"
+
+# 사전 인가 settings.json 의 시크릿 참조 파일명(worker가 부팅 시 ~/.claude로 복사).
+SETTINGS_SECRET_FILENAME = "claude-settings.json"
 
 # 공유 워크스페이스 named 볼륨의 컨테이너 내부 bind 경로 폴백(run.workspace_dir 미설정 시).
 # central compose(jad-workspace → /app/workspace)와 정합.
@@ -82,6 +104,34 @@ DEFAULT_WORKSPACE_VOLUME = "jad-workspace"
 
 # 사전 인가 기본 레벨.
 DEFAULT_PERMISSION_LEVEL = "bypass"
+
+
+def _norm_ref(ref) -> str:
+    """시크릿 참조를 비교 가능한 한 가지 표기로(슬래시·선행 / 제거)."""
+    return str(ref or "").replace(chr(92), "/").lstrip("/")
+
+
+def _parse_run_as(run_as: str) -> tuple:
+    """``"1000:1000"`` → ``(1000, 1000)``. 숫자로 못 읽으면 ``(None, None)``.
+
+    docker 의 ``user`` 는 이름도 허용하지만(``app``), tmpfs 마운트 옵션은 숫자 uid 만
+    받는다. 이름/빈 값은 판정 불가로 보고 호출자가 폴백하게 한다.
+    """
+    text = str(run_as or "").strip()
+    if not text:
+        return (None, None)
+    parts = text.split(":", 1)
+    try:
+        uid = int(parts[0])
+    except ValueError:
+        return (None, None)
+    gid = None
+    if len(parts) == 2:
+        try:
+            gid = int(parts[1])
+        except ValueError:
+            gid = None
+    return (uid, gid)
 
 
 def _is_image_not_found(exc: Exception) -> bool:
@@ -159,7 +209,7 @@ class Spawner:
         """의존성 주입(설정·레지스트리) + (선택) docker 클라이언트.
 
         Args:
-            config: AppConfig(또는 유사 객체). spawn/secrets/worker_shared_secret 참조.
+            config: AppConfig(또는 유사 객체). spawn/secrets 참조.
             registry: 컨테이너 상태 갱신용(없으면 상태 갱신 no-op).
             client: docker.DockerClient(테스트 mock). None이면 최초 사용 시 지연 생성.
         """
@@ -184,36 +234,151 @@ class Spawner:
     # -- 이름 규칙 --
 
     @staticmethod
+    def _checked_username(username: str) -> str:
+        """docker 이름 조립 전 **심층 방어** — 이름이 이름인지 다시 본다.
+
+        온보딩은 이미 같은 판정(:func:`app.registry.is_valid_username`)으로 막지만,
+        여기 오는 값은 **레지스트리에 이미 들어 있던 것**일 수도 있다(이름 규칙이 생기기
+        전에 등록된 레코드는 그대로 유지된다 — :meth:`app.registry.Registry.__init__`).
+        그런 이름으로 컨테이너·볼륨 이름을 조립하면 docker 가 거부하거나(이름 규칙 위반)
+        더 나쁘게는 **다른 사용자의 이름과 겹친다.** 그래서 조립 자체를 거부한다.
+
+        조용히 넘기지 않고 예외로 올리는 이유: 호출부(``ensure_worker``·``stop_worker``·
+        ``reconcile_workers``)는 전부 예외를 **그 사용자 단위로** 격리해 잡는다 — 한
+        사람이 뜨지 않을 뿐 central 은 계속 돈다. 반대로 조용히 통과시키면 남의 컨테이너를
+        건드리는 일이 에러 없이 일어난다.
+
+        Raises:
+            ValueError: 이름 규칙에 맞지 않을 때. ⚠️ 메시지에 값을 싣지 않는다.
+        """
+        if not is_valid_username(username):
+            raise ValueError(
+                "worker 컨테이너·볼륨 이름을 만들 수 없습니다 — 이 사용자의 username 이 "
+                f"이름 규칙에 맞지 않습니다. 규칙: {USERNAME_HINT}")
+        return username
+
+    @staticmethod
     def container_name(username: str) -> str:
-        return f"jad-worker-{username}"
+        return f"jad-worker-{Spawner._checked_username(username)}"
 
     @staticmethod
     def volume_name(username: str) -> str:
-        return f"jad-{username}"
+        return f"jad-{Spawner._checked_username(username)}"
 
-    # -- 사전 인가 settings.json 스테이징(호스트 파일 → ro 바인드) --
+    # -- 스폰 시 주입 페이로드 조립(호스트 경로 없음) --
 
-    def _settings_host_path(self, username: str) -> str:
-        """사용자 사전 인가 settings.json 호스트 경로(secrets.base_dir/<user> 하위)."""
-        base = getattr(getattr(self.config, "secrets", None), "base_dir", "") or ""
-        return os.path.join(base, username, "claude-settings.json")
+    def _config_path(self) -> str:
+        """central 자신이 로드한 config.yaml 경로(없으면 기본 경로)."""
+        return getattr(self.config, "config_path", "") or DEFAULT_CONFIG_PATH
 
-    def write_settings(self, username: str, permission_level: str) -> str:
-        """사전 인가 settings.json을 호스트에 기록(0600)하고 경로 반환.
+    def config_text(self) -> str:
+        """worker에 넘길 config.yaml **원문**(없으면 빈 문자열).
 
-        컨테이너의 ``/home/app/.claude/settings.json`` 에 read-only로 바인드된다.
-        UTF-8(BOM 없음)·LF.
+        원문 그대로 넘긴다 — ``${SECRETS_DIR}`` 같은 토큰은 worker가 자기 env로
+        치환하므로(bind 마운트 시절과 동일 의미) 해석된 값을 다시 직렬화하지 않는다.
         """
-        path = self._settings_host_path(username)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        content = render_settings_json(permission_level)
-        with open(path, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write(content)
+        path = self._config_path()
         try:
-            os.chmod(path, 0o600)
-        except OSError:  # Windows 등 chmod 미지원 — 무해
-            pass
-        return path
+            with open(path, "r", encoding="utf-8") as fh:
+                return fh.read()
+        except OSError:
+            log.warning(
+                "worker 주입용 config 원문을 읽지 못했습니다(%s) — worker가 config를 "
+                "찾지 못해 부팅에 실패할 수 있습니다.", path,
+            )
+            return ""
+
+    def collect_injected_secrets(self, user) -> dict:
+        """이 사용자 worker에 넘길 ``{ref: 내용}`` (**격리 강제 지점**).
+
+        담는 것:
+            - ``<user>/…`` 로 시작하는 per-user 시크릿 참조(jira/forge/claude 토큰).
+            - 사전 인가 ``<user>/claude-settings.json`` (파일이 아니라 렌더 결과).
+            - (조건부) 알림 웹훅 **파일 하나** — ``notify.webhook_ref``.
+
+        ⚠️ **격리 불변식**: per-user 참조는 반드시 ``<username>/`` 접두어여야 하고,
+        그 외에 허용되는 유일한 ref 는 config 에 선언된 웹훅 ref 하나뿐이다. 조건에
+        맞지 않는 ref 는 경고와 함께 **버린다** — 레지스트리가 오염돼 남의 경로를
+        가리켜도 그 값이 다른 사용자의 워커로 새지 않는다.
+
+        ⚠️ ``service/`` 디렉토리를 통째로 주지 않는다 — 거기엔 central watcher의 Jira
+        토큰도 있어 워커에 노출하면 최소권한 위반이다(웹훅 파일 단 하나만).
+        """
+        cfg = self.config
+        username = user.username
+        base_dir = getattr(getattr(cfg, "secrets", None), "base_dir", "") or ""
+        secrets_ref = getattr(user, "secrets_ref", None)
+
+        notify_cfg = getattr(cfg, "notify", None)
+        webhook_ref = _norm_ref(
+            getattr(notify_cfg, "webhook_ref", "") if notify_cfg else "")
+        webhook_allowed = bool(webhook_ref) and bool(getattr(notify_cfg, "enabled", False))
+
+        prefix = f"{username}/"
+        files: dict = {}
+
+        candidates = []
+        if secrets_ref is not None:
+            for attr in ("jira_token", "forge_token", "gitlab_token", "claude_oauth_token"):
+                ref = getattr(secrets_ref, attr, "") or ""
+                if ref:
+                    candidates.append(ref)
+        if webhook_allowed:
+            candidates.append(webhook_ref)
+
+        seen: set = set()
+        for ref in candidates:
+            norm = _norm_ref(ref)
+            if norm in seen:
+                continue  # 같은 파일을 두 이름으로 참조(forge/gitlab 미러) — 한 번만.
+            seen.add(norm)
+            is_own = norm.startswith(prefix)
+            is_webhook = webhook_allowed and norm == webhook_ref
+            if not inject.is_safe_ref(norm) or not (is_own or is_webhook):
+                log.warning(
+                    "worker 주입에서 제외 — 이 사용자(%s)의 참조가 아닙니다: %s",
+                    username, norm,
+                )
+                continue
+            content = self._read_secret_raw(base_dir, norm)
+            if content is None:
+                log.warning("worker 주입 시크릿 파일 없음(건너뜀): %s", norm)
+                continue
+            files[norm] = content
+
+        # 사전 인가 settings.json — 디스크에 없고 매 spawn 시 렌더한다(항상 최신).
+        level = (getattr(user, "permission_level", DEFAULT_PERMISSION_LEVEL)
+                 or DEFAULT_PERMISSION_LEVEL)
+        files[prefix + SETTINGS_SECRET_FILENAME] = render_settings_json(level)
+        return files
+
+    @staticmethod
+    def _read_secret_raw(base_dir: str, ref: str) -> Optional[str]:
+        """시크릿 파일 **원문**(strip 없음 — 바이트 그대로 왕복). 없으면 None.
+
+        :func:`app.config.read_secret` 은 값을 strip 하지만, 여기서는 파일을 그대로
+        복제해 worker 쪽 ``read_secret`` 이 오늘과 똑같이 동작하게 한다.
+        """
+        path = os.path.join(base_dir, *ref.split("/")) if base_dir else ref
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                return fh.read()
+        except OSError:
+            return None
+
+    def build_injection(self, user) -> dict:
+        """주입 env 조각 ``{JAD_INJECT_CONFIG, JAD_INJECT_SECRETS}``.
+
+        ⚠️ 이 dict 는 시크릿 **값**을 담는다(base64) — 절대 로깅하지 않는다.
+        """
+        env: dict = {}
+        text = self.config_text()
+        if text:
+            env[inject.ENV_CONFIG] = inject.encode_config(text)
+        files = self.collect_injected_secrets(user)
+        if files:
+            env[inject.ENV_SECRETS] = inject.encode_secrets(files)
+        return env
 
     # -- env / spec 조립 --
 
@@ -244,9 +409,8 @@ class Spawner:
         옛 이름을 읽는 것들(기존 에이전트 지시문·사용자 스크립트·이전 이미지)이 그대로
         동작해야 하기 때문이다 — 옛 이름 제거는 별도 사이클의 몫이다.
 
-        시크릿 값(CLAUDE_CODE_OAUTH_TOKEN·WORKER_SHARED_SECRET)은 read_secret/config로만
-        읽고, Jira/forge 토큰은 값이 아니라 **참조**(상대 ref)와 **파일경로**(마운트
-        경로) 포인터로만 넘긴다. 이 dict는 절대 로깅하지 않는다(identity 이름·이메일은
+        시크릿 값(CLAUDE_CODE_OAUTH_TOKEN)은 read_secret/config로만 읽고, Jira/forge
+        토큰은 값이 아니라 **참조**(상대 ref)와 **파일경로**(마운트 경로) 포인터로만 넘긴다. 이 dict는 절대 로깅하지 않는다(identity 이름·이메일은
         시크릿 값이 아니라 로깅해도 무해하나, dict 통째 로깅은 여전히 금지).
         """
         cfg = self.config
@@ -254,7 +418,6 @@ class Spawner:
         env: dict = {
             "ROLE": "worker",
             "DISPATCH_USER": user.username,
-            "CENTRAL_URL": cfg.spawn.central_url,
             "SECRETS_DIR": SECRETS_MOUNT,
         }
 
@@ -271,9 +434,11 @@ class Spawner:
         if wc > 0:
             env["WORKER_CONCURRENCY"] = str(wc)
 
-        # dispatch HTTP 인증 공유 시크릿(값). 미설정이면 생략(신뢰 네트워크 전제).
-        if getattr(cfg, "worker_shared_secret", ""):
-            env["WORKER_SHARED_SECRET"] = cfg.worker_shared_secret
+        # ⚠️ ``CENTRAL_URL`` · ``WORKER_SHARED_SECRET`` 은 **더 이상 주입하지 않는다.**
+        # 워커가 중앙을 폴링하던 시절의 값이었고(폴링 대상 주소 · ``X-Worker-Secret``
+        # 공유 시크릿), 그 서빙 표면과 폴링 소비자가 프랙탈 seam(중앙 → docker exec
+        # 푸시)으로 대체되며 컨테이너 안에 읽는 곳이 하나도 남지 않았다. 쓰이지 않는
+        # 시크릿을 컨테이너 스펙에 실어 두는 것은 노출 표면만 늘린다(docker inspect).
 
         # git author 정체성(값이지만 시크릿 아님 — from_env DISPATCH_GIT_*).
         identity = getattr(user, "identity", None)
@@ -328,123 +493,96 @@ class Spawner:
             env["DISPATCH_NOTIFY_USER_ID"] = notify_uid
             env["DISPATCH_GOOGLE_CHAT_USER_ID"] = notify_uid
 
+        # 스폰 시 주입(config·per-user 시크릿·웹훅) — bind 마운트 대체. 이 사용자
+        # 것만 담긴다(collect_injected_secrets 가 접두어로 강제).
+        env.update(self.build_injection(user))
+
         return env
 
     def build_volumes(self, user, settings_path: Optional[str] = None) -> dict:
-        """컨테이너 volumes dict 조립(config + 영속 .claude + per-user 시크릿 ro).
+        """컨테이너 volumes dict 조립 — **named 볼륨 2개뿐(bind 마운트 없음)**.
 
-        ⚠️ sibling container 문제: central이 Docker SDK(socket-proxy 경유)로 worker를
-        띄울 때 바인드 마운트의 **source 경로는 호스트 docker 데몬이 해석**한다(central
-        컨테이너 내부 경로가 아님). 따라서 worker 바인드 source는 반드시 **호스트 경로**
-        여야 한다. central은 시크릿을 base_dir(컨테이너 내부, 예: /run/secrets)에 **기록**
-        하지만, worker 바인드용 source는 그 같은 호스트 디렉토리의 다른 관점인
-        ``spawn.host_deploy_dir`` 기준 경로로 매핑한다:
+        - ``jad-<user>`` → ``/home/app/.claude`` (rw). 사용자 인증/세션 영속.
+        - ``<spawn.workspace_volume>`` → ``run.workspace_dir`` (rw). central·모든 워커가
+          공유하는 단일 클론 지점(설계 §4) — N중 클론·N번 pull 제거.
 
-            base_dir(central 기록용)  == <host_deploy_dir>/secrets  (같은 호스트 dir, 두 관점)
+        둘 다 **볼륨 이름**으로 docker가 해석하므로 호스트 경로가 등장하지 않는다.
+        예전엔 여기에 세 개의 bind(config·per-user 시크릿·알림 웹훅)가 더 있었고,
+        그 source 를 호스트 데몬이 해석하는 탓에 설치자가 ``spawn.host_deploy_dir``
+        을 정확히 적어야 했다(틀리면 빈 디렉토리가 조용히 마운트됨). 그 셋은 이제
+        **스폰 시 주입**(:meth:`build_injection` → :func:`app.inject.materialize`)으로
+        넘어가고, 워커는 자기 컨테이너 안(tmpfs·이미지 레이어)에 스스로 기록한다.
 
-        - ``<host_deploy_dir>/config`` → ``/app/config`` (ro)  ← 크래시 픽스. worker가
-          config/config.yaml 을 읽어 ConfigError 크래시 루프를 벗어난다.
-        - ``<host_deploy_dir>/secrets/<user>`` → ``/run/secrets/<user>`` (ro).
-          이 디렉토리에 ``claude-settings.json`` 이 이미 포함돼 컨테이너 내부에서는
-          ``/run/secrets/<user>/claude-settings.json`` 로 접근 가능하다.
-        - ``jad-<user>`` 명명 볼륨 → ``/home/app/.claude`` (rw). 볼륨명은 호스트경로 무관.
-        - (선택) ``<host_deploy_dir>/secrets/<webhook_ref>`` → ``/run/secrets/<webhook_ref>``
-          (ro). notify가 설정된 경우에만, worker의 :mod:`app.notify` 가 팀 Google Chat
-          웹훅을 읽도록 그 **파일 하나만** 바인드한다(service 디렉토리 전체 금지 —
-          최소권한). host_deploy_dir 미설정(로컬 폴백) 시엔 생략.
-
-        ⚠️ 사전 인가 ``settings.json`` 은 **파일 바인드하지 않는다**(두 번째 spawn 버그
-        픽스). 명명 볼륨(``jad-<user>``)이 이미 ``/home/app/.claude`` 를 덮어쓰므로 그
-        볼륨 마운트 *하위 파일 경로*(``/home/app/.claude/settings.json``)에 파일을 다시
-        바인드하려 하면 runc가 거부한다("not a directory: Are you trying to mount a
-        directory onto a file"). 대신 worker 부팅 시
-        ``/run/secrets/<user>/claude-settings.json`` → ``$CLAUDE_CONFIG_DIR/settings.json``
-        으로 **복사**한다(:func:`app.main.copy_worker_settings`).
-
-        ``host_deploy_dir`` 가 비어 있으면(로컬 개발 등 — 호스트==central 파일시스템)
-        직접 경로로 폴백하고 경고를 남긴다.
+        ⚠️ 사전 인가 ``settings.json`` 은 여전히 **마운트하지 않는다**. 명명 볼륨
+        (``jad-<user>``)이 ``/home/app/.claude`` 를 덮으므로 그 하위 파일 경로에 다시
+        마운트하면 runc가 거부한다. 주입된
+        ``$SECRETS_DIR/<user>/claude-settings.json`` 을 worker가 부팅 시 복사한다
+        (:func:`app.main.copy_worker_settings`).
 
         Args:
-            settings_path: 하위호환용(무시됨) — settings.json은 더 이상 바인드되지 않고
-                per-user 시크릿 디렉토리 안에서 worker가 부팅 시 복사한다.
+            settings_path: 하위호환용(무시됨).
         """
-        del settings_path  # 더 이상 바인드 source로 쓰지 않음(하위호환 시그니처 유지).
+        del settings_path  # 더 이상 쓰지 않음(하위호환 시그니처 유지).
         cfg = self.config
         username = user.username
-        base_dir = getattr(getattr(cfg, "secrets", None), "base_dir", "") or ""
-        host_deploy_dir = getattr(getattr(cfg, "spawn", None), "host_deploy_dir", "") or ""
 
-        if host_deploy_dir:
-            # 호스트 docker 데몬이 해석하는 호스트 경로(sibling container).
-            host_secrets = posixpath.join(host_deploy_dir, "secrets")
-            config_src = posixpath.join(host_deploy_dir, "config")
-            user_secret_src = posixpath.join(host_secrets, username)
-        else:
-            # 폴백(로컬 개발): 호스트==central 파일시스템 전제. base_dir·
-            # 로컬 config 디렉토리를 직접 source로 쓴다.
-            log.warning(
-                "spawn.host_deploy_dir 미설정 — worker 바인드에 직접 경로 폴백. "
-                "socket-proxy 경유 실배포에서는 HOST_DEPLOY_DIR(호스트 배포 절대경로)를 "
-                "설정해야 worker 바인드 source가 호스트 데몬 기준으로 올바르게 해석된다."
-            )
-            config_src = os.path.abspath("config")
-            user_secret_src = os.path.join(base_dir, username)
-
-        # 공유 워크스페이스 named 볼륨(central·모든 워커가 공유하는 단일 클론 지점,
-        # 설계 §4). named 볼륨이라 **볼륨명으로** docker가 해석 → host_deploy_dir 무관
-        # (호스트 경로 매핑 불필요). central compose가 같은 이름(jad-workspace)으로
-        # 선언하므로 central·워커가 레포 한 벌을 공유한다(N중 클론·N번 pull 제거).
-        # bind 경로는 run.workspace_dir(=config 파생 orchestrator/dlc-meta/… 상위).
         workspace_volume = getattr(getattr(cfg, "spawn", None), "workspace_volume", "") \
             or DEFAULT_WORKSPACE_VOLUME
         workspace_dir = getattr(getattr(cfg, "run", None), "workspace_dir", "") \
             or DEFAULT_WORKSPACE_DIR
 
-        volumes: dict = {
-            # config (ro) — 항상 포함(크래시 픽스: worker가 /app/config/config.yaml 을 읽음).
-            config_src: {"bind": CONFIG_DIR_IN_CONTAINER, "mode": "ro"},
+        return {
             # 사용자 ~/.claude 영속(인증/세션).
             self.volume_name(username): {"bind": CLAUDE_CONFIG_DIR, "mode": "rw"},
-            # per-user 시크릿 디렉토리(값 + claude-settings.json) read-only.
-            # 다른 사용자 시크릿은 안 보인다.
-            user_secret_src: {"bind": posixpath.join(SECRETS_MOUNT, username), "mode": "ro"},
             # 공유 워크스페이스(rw) — 레포 단일 클론 공유. 볼륨명으로 마운트(named).
             workspace_volume: {"bind": workspace_dir, "mode": "rw"},
         }
 
-        # 완료 알림(notify)이 설정돼 있으면 팀 Google Chat 웹훅 시크릿 파일 "하나만"
-        # worker에 read-only로 바인드한다. worker의 :mod:`app.notify` 가 이 웹훅을
-        # base_dir(=/run/secrets) 기준 ``webhook_ref`` 경로로 읽어야 하는데(예:
-        # /run/secrets/service/google-chat-webhook), per-user 시크릿만 마운트하면
-        # 못 읽어 알림이 조용히 스킵된다.
-        # ⚠️ service/ 디렉토리 **전체**를 바인드하지 않는다 — 거기엔 central watcher의
-        #    jira-token 도 있어 worker에 노출하면 최소권한 위반. 웹훅 파일 단 하나만.
-        # 가드: host_deploy_dir(호스트 경로 해석 필수)·notify.enabled·webhook_ref가
-        #    모두 있을 때만 추가(로컬 폴백/미설정 시 생략).
-        notify_cfg = getattr(cfg, "notify", None)
-        webhook_ref = getattr(notify_cfg, "webhook_ref", "") if notify_cfg else ""
-        if host_deploy_dir and getattr(notify_cfg, "enabled", False) and webhook_ref:
-            rel = webhook_ref.replace("\\", "/").lstrip("/")
-            webhook_src = posixpath.join(host_deploy_dir, "secrets", rel)
-            volumes[webhook_src] = {"bind": self._in_container_secret(webhook_ref), "mode": "ro"}
+    @staticmethod
+    def secrets_tmpfs(run_as: str) -> dict:
+        """주입 시크릿이 사는 ``/run/secrets`` tmpfs 스펙(``containers.run(tmpfs=...)``).
 
-        return volumes
+        왜 tmpfs인가:
+            - **소유권**: 워커는 비-root(기본 uid 1000)로 돌고 ``/run`` 은 root 소유라
+              그냥은 쓸 수 없다. tmpfs 를 ``uid=`` 로 걸면 그 uid 가 소유자가 되어
+              **주입 파일을 쓴 주체와 읽는 주체가 동일**해진다(권한 드리프트 불가).
+              uid 는 ``spawn.run_as`` 에서 파생한다 — 두 값이 갈라질 수 없다.
+            - **잔류 축소**: 시크릿이 컨테이너 이미지 레이어(디스크)가 아니라 RAM 에만
+              존재하고, 컨테이너가 죽으면 사라진다.
+            - **재기동 안전**: 재시작으로 tmpfs 가 비어도 부팅 시 env 에서 다시
+              materialize 되므로 자가 복구된다(파일을 미리 넣어두는 방식과 다른 점).
+
+        ``run_as`` 가 숫자 uid 로 파싱되지 않으면(예: 이름) uid/gid 를 걸지 않고
+        mode=0777 로 둔다 — 컨테이너 전용 tmpfs 라 무해하고, 파일 자체는 0600 이다.
+        """
+        opts = ["rw", "noexec", "nosuid", "nodev", f"size={SECRETS_TMPFS_SIZE}"]
+        uid, gid = _parse_run_as(run_as)
+        if uid is None:
+            opts.append("mode=0777")
+        else:
+            opts.append("mode=0700")
+            opts.append(f"uid={uid}")
+            if gid is not None:
+                opts.append(f"gid={gid}")
+        return {SECRETS_MOUNT: ",".join(opts)}
 
     def build_spec(self, user, settings_path: Optional[str] = None) -> dict:
         """사용자 레코드 + config.spawn으로 ``containers.run`` kwargs 조립.
 
-        ``settings_path`` 미지정 시 사전 인가 settings.json을 기록해 사용한다.
+        Args:
+            settings_path: 하위호환용(무시됨) — 사전 인가 settings.json 은 호스트에
+                기록하지 않고 주입 페이로드로 넘어간다.
         """
+        del settings_path
         cfg = self.config
-        level = getattr(user, "permission_level", DEFAULT_PERMISSION_LEVEL) or DEFAULT_PERMISSION_LEVEL
-        if settings_path is None:
-            settings_path = self.write_settings(user.username, level)
         run_as = getattr(cfg.spawn, "run_as", "") or DEFAULT_RUN_AS
         return {
             "image": cfg.spawn.image,
             "name": self.container_name(user.username),
             "environment": self.build_env(user),
-            "volumes": self.build_volumes(user, settings_path),
+            "volumes": self.build_volumes(user),
+            # 주입 시크릿이 사는 RAM 전용 디렉토리(비-root 소유 — run_as 파생).
+            "tmpfs": self.secrets_tmpfs(run_as),
             "network": cfg.spawn.network,
             "restart_policy": {"Name": "unless-stopped"},
             "mem_limit": cfg.spawn.mem_limit,
@@ -500,10 +638,6 @@ class Spawner:
         # 볼륨 보장(없으면 생성).
         self._ensure_volume(self.volume_name(username))
 
-        # 사전 인가 settings.json 기록.
-        level = getattr(user, "permission_level", DEFAULT_PERMISSION_LEVEL) or DEFAULT_PERMISSION_LEVEL
-        settings_path = self.write_settings(username, level)
-
         existing = self._get_container(name)
         if existing is not None:
             if getattr(existing, "status", "") != "running":
@@ -512,7 +646,7 @@ class Spawner:
             log.info("worker 재사용: %s", name)  # 값은 로깅하지 않음
             return getattr(existing, "id", name)
 
-        spec = self.build_spec(user, settings_path)
+        spec = self.build_spec(user)
         container = c.containers.run(**spec)
         self._safe_set_status(username, name, "running")
         log.info("worker 기동: %s (image=%s)", name, spec["image"])  # env 로깅 금지
@@ -578,8 +712,52 @@ class Spawner:
         """컨테이너가 실제로 실행 중인 이미지의 ID(조회 실패 시 None)."""
         return getattr(getattr(container, "image", None), "id", None)
 
+    @staticmethod
+    def _container_injection(container) -> Optional[dict]:
+        """실행 중인 컨테이너에 **구워진** 주입 페이로드(판정 불가면 None).
+
+        ``container.attrs["Config"]["Env"]`` 는 ``["K=V", ...]`` 형태다. 대역/구버전
+        객체가 attrs 를 주지 않을 수도 있어 어떤 실패든 "판정 불가(None)"로 흡수한다
+        (best-effort — 모르면 재생성하지 않는다).
+        """
+        try:
+            env_list = container.attrs["Config"]["Env"]
+        except Exception:  # noqa: BLE001 — attrs 부재/형태 불일치 = 판정 불가
+            return None
+        if not isinstance(env_list, list):
+            return None  # 대역/구버전 객체 — 모르면 건드리지 않는다.
+        pairs = dict(
+            item.split("=", 1) for item in env_list if isinstance(item, str) and "=" in item
+        )
+        return {k: pairs.get(k, "") for k in (inject.ENV_CONFIG, inject.ENV_SECRETS)}
+
+    def _injection_drifted(self, container, user) -> bool:
+        """컨테이너에 구워진 주입 페이로드가 **지금의 config/시크릿과 다른가**.
+
+        bind 마운트 시절엔 config·시크릿이 파일이라 워커가 재시작만 해도 최신 값을
+        읽었다. 주입 방식에서는 페이로드가 컨테이너 생성 시점에 고정되므로, 값이
+        바뀌었는데 컨테이너가 그대로면 워커가 **옛 자격증명으로 조용히** 돈다 —
+        이번 작업이 없애려는 바로 그 실패 유형이다. 그래서 이미지 stale 과 **같은
+        기준**으로 다루어, 유휴면 즉시 / 활성 잡이 있으면 드레인 후 재생성한다.
+
+        판정 불가(attrs 없음 등)면 False — 모르면 건드리지 않는다(best-effort).
+        """
+        baked = self._container_injection(container)
+        if baked is None:
+            return False
+        try:
+            fresh = self.build_injection(user)
+        except Exception:  # noqa: BLE001 — 조립 실패는 상위 per-user 격리로 넘긴다
+            log.exception("주입 페이로드 조립 실패(드리프트 판정 생략): %s",
+                          getattr(user, "username", ""))
+            return False
+        for key in (inject.ENV_CONFIG, inject.ENV_SECRETS):
+            if baked.get(key, "") != fresh.get(key, ""):
+                return True
+        return False
+
     def _recreate_worker(self, user) -> str:
-        """워커 컨테이너를 제거 후 현재 이미지로 재spawn(이미지 갱신 반영)."""
+        """워커 컨테이너를 제거 후 현재 이미지·현재 주입 페이로드로 재spawn."""
         username = getattr(user, "username", "") or str(user)
         self.remove_worker(username)
         cid = self.ensure_worker(user)
@@ -639,6 +817,12 @@ class Spawner:
                         self.container_name(username),
                     )
                     up_to_date = False
+                # 이미지가 같아도 **주입 페이로드**(config·시크릿)가 바뀌었으면 stale이다
+                # — 안 그러면 워커가 옛 자격증명/설정으로 조용히 계속 돈다.
+                if up_to_date and self._injection_drifted(container, user):
+                    log.info("worker 주입 페이로드(config·시크릿) 변경 감지 → stale 판정: %s",
+                             self.container_name(username))
+                    up_to_date = False
                 if up_to_date:
                     self._pending_recreate.discard(username)  # 최신 → 대기 해제
                     summary["skipped"].append(username)
@@ -647,7 +831,7 @@ class Spawner:
                 if has_active_job(username):
                     self._pending_recreate.add(username)
                     summary["deferred"].append(username)
-                    log.info("worker 이미지 stale이나 활성 잡 있음 → 드레인 대기: %s",
+                    log.info("worker stale이나 활성 잡 있음 → 드레인 대기: %s",
                              self.container_name(username))
                 else:
                     self._recreate_worker(user)

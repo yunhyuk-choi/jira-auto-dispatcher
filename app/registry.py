@@ -23,6 +23,10 @@
     per_repo            {repo: "A"|"B"} 레포별 모드 오버라이드
     identity            {git_name, git_email} — worker git 커밋 author
     scope               {projects: [...]} — 이 사용자가 받을 Jira 프로젝트
+    consent             {full_permissions, accepted_at} — **본인**의 풀 퍼미션 동의와
+                        그 시각(ISO-8601, 서버 수신 시각). 이 사람의 자격증명으로 자율
+                        에이전트가 도는 데 대한 동의라 설치자의 동의로 갈음하지 않는다
+                        (app/onboarding.py 가 등록 시 강제한다).
     container           {name, status} — 스포너가 갱신하는 worker 컨테이너 상태
     secrets_ref         {jira_token, forge_token, claude_oauth_token}
                         (``forge_token`` 이 정본. 옛 이름 ``gitlab_token`` 은 같은 값으로
@@ -38,11 +42,76 @@
 
 from __future__ import annotations
 
+import logging
+import re
 import threading
 from dataclasses import asdict, dataclass, field
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 from app import state
+
+log = logging.getLogger("jad.registry")
+
+
+# ---------------------------------------------------------------------------
+# username 이름 규칙 — **이 시스템에서 username 은 식별자가 아니라 "이름"이다**
+# ---------------------------------------------------------------------------
+
+#: username 최대 길이. 사람이 읽는 짧은 식별자이지 자유 문자열이 아니다.
+USERNAME_MAX_LEN = 32
+
+#: Windows 예약 장치명(확장자를 붙여도 예약이다 — ``CON.txt`` 도 파일이 될 수 없다).
+#: 시크릿 디렉토리는 배포에 따라 Windows 호스트에도 생긴다.
+_RESERVED_STEMS = "con|prn|aux|nul|com[1-9]|lpt[1-9]"
+
+#: 허용하는 username 모양 — **디렉토리명과 docker 이름 양쪽에서 안전한 교집합**.
+#:
+#: 왜 이 집합인가 (username 이 흘러가는 두 자리가 근거다):
+#:   1. **시크릿 디렉토리** ``secrets/<username>/`` (:func:`app.onboarding._write_secret`).
+#:      ``/``·``\``·``..`` 가 들어가면 그건 이름이 아니라 **경로**이고, 무인증 관리 UI 가
+#:      임의 위치에 0600 파일을 쓰는 통로가 된다. 그래서 경로 문자·상위 표기·공백·제어
+#:      문자·비ASCII 를 전부 뺀다(비ASCII 는 파일시스템 정규화 차이로 같은 이름이 두 개가
+#:      되는 문제까지 따라온다).
+#:   2. **docker 컨테이너·볼륨 이름** ``jad-worker-<username>``·``jad-<username>``
+#:      (:mod:`app.spawner`). docker 가 허용하는 이름은
+#:      ``[a-zA-Z0-9][a-zA-Z0-9_.-]*`` 다 — 즉 영숫자·``_``·``.``·``-`` 뿐이고, 이 규칙은
+#:      그 집합을 **넘지 않는다**(우리 쪽이 더 좁다).
+#:
+#: 추가 제약과 그 이유:
+#:   - **첫 글자는 영숫자** — docker 의 첫 글자 규칙과 같고, 동시에 ``..``·``.hidden`` ·
+#:     ``-flag``(CLI 옵션으로 오인)를 한 번에 막는다.
+#:   - **끝 글자도 영숫자** — Windows 는 이름 끝의 ``.``·공백을 잘라 버려서 ``a.`` 와 ``a``
+#:     가 같은 디렉토리가 된다(이름 충돌).
+#:   - **Windows 예약 장치명 금지** — ``CON``·``NUL``·``COM1`` … 은 디렉토리로 만들 수 없다.
+#:   - **길이 1~32** — 사람이 읽는 이름의 상한. 컨테이너 이름 접두어(``jad-worker-``)를
+#:     붙여도 여유가 넉넉하다.
+#:
+#: ⚠️ 대소문자는 **허용한다**(기존 이름을 무효로 만들지 않기 위해). 그 대가는
+#: 대소문자 무시 파일시스템에서의 이름 충돌이며, 알려진 잔여 이슈로 남긴다.
+USERNAME_PATTERN = (
+    rf"(?!(?i:{_RESERVED_STEMS})(?:\..*)?\Z)"
+    rf"[A-Za-z0-9](?:[A-Za-z0-9._-]{{0,{USERNAME_MAX_LEN - 2}}}[A-Za-z0-9])?"
+)
+
+#: 위 규칙을 사람 말로(거부 메시지의 유일한 안내 — 거부는 값을 되비추지 않는다).
+USERNAME_HINT = (
+    "영문자·숫자로 시작하고 끝나며, 가운데에 ``.`` ``_`` ``-`` 만 쓸 수 있습니다"
+    f"(1~{USERNAME_MAX_LEN}자). 경로 구분자(/ \\)·``..``·공백·한글은 쓸 수 없고, "
+    "Windows 예약 이름(CON·NUL·COM1 …)도 쓸 수 없습니다. 예: ``yhchoi``, ``yh.choi``."
+)
+
+USERNAME_RE = re.compile(USERNAME_PATTERN)
+
+
+def is_valid_username(value: Any) -> bool:
+    """디렉토리명·docker 이름 양쪽에서 안전한 username 모양인가(**단일 원천**).
+
+    온보딩 게이트(:data:`app.user_schema.USER_SCHEMA` 의 ``username`` 선언)와 소비 지점
+    (:func:`app.onboarding._write_secret` · :meth:`app.spawner.Spawner.container_name`)이
+    **같은 이 함수**를 본다 — 판정이 두 벌이 되면 한쪽이 반드시 낡는다.
+    """
+    return bool(isinstance(value, str) and USERNAME_RE.fullmatch(value))
+
 
 # secrets_ref 안에 실토큰이 섞여 들어오는 것을 막기 위한 참조 키 화이트리스트.
 # ``forge_token`` 이 정본이고 ``gitlab_token`` 은 레거시 미러 — 둘 다 허용해야 옛
@@ -63,6 +132,29 @@ class Scope:
     """이 사용자가 받을 작업 범위."""
 
     projects: list = field(default_factory=list)
+
+
+@dataclass
+class Consent:
+    """이 사용자 **본인**의 풀 퍼미션 동의 기록(감사 흔적).
+
+    이 시스템은 워커 안에서 ``--dangerously-skip-permissions`` 로 에이전트를 돌리고, 그
+    에이전트는 **이 사람의** Jira·forge·Claude 자격증명으로 동작한다. 그러니 동의는 인스턴스
+    단위가 아니라 사람 단위여야 한다 — 설치자가 켠 ``consent.full_permissions``(config.yaml)
+    는 *설치자 자신*의 동의일 뿐이다.
+
+    Attributes:
+        full_permissions: 동의했는가. 기본 False(동의 없이는 등록이 통과하지 않는다).
+        accepted_at: 동의 시각(ISO-8601). ⚠️ **서버 수신 시각**이다 — 클라이언트가 보낸
+            시각은 쓰지 않는다(그러면 감사 흔적이 아니다).
+
+    ⚠️ 이 필드가 없던 시절에 등록된 레코드는 ``full_permissions=False`` 로 읽힌다. 그것을
+    소급 차단 근거로 쓰지 않는다(등록은 이미 끝났다) — 이 값은 *새 등록의 게이트*와 *누가
+    언제 동의했는지의 기록*이다.
+    """
+
+    full_permissions: bool = False
+    accepted_at: str = ""
 
 
 @dataclass
@@ -123,6 +215,7 @@ class UserRecord:
     per_repo: dict = field(default_factory=dict)
     identity: Identity = field(default_factory=Identity)
     scope: Scope = field(default_factory=Scope)
+    consent: Consent = field(default_factory=Consent)
     container: Container = field(default_factory=Container)
     secrets_ref: SecretsRef = field(default_factory=SecretsRef)
 
@@ -144,6 +237,7 @@ class UserRecord:
         scope = d.get("scope") or {}
         container = d.get("container") or {}
         secrets_ref = d.get("secrets_ref") or {}
+        consent = d.get("consent") or {}
         # 알림 사용자 id: 신규 키 우선, 없으면 레거시 키(Google Chat 전용 시절)를 읽고
         # 양쪽 필드에 같은 값을 싣는다(옛 키를 읽는 코드도 그대로 동작 — 하위호환).
         notify_uid = str(d.get("notify_user_id", "") or d.get("google_chat_user_id", ""))
@@ -167,6 +261,11 @@ class UserRecord:
                 git_email=str(identity.get("git_email", "")),
             ),
             scope=Scope(projects=list(scope.get("projects", []) or [])),
+            # 동의: 이 필드가 없던 시절의 registry.json 은 미동의로 읽힌다(위 Consent 주석).
+            consent=Consent(
+                full_permissions=bool(consent.get("full_permissions", False)),
+                accepted_at=str(consent.get("accepted_at", "") or ""),
+            ),
             container=Container(
                 name=str(container.get("name", "")),
                 status=str(container.get("status", "absent")),
@@ -186,15 +285,39 @@ class Registry:
     """사용자 레지스트리 CRUD + 영속."""
 
     def __init__(self) -> None:
-        """락 + state/registry.json 로드로 초기화."""
+        """락 + state/registry.json 로드로 초기화.
+
+        ⚠️ **이름 규칙(:func:`is_valid_username`)으로 기존 레코드를 걸러내지 않는다.**
+        규칙은 나중에 생겼고, 이 파일은 이미 운영 중인 등록의 정본이다 — 로드 단계에서
+        떨어뜨리면 그 사람은 예고 없이 사라지고(폴러가 티켓을 매핑하지 못한다), 예외로
+        올리면 그 한 줄이 **central 부팅 전체를 막는다.** 둘 다 이 시스템에서 가장 비싼
+        실패 모드다. 그래서 기존 이름은 **그대로 싣되 경고로 드러낸다**(조용한 관용은
+        관용이 아니라 은폐다). 규칙은 *새 등록의 게이트*로만 강제되고
+        (:mod:`app.onboarding`), 위험한 이름이 실제로 경로·컨테이너 이름을 조립하려 들면
+        그때 소비 지점이 막는다(:func:`app.onboarding._write_secret` ·
+        :meth:`app.spawner.Spawner.container_name`) — 부팅이 아니라 그 사용자만 실패한다.
+        같은 규율이 ``consent`` 필드에도 적용된다(위 :class:`Consent` 주석).
+        """
         self._lock = threading.Lock()
         raw = state.load_registry()
         users = raw.get("users", []) if isinstance(raw, dict) else (raw or [])
         self._users: dict[str, UserRecord] = {}
+        legacy_names: list = []
         for u in users:
             rec = UserRecord.from_dict(u)
             if rec.username:
+                if not is_valid_username(rec.username):
+                    # %r 로 싣는다 — repr 이 개행·제어문자를 이스케이프해 로그 라인이
+                    # 조작되지 않는다(이름은 시크릿이 아니므로 가려서 얻을 게 없다).
+                    legacy_names.append(rec.username)
                 self._users[rec.username] = rec
+        if legacy_names:
+            log.warning(
+                "현재 이름 규칙에 맞지 않는 username 이 레지스트리에 있습니다"
+                "(그대로 사용합니다 — 부팅은 막지 않습니다). %d건: %s. 규칙: %s",
+                len(legacy_names), ", ".join(repr(n) for n in legacy_names),
+                USERNAME_HINT,
+            )
 
     def _persist(self) -> None:
         state.save_registry({"users": [u.to_dict() for u in self._users.values()]})

@@ -1,19 +1,15 @@
 """취소/재오픈 — 큐/스케줄러/디스패치 단위테스트(RECURSIVE-DISPATCH §10).
 
 검증: 상태 이름 구분(완료≠취소됨), 큐대기 취소=드롭, 실행중 취소=cancelling+락유지,
-확정 회신 시 락+dedup 해제, 재오픈 재-enqueue, dispatch control 채널, 필드 영속.
+확정 회신 시 락+dedup 해제, 재오픈 재-enqueue, 필드 영속.
 라이브 호출 없음.
 """
 
 from __future__ import annotations
 
-import pytest
-
 from app import queue as q
-from app.dispatch import DISPATCHER_KEY, Dispatcher, dispatch_bp
 from app.gate import DedupGate
 from app.queue import Job, JobQueue
-from app.registry import Registry, UserRecord
 from app.scheduler import Scheduler
 from tests.conftest import make_config
 
@@ -121,59 +117,11 @@ def test_reopen_reenqueues_same_ticket(isolated_state):
     sch.report("PROJ-1", "취소됨")               # cancelled + dedup 해제
     assert sch.jobs.get("PROJ-1").status == q.CANCELLED
 
-    sch.reopen(Job(ticket="PROJ-1", user="u1", target_repos=["repoA"]))
+    # 재오픈은 프랙탈 seam(JobQueue.reopen 슬롯 리셋 + 파이썬 tick)으로 수렴한다
+    # (레거시 scheduler.reopen 래퍼는 fractal-OFF 은퇴로 삭제됨).
+    sch.jobs.reopen(Job(ticket="PROJ-1", user="u1", target_repos=["repoA"]))
+    sch.tick()
     j = sch.jobs.get("PROJ-1")
     assert j.status == q.RUNNING                 # 같은 티켓 재-dispatch
     assert j.cancel_requested is False
     assert j.session_id is None                  # 새 실행으로 초기화
-
-
-# --- dispatch control 채널 --------------------------------------------------
-
-
-def _wire_disp(worker_secret=""):
-    reg = Registry()
-    reg.upsert(UserRecord(username="u1", jira_account_id="a1", enabled=True))
-    gate = DedupGate()
-    sch = Scheduler(make_config(concurrency_per_worker=5), JobQueue(), gate=gate)
-    disp = Dispatcher(reg, sch, worker_secret=worker_secret)
-    return reg, gate, sch, disp
-
-
-def test_control_reports_cancel_flag(isolated_state):
-    _, _, sch, disp = _wire_disp()
-    disp.enqueue("u1", Job(ticket="PROJ-1", target_repos=["repoA"]))
-    # 제어 채널은 cancel 불리언(하위호환) + action 문자열을 함께 준다.
-    assert disp.control("u1", "PROJ-1") == {"cancel": False, "action": "none"}
-    sch.cancel_job("PROJ-1")                       # running → cancelling + flag
-    assert disp.control("u1", "PROJ-1") == {"cancel": True, "action": "cancel"}
-    with pytest.raises(PermissionError):
-        disp.control("other", "PROJ-1")
-    with pytest.raises(KeyError):
-        disp.control("u1", "NOPE")
-
-
-def _client(disp):
-    from flask import Flask
-
-    app = Flask(__name__)
-    app.config[DISPATCHER_KEY] = disp
-    app.register_blueprint(dispatch_bp)
-    return app.test_client()
-
-
-def test_http_control_route(isolated_state):
-    _, _, sch, disp = _wire_disp(worker_secret="secret")
-    disp.enqueue("u1", Job(ticket="PROJ-1", target_repos=["repoA"]))
-    client = _client(disp)
-
-    assert client.get("/dispatch/u1/PROJ-1/control").status_code == 401  # 인증 없음
-    r = client.get("/dispatch/u1/PROJ-1/control", headers={"X-Worker-Secret": "secret"})
-    assert r.status_code == 200 and r.get_json() == {"cancel": False, "action": "none"}
-
-    sch.cancel_job("PROJ-1")
-    r = client.get("/dispatch/u1/PROJ-1/control", headers={"X-Worker-Secret": "secret"})
-    assert r.get_json() == {"cancel": True, "action": "cancel"}
-
-    r = client.get("/dispatch/u1/NOPE/control", headers={"X-Worker-Secret": "secret"})
-    assert r.status_code == 404

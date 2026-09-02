@@ -32,8 +32,6 @@
 env 오버라이드(런타임 우선):
     - ``ROLE``                → role
     - ``SECRETS_DIR``         → secrets.base_dir 의 ``${SECRETS_DIR}`` 치환값
-    - ``CENTRAL_URL``         → spawn.central_url (worker→central 폴링 대상)
-    - ``WORKER_SHARED_SECRET``→ worker_shared_secret (dispatch HTTP 인증)
     - ``NOTIFIER_PROVIDER``   → notifier.provider (신규·중립)
     - ``NOTIFIER_WEBHOOK_REF``→ notifier.webhook_ref (신규·중립. 레거시
       ``GOOGLE_CHAT_WEBHOOK_REF``·``NOTIFY_ENABLED`` 도 계속 받는다)
@@ -48,6 +46,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from app import scope as _scope_mod
 from app.setup_schema import (
     DEPLOY_PROFILES,
     FORGE_KINDS,
@@ -88,8 +87,15 @@ class ForgeConfig:
     """
 
     kind: str = "gitlab"     # gitlab | github
-    base_url: str = ""       # self-hosted forge base URL(비우면 SaaS 기본)
+    base_url: str = ""       # self-hosted forge base URL(비우면 SaaS 기본 또는 판단 불가)
     token_ref: str = ""      # secrets.base_dir 상대 참조(값 아님)
+    # --- base_url 판정의 근거(로더가 채운다 — :func:`app.forge.resolve_base_url`) ---
+    # ⚠️ base_url 을 비워 둔 사내 forge 배포에서는 예전에 요청이 곧장 SaaS 로 나갔다
+    # (= 사내 PAT 가 gitlab.com 으로 전송됐다). 이제 로더가 설정된 레포 URL 에서 base_url
+    # 을 유도하고, 유도조차 못 하면 **비운 채로 근거만** 남긴다 — 부르는 쪽(setup_doctor)
+    # 이 그 근거를 보고 "SaaS 로 보내느니 검사를 건너뛴다"를 판단한다.
+    base_url_source: str = ""   # config | derived | saas | unresolved | ""(근거 없음)
+    base_url_origin: str = ""   # 근거가 된 설정 키(run.dlc_meta_repo_url 등)
 
 
 @dataclass
@@ -116,15 +122,14 @@ class DeployConfig:
     """[deploy] 섹션 — 배포 형태 하나로 나머지 배포 값 파생.
 
     프로파일(local | cloud_vm | onprem_server) 하나를 고르면
-    ``docker_host``·``secrets_base_dir``·``workspace_volume``·``host_deploy_dir`` 이
+    ``docker_host``·``secrets_base_dir``·``workspace_volume`` 이
     :data:`app.setup_schema.PROFILE_DEFAULTS` 에서 파생된다. 개별 값을 명시하면 그게
     우선하고, 레거시 ``spawn.*``/``secrets.base_dir`` 도 계속 존중한다(그리고 계산 결과는
     그 레거시 필드에 **미러**되어 spawner 등 기존 리더가 손대지 않아도 된다).
     """
 
     profile: str = "local"
-    host_deploy_dir: str = ""
-    docker_host: str = "unix:///var/run/docker.sock"
+    docker_host: str = "tcp://socket-proxy:2375"
     secrets_base_dir: str = ""
     workspace_volume: str = "jad-workspace"
 
@@ -137,8 +142,9 @@ class ConsentConfig:
     에이전트를 헤드리스로 돌린다. 설치자가 그 위험을 이해하고 감수했다는 흔적을 남긴다.
 
     ⚠️ 로드 단계에서 **강제(fail-fast)하지 않는다** — 동의 키가 없는 기존 배포를 깨지
-    않기 위해서다. 미동의면 경고만 남기고(:func:`_validate`), 강제는 후속 온보딩
-    검증기의 몫이다.
+    않기 위해서다. 미동의면 경고만 남기고(:func:`_validate`), 강제는 **설치 관문**의
+    몫이다: :mod:`app.setup_validate` 가 통과시키지 않고 ``python -m app.setup validate``
+    가 non-zero 로 끝난다(``doctor`` 의 ``config`` 검사도 같은 것을 실패로 본다).
     """
 
     full_permissions: bool = False
@@ -158,20 +164,50 @@ class JiraConfig:
     """
 
     base_url: str = ""
+    #: **대표** 프로젝트 키(문자열 하나 — 예전부터 그대로). discover·doctor·온보딩 안내가
+    #: 스칼라로 소비한다. 감시 범위의 정본은 "대표 + 아래 ``projects``" 이며 그 합집합을
+    #: 만드는 것은 :func:`app.scope.instance_projects` 다.
     project: str = ""
+    #: **추가** 감시 프로젝트 키(대표 ``project`` 는 여기 포함되지 않는다 — 설정 파일에
+    #: 적힌 그대로다). 로더가 모양 검증만 해서 채운다.
+    #:
+    #: 감시 범위의 **전체 목록**이 필요하면 :func:`app.scope.instance_projects` 를 쓴다
+    #: (대표 + 추가를 합쳐 준다). per-user ``scope.projects`` 가 비어 있을 때 상속되는
+    #: 인스턴스 기본값이 바로 그 합집합이다.
+    projects: list = field(default_factory=list)
     poll_interval_sec: int = 60
+    #: **자격 재확인 주기(초)** — 폴러가 ``GET /rest/api/3/myself`` 로 감시 토큰이 아직
+    #: 살아 있는지 확인하는 최소 간격. 0 이하면 재확인을 끈다.
+    #:
+    #: 왜 필요한가: Jira Cloud 는 자격이 틀려도 JQL 검색에 **200 + 빈 배열**을 준다
+    #: (``/myself`` 만 401). 그래서 토큰이 만료·회수되면 폴러는 "매칭 티켓 없음"과
+    #: 구별하지 못한 채 **영원히 조용히** 돈다. 왜 매 폴이 아닌가: 티켓이 하나라도
+    #: 돌아온 폴은 그 자체가 자격 증거라 확인이 필요 없고, 빈 폴마다 확인하면
+    #: (기본 60초 주기) 하루 1,440회의 순수 진단 요청이 는다. 기본 30분이면 하루 48회로
+    #: 줄면서 최악의 감지 지연이 30분이다 — "영원히 모른다"와 바꿀 만하다.
+    auth_recheck_sec: int = 1800
     watcher_token_file: str = ""  # 중앙 감시 토큰(내 것/봇). secrets.base_dir 상대
     watcher_email: str = ""       # Basic auth actor(감시 계정 이메일). env JIRA_WATCHER_EMAIL 폴백
     # --- 인스턴스별 트리거/역-트리거(레거시 match.* 의 신규 이름 — 항상 미러) ---
+    # ⚠️ 타입은 예전 그대로 **이름 문자열의 리스트**다. 설정 파일에서는 ``{id, name}``
+    # 매핑으로도 줄 수 있고(:func:`_named_refs`), 그때 id 는 아래 ``status_ids`` 로 따로
+    # 보존한다 — 소비처(폴러·워처·웹훅)는 손대지 않아도 되고, 진단은 id↔name 짝을
+    # 검증할 수 있다.
     trigger_statuses: list = field(default_factory=list)
     cancel_statuses: list = field(default_factory=list)
     optout_labels: list = field(default_factory=list)
+    #: 상태 **이름 → 이 인스턴스의 상태 id**(설정이 ``{id, name}`` 으로 준 것만).
+    #: 화면 표시명과 API 의 name 이 어긋나는 사고를 진단이 잡을 수 있게 남긴다.
+    status_ids: dict = field(default_factory=dict)
     # --- 인스턴스별 필드/전이 식별 ---
     # 논리 키 → 커스텀필드 id. 논리 키 목록은 setup_schema.JIRA_CUSTOM_FIELD_KEYS.
     # 비거나 일부만 주면 나머지는 app/jira_client.py 모듈 상수 폴백(하위호환).
     custom_fields: dict = field(default_factory=dict)
     done_transition_id: str = ""   # 비우면 이름으로 식별 → 그래도 없으면 모듈 상수
     done_transition_names: list = field(default_factory=lambda: ["완료", "Done"])
+    #: 전이 **이름 → 전이 id**(``done_transition_names`` 를 ``{id, name}`` 으로 준 경우).
+    #: id 가 정확히 하나면 ``done_transition_id`` 가 비었을 때 그것을 쓴다(로더가 채운다).
+    done_transition_ids: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -200,17 +236,22 @@ class MatchConfig:
 class WebhookConfig:
     """[webhook] 섹션 — Jira 웹훅 수신(이벤트 구동 트리거).
 
-    이벤트 구동 경로(POST /webhook/jira)는 poller.trigger_ticket을 재사용해
-    폴링과 동일한 dedup 게이트/매핑 수렴점을 탄다(폴링은 백스톱 유지). 토큰은
-    "값"이 아니라 secrets.base_dir 상대 참조(secret_ref)로만 둔다 — 미설정/조회불가
-    면 엔드포인트가 503으로 거부한다(무인증 실행 금지). path/shared_secret_file은
-    레거시 동기 경로(app/webhook.py) 전용 필드로 남겨둔다(하위호환).
+    수신 구현은 **하나뿐**이다 — ``app/main.py::register_jira_webhook`` 이
+    ``POST /webhook/jira`` 를 배선하고, 판단은 전부 ``poller.trigger_ticket`` 에
+    위임한다(폴링과 같은 재검증·dedup·매핑·범위 수렴점. 폴링은 백스톱 유지).
+    경로는 고정이라 설정 항목이 아니다.
+
+    인증: 헤더 ``X-Jira-Webhook-Token`` **전용**이며 값은 ``secret_ref``(secrets.base_dir
+    상대 파일 참조)로만 둔다. 쿼리 ``?token=`` 은 프록시·서버 access 로그에 평문으로
+    남는 유출 표면이라 **거부한다**. 시크릿 미설정/조회불가 → 503(무인증 자율 실행 금지).
+
+    ⚠️ 예전에 있던 ``path``·``shared_secret_file`` 은 **없어졌다.** 배선되지 않는 두 번째
+    구현(``app/webhook.py``) 전용 필드였고 그 파일과 함께 지웠다. 기존 config.yaml 에
+    남아 있어도 무시된다(로더가 모르는 키를 그냥 넘긴다).
     """
 
     enabled: bool = True
     secret_ref: str = "service/jira-webhook"
-    path: str = "/jira-webhook"           # 레거시 동기 경로 전용(하위호환)
-    shared_secret_file: str = ""          # 레거시 동기 경로 시크릿 참조(하위호환)
 
 
 @dataclass
@@ -225,24 +266,23 @@ class ResumeConfig:
 
 @dataclass
 class SpawnConfig:
-    """[spawn] 섹션 — 사용자 worker 컨테이너 동적 기동 파라미터."""
+    """[spawn] 섹션 — 사용자 worker 컨테이너 동적 기동 파라미터.
+
+    ⚠️ 예전에 있던 ``central_url`` 은 **없어졌다.** 워커가 중앙을 폴링하던 시절
+    (``app/worker.py``)의 폴링 대상이었는데, 그 소비자가 프랙탈 seam 으로 대체되며
+    제거됐다 — 지금 워커는 HTTP 로 중앙에 말하지 않는다(중앙이 ``docker exec`` 로 밀어
+    넣는다). 기존 config.yaml 의 ``spawn.central_url`` 과 env ``CENTRAL_URL`` 은 남아
+    있어도 **조용히 무시**된다(로더가 모르는 키를 그냥 넘긴다 — 무해).
+    """
 
     image: str = "jira-auto-dispatcher:latest"
     network: str = "jad-net"
-    central_url: str = "http://central:8787"
     mem_limit: str = "4g"
     docker_host: str = "unix:///var/run/docker.sock"
     run_as: str = "1000:1000"  # worker 컨테이너 비-root 실행 사용자(특권 축소)
-    # ⚠️ 호스트 배포 디렉토리의 **절대경로**(central 컨테이너 내부 경로가 아님).
-    # central이 Docker SDK(socket-proxy 경유)로 worker를 띄울 때 바인드 마운트의
-    # source 경로는 **호스트 docker 데몬**이 해석한다(sibling container). 따라서
-    # worker 바인드 source를 호스트 경로로 주려면 central이 자신의 호스트 배포
-    # 경로를 알아야 한다. 예: /home/<deploy-user>/deploy/jira-auto-dispatcher.
-    # env HOST_DEPLOY_DIR 폴백 우선. 비어 있으면(로컬 개발 등) 직접 경로 폴백.
-    host_deploy_dir: str = ""
     # 공유 워크스페이스 **named 볼륨** 이름(central·모든 워커가 공유하는 단일 클론
     # 지점, 설계 §4). central compose가 이 이름으로 선언(`jad-workspace`)하고 worker는
-    # spawner가 같은 이름으로 마운트한다 → 레포 한 벌 공유. named 볼륨이라 host_deploy_dir
+    # spawner가 같은 이름으로 마운트한다 → 레포 한 벌 공유. named 볼륨이라 호스트 경로
     # 무관(볼륨명으로 docker가 해석). 볼륨 bind 경로는 run.workspace_dir.
     workspace_volume: str = "jad-workspace"
 
@@ -417,18 +457,21 @@ class RunConfig:
     # FRACTAL_WORKER 가 있으면 그게 우선(스포너/운영 토글). 지속 세션이 꺼져 있으면
     # (persistent_session False) 이 플래그가 켜져도 신경로는 성립하지 않아 무시된다.
     fractal_worker: bool = False
-    # --- 프랙탈 P2(센트럴 계층) 신경로 피처 플래그(기본 ON — 승격됨) ---
-    # True 면 central 이 신규/갱신 티켓을 **스케줄러 큐(dispatcher.enqueue)** 로 넣는
-    # 대신 **상주 센트럴 라이브 세션**(app/central_session.CentralSession)에 이벤트로
-    # 주입한다(설계 §3.1·§9 P2). 센트럴 세션(=ai-dlc-orchestrator 에이전트)이 사용자별
-    # 서브에이전트를 네이티브로 스폰해 각 워커 컨테이너로 위임하고, 리치 완료-리포트를
-    # 관찰해 설정된 알림 채널(notifier.provider)로 상신한다.
-    # **기본 ON 으로 승격**(라이브 검증 완료 — 티켓 552 클린 완주): 예전엔 비영속 env
-    # FRACTAL_CENTRAL=1 override 로만 켜져 배포마다 꺼졌으나, 이제 config/코드 기본이
-    # True 라 **override 없이 배포만으로 fractal ON** 이 유지된다. env FRACTAL_CENTRAL
-    # 이 명시되면 여전히 그게 우선(운영 토글 — 명시 falsy 로 끌 수도 있음). 지속 세션이
-    # 꺼져 있으면(persistent_session False / 스트림 포맷 불일치) 이 플래그가 켜져도 신경로는
-    # 성립하지 않아 무시된다(central_fractal_enabled 게이트가 함께 요구).
+    # --- 프랙탈 센트럴 실행 경로(**항상 ON — 토글 은퇴**) ---
+    # central 은 신규/갱신 티켓을 **상주 센트럴 라이브 세션**(app/central_session.
+    # CentralSession)에 이벤트로 주입한다(설계 §3.1·§9 P2). 센트럴 세션이 사용자별 서브를
+    # 스폰해 각 워커 컨테이너로 위임하고, 리치 완료-리포트를 관찰해 설정된 알림 채널
+    # (notifier.provider)로 상신한다.
+    #
+    # ⚠️ **이 필드는 더 이상 사용자 토글이 아니다.** 예전엔 False 로 두면 스케줄러 큐 →
+    # 워커 HTTP 폴링(구 경로)으로 돌았지만, 그 소비자(app/worker.py)가 이중 실행(같은
+    # 티켓 두 번 → 중복 변경요청·중복 완료알림)의 원인이라 제거됐다. 따라서 OFF 는
+    # "레거시 경로로 돈다"가 아니라 **"아무것도 실행되지 않는다"** 를 뜻한다 —
+    # :func:`_retire_fractal_central` 가 명시 False 를 경고와 함께 무시하고 True 로 되돌린다
+    # (기존 config.yaml·env 를 깨지 않으면서 조용한 무실행을 막는 하위호환 처리).
+    #
+    # 필드 자체는 남긴다 — central_session.central_fractal_enabled 가 이 값과 지속 세션
+    # 성립 여부(persistent_session + 양방향 stream-json)를 함께 읽어 경로 성립을 판정한다.
     fractal_central: bool = True
 
 
@@ -453,10 +496,18 @@ class AppConfig:
     notifier: NotifierConfig = field(default_factory=NotifierConfig)
     deploy: DeployConfig = field(default_factory=DeployConfig)
     consent: ConsentConfig = field(default_factory=ConsentConfig)
-    # dispatch HTTP(worker→central) 공유 시크릿. env WORKER_SHARED_SECRET 우선.
-    worker_shared_secret: str = ""
+    # ⚠️ 예전에 있던 ``worker_shared_secret`` 은 **없어졌다.** 워커가 중앙의 dispatch
+    # HTTP 엔드포인트를 부르던 시절의 ``X-Worker-Secret`` 인증용이었는데, 그 서빙 표면과
+    # 폴링 소비자가 프랙탈 seam(중앙 → docker exec 푸시)으로 대체되며 사라졌다 — 지금
+    # 이 값은 **아무것도 인증하지 않는다**. 기존 배포의 ``.env``·config.yaml 에 남아
+    # 있어도 조용히 무시된다(무해).
+
     # 티켓 components/labels → 레포 매핑(REPO-MAP). {키: [repo,...]} 또는 {키: repo}.
     repo_map: dict = field(default_factory=dict)
+    # 이 설정이 로드된 파일 경로(:func:`load_config` 가 채운다). spawner 가 워커에
+    # config **원문**을 주입할 때 쓴다(:meth:`app.spawner.Spawner.config_text`).
+    # dict 로부터 만든 설정은 원본 파일이 없으므로 빈 문자열이다.
+    config_path: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -514,7 +565,7 @@ def _build_deploy(deploy: dict, spawn: dict, secrets: dict) -> DeployConfig:
 
     우선순위(항목별 독립):
         1. 명시 ``deploy.<key>``
-        2. 명시 레거시 키(``spawn.host_deploy_dir``·``spawn.docker_host``·
+        2. 명시 레거시 키(``spawn.docker_host``·
            ``spawn.workspace_volume``·``secrets.base_dir``)
         3. ``deploy.profile`` 파생 기본(:data:`app.setup_schema.PROFILE_DEFAULTS`)
         4. 코드 기본값(dataclass)
@@ -530,8 +581,6 @@ def _build_deploy(deploy: dict, spawn: dict, secrets: dict) -> DeployConfig:
     derived = PROFILE_DEFAULTS[profile]
     return DeployConfig(
         profile=profile,
-        host_deploy_dir=str(_pick(deploy, "host_deploy_dir", spawn, "host_deploy_dir",
-                                  derived["host_deploy_dir"])),
         docker_host=str(_pick(deploy, "docker_host", spawn, "docker_host",
                               derived["docker_host"])),
         secrets_base_dir=str(_pick(deploy, "secrets_base_dir", secrets, "base_dir",
@@ -565,6 +614,41 @@ def _build_notifier(notifier: dict, notify: dict) -> NotifierConfig:
         notify_cancelled=bool(_pick(notifier, "notify_cancelled",
                                     notify, "notify_cancelled", True)),
     )
+
+
+def _named_refs(items: Any) -> tuple:
+    """``["이름"]`` 또는 ``[{id, name}]`` → ``(이름 목록, {이름: id})``.
+
+    왜 두 모양을 받는가:
+        Jira 는 화면에 보이는 **표시명**과 API 가 쓰는 **id/name** 이 어긋날 수 있고,
+        JQL 은 name 으로 거는데 전이는 id 로 건다. 사람이 눈에 보이는 상태명을 타이핑하면
+        어긋나고, 그러면 폴러가 **조용히 아무 티켓도 못 찾는다**(가장 나쁜 실패 모드).
+        그래서 설치 관문의 ``discover``(:mod:`app.setup_discover`)는 실제 인스턴스를 조회해
+        **id 와 name 을 함께** 적어 준다.
+
+    왜 반환 타입을 안 바꾸는가:
+        런타임 소비처(폴러·상태워처·웹훅)는 전부 **이름 목록**을 본다. 그 타입을 바꾸면
+        이 리포 전체를 건드려야 하고 레거시 ``match.*`` 미러까지 갈라진다. 그래서 이름은
+        예전 그대로 리스트로 주고, id 는 **곁에** 표로 돌려준다.
+
+    하위호환: 문자열만 준 옛 설정은 ``({이름들}, {})`` 로 그대로 읽힌다(무동작변경).
+    이름이 없는 항목(빈 문자열·매핑에 name 부재)은 조용히 버린다 — 이름이 없으면
+    JQL 에도 미러에도 쓸 수 없는 값이다.
+    """
+    names: list = []
+    ids: dict = {}
+    for item in list(items or []):
+        if isinstance(item, dict):
+            name = str(item.get("name", "") or "").strip()
+            ref_id = str(item.get("id", "") or "").strip()
+        else:
+            name, ref_id = str(item or "").strip(), ""
+        if not name:
+            continue
+        names.append(name)
+        if ref_id:
+            ids[name] = ref_id
+    return names, ids
 
 
 def _build_forge(forge: dict, run: dict) -> ForgeConfig:
@@ -604,7 +688,6 @@ def _sync_deploy_aliases(cfg: "AppConfig") -> None:
     적용되므로 **양방향 수렴**이 필요하다: 먼저 deploy → 레거시로 밀고, env 단계 이후에는
     레거시 → deploy 로 되당겨(:func:`_apply_env_overrides` 끝) 두 값이 항상 일치하게 한다.
     """
-    cfg.spawn.host_deploy_dir = cfg.deploy.host_deploy_dir
     cfg.spawn.docker_host = cfg.deploy.docker_host
     cfg.spawn.workspace_volume = cfg.deploy.workspace_volume
     cfg.secrets.base_dir = cfg.deploy.secrets_base_dir
@@ -672,7 +755,9 @@ def load_config(path: str = DEFAULT_CONFIG_PATH) -> AppConfig:
         raise ConfigError(f"설정 최상위는 매핑이어야 합니다: {path}")
 
     raw = _substitute_env(raw)
-    return _build_config(raw)
+    cfg = _build_config(raw)
+    cfg.config_path = path      # 워커 주입 시 원문을 다시 읽을 자리(단일 원천).
+    return cfg
 
 
 def load_config_from_dict(raw: dict) -> AppConfig:
@@ -711,6 +796,39 @@ def _build_config(raw: dict) -> AppConfig:
     # 배포 값은 spawn/secrets 보다 먼저 확정한다(그 섹션들의 값을 이게 결정하므로).
     deploy = _build_deploy(deploy_sect, spawn, secrets)
 
+    # 상태·전이는 ``"이름"`` 과 ``{id, name}`` 두 모양을 다 받는다(:func:`_named_refs`).
+    # 키 부재 → 문서화된 기본. 명시 빈 리스트([]) → 기능 비활성(존중).
+    trigger_names, trigger_ids = _named_refs(
+        _pick_list(jira, "trigger_statuses", match, "statuses", []))
+    cancel_names, cancel_ids = _named_refs(
+        _pick_list(jira, "cancel_statuses", match, "cancel_statuses", ["취소됨"]))
+    done_names, done_ids = _named_refs(
+        jira.get("done_transition_names", ["완료", "Done"]) or [])
+    done_id = str(jira.get("done_transition_id", "") or "")
+    # id 를 명시하지 않았는데 이름 쪽에 id 가 **딱 하나** 달려 있으면 그것이 곧 완료 전이다
+    # (discover 가 실측해 적어 준 형태). 여러 개면 모호하므로 이름 매칭에 맡긴다.
+    if not done_id and len(set(done_ids.values())) == 1:
+        done_id = next(iter(done_ids.values()))
+
+    # 감시 프로젝트 — 대표(``jira.project``, 문자열 하나) + 추가(``jira.projects``, 목록).
+    # 옛 설정이 ``project`` 에 리스트를 적어 둔 경우도 조용히 ``str(...)`` 로 뭉개지 않고
+    # 첫 원소를 대표로, 나머지를 추가로 흡수한다(그러지 않으면 "['A', 'B']" 라는 존재하지
+    # 않는 프로젝트 키로 JQL 이 나가 아무 티켓도 못 찾는다).
+    jira_project_raw = jira.get("project", "")
+    if isinstance(jira_project_raw, (list, tuple)):
+        _pl = [str(x).strip() for x in jira_project_raw if str(x).strip()]
+        jira_project = _pl[0] if _pl else ""
+        jira_extra_projects = [*_pl[1:], *(jira.get("projects", []) or [])]
+        log.warning("jira.project 에 목록이 왔습니다 — 대표는 %r, 나머지는 jira.projects "
+                    "로 흡수합니다(설정에는 jira.projects 를 쓰세요).", jira_project)
+    else:
+        jira_project = str(jira_project_raw or "")
+        jira_extra_projects = list(jira.get("projects", []) or [])
+    # ⚠️ 대표(``project``)는 여기 섞지 않는다 — 이 필드는 "설정 파일이 뭐라고 했나"를
+    #    그대로 담고(스키마 기본값 ``[]`` 와 일치), 합집합은 app/scope.py 가 만든다.
+    jira_projects = _scope_mod.normalize_projects(
+        jira_extra_projects, source="jira.projects")
+
     cfg = AppConfig(
         role=str(raw.get("role", "central")).strip().lower(),
         server=ServerConfig(
@@ -719,31 +837,29 @@ def _build_config(raw: dict) -> AppConfig:
         ),
         jira=JiraConfig(
             base_url=str(jira.get("base_url", "")).rstrip("/"),
-            project=str(jira.get("project", "")),
+            project=jira_project,
+            projects=jira_projects,
             poll_interval_sec=int(jira.get("poll_interval_sec", 60)),
+            auth_recheck_sec=int(jira.get("auth_recheck_sec", 1800)),
             watcher_token_file=str(jira.get("watcher_token_file", "")),
             watcher_email=str(jira.get("watcher_email", "")),
-            # 신규 jira.* 우선, 없으면 레거시 match.*.
-            # 키 부재 → 문서화된 기본. 명시 빈 리스트([]) → 기능 비활성(존중).
-            trigger_statuses=_pick_list(jira, "trigger_statuses", match, "statuses", []),
-            cancel_statuses=_pick_list(jira, "cancel_statuses", match, "cancel_statuses",
-                                       ["취소됨"]),
+            # 신규 jira.* 우선, 없으면 레거시 match.* (위에서 _named_refs 로 정규화).
+            trigger_statuses=trigger_names,
+            cancel_statuses=cancel_names,
             optout_labels=_pick_list(jira, "optout_labels", match, "optout_labels",
                                      ["자동화_추적_해제"]),
+            status_ids={**cancel_ids, **trigger_ids},
             # 인스턴스별 필드/전이 식별 — 비면 jira_client 모듈 상수 폴백(하위호환).
             custom_fields=dict(jira.get("custom_fields", {}) or {}),
-            done_transition_id=str(jira.get("done_transition_id", "") or ""),
-            done_transition_names=list(
-                jira.get("done_transition_names", ["완료", "Done"]) or []
-            ),
+            done_transition_id=done_id,
+            done_transition_names=done_names,
+            done_transition_ids=done_ids,
         ),
         # match 는 jira.* 의 레거시 미러 — 아래 _sync_jira_match_aliases 가 채운다.
         match=MatchConfig(),
         webhook=WebhookConfig(
             enabled=bool(webhook.get("enabled", True)),
             secret_ref=str(webhook.get("secret_ref", "service/jira-webhook")),
-            path=str(webhook.get("path", "/jira-webhook")),
-            shared_secret_file=str(webhook.get("shared_secret_file", "")),
         ),
         resume=ResumeConfig(
             work_hours=str(resume.get("work_hours", "")),
@@ -754,13 +870,11 @@ def _build_config(raw: dict) -> AppConfig:
         spawn=SpawnConfig(
             image=str(spawn.get("image", "jira-auto-dispatcher:latest")),
             network=str(spawn.get("network", "jad-net")),
-            central_url=str(spawn.get("central_url", "http://central:8787")),
             mem_limit=str(spawn.get("mem_limit", "4g")),
             run_as=str(spawn.get("run_as", "1000:1000")),
-            # docker_host·host_deploy_dir·workspace_volume 은 deploy 가 정본이다
+            # docker_host·workspace_volume 은 deploy 가 정본이다
             # (레거시 spawn.* 값도 _build_deploy 가 이미 흡수했다).
             docker_host=deploy.docker_host,
-            host_deploy_dir=deploy.host_deploy_dir,
             workspace_volume=deploy.workspace_volume,
         ),
         git=GitConfig(
@@ -805,11 +919,11 @@ def _build_config(raw: dict) -> AppConfig:
             ai_cooldown_max_sec=int(run.get("ai_cooldown_max_sec", 900)),
             tier2_pilot_user=str(run.get("tier2_pilot_user", "")).strip(),
             fractal_worker=bool(run.get("fractal_worker", False)),
-            # 승격됨: 키 부재 → 기본 True(override 없이 배포만으로 fractal ON). env
-            # FRACTAL_CENTRAL 명시 시 _apply_env_overrides 가 여전히 우선(끌 수도 있음).
+            # 은퇴한 토글 — 값과 무관하게 항상 True 로 수렴한다(_retire_fractal_central).
+            # 여기서 raw 값을 그대로 읽는 이유는 "사용자가 명시적으로 껐는가"를 그 함수가
+            # 알아야 경고를 띄울 수 있기 때문이다.
             fractal_central=bool(run.get("fractal_central", True)),
         ),
-        worker_shared_secret=str(raw.get("worker_shared_secret", "")),
         repo_map=dict(raw.get("repo_map", {}) or {}),
         forge=_build_forge(forge, run),
         notifier=_build_notifier(notifier, notify),
@@ -831,8 +945,40 @@ def _build_config(raw: dict) -> AppConfig:
 
     _derive_workspace_paths(cfg.run)
     _apply_env_overrides(cfg)
+    # 레포 URL 로 forge base_url 을 확정한다 — run.* 경로·env 가 모두 정해진 뒤에 한다.
+    _resolve_forge_base_url(cfg)
     _validate(cfg)
     return cfg
+
+
+def _resolve_forge_base_url(cfg: "AppConfig") -> None:
+    """``forge.base_url`` 이 비어 있으면 **설정된 레포 URL 에서 유도**한다(+근거 기록).
+
+    ⚠️ 보안 문제를 막는 자리다. 예전에는 이 값이 비면 forge 호출이 그대로 SaaS 기본
+    엔드포인트로 나갔다 — 사내 GitLab 을 쓰는 팀이 base_url 을 안 적으면 **사내 PAT 가
+    gitlab.com 으로 전송**됐다. 진단이 실패하는 것보다 토큰이 엉뚱한 곳으로 나가는 것이
+    문제다.
+
+    판정과 근거는 :func:`app.forge.resolve_base_url` 이 만든다(단일 원천). 여기서는
+    그 결과를 설정에 반영만 한다:
+        - self-hosted 로 **유도**됐으면 ``base_url`` 을 채운다.
+        - SaaS 임이 **확인**됐으면 채우지 않는다(각 forge 의 SaaS API 엔드포인트가
+          호스트와 다를 수 있다 — GitHub 은 ``api.github.com``).
+        - 근거가 없거나 주소를 못 뽑으면 **비운 채로 근거만** 남긴다. 그 경우
+          :mod:`app.setup_doctor` 는 SaaS 로 토큰을 보내는 대신 검사를 건너뛴다.
+    """
+    from app import forge as forge_mod   # 지연 import — forge 가 config 를 import 하지 않게
+
+    resolution = forge_mod.resolve_base_url(cfg)
+    cfg.forge.base_url_source = resolution.source
+    cfg.forge.base_url_origin = resolution.origin
+    if resolution.source == forge_mod.SOURCE_DERIVED and not cfg.forge.base_url:
+        cfg.forge.base_url = resolution.base_url
+        log.info(
+            "forge.base_url 이 비어 있어 %s 의 호스트에서 유도했습니다: %s "
+            "(사내 forge 라면 config.yaml 에 명시해 두는 편이 안전합니다)",
+            resolution.origin, resolution.base_url,
+        )
 
 
 def _derive_workspace_paths(run: RunConfig) -> None:
@@ -881,13 +1027,13 @@ def _apply_env_overrides(cfg: AppConfig) -> None:
     if secrets_dir and (not cfg.secrets.base_dir or "${SECRETS_DIR}" in cfg.secrets.base_dir):
         cfg.secrets.base_dir = cfg.secrets.base_dir.replace("${SECRETS_DIR}", secrets_dir) or secrets_dir
 
-    central_url = os.environ.get("CENTRAL_URL")
-    if central_url:
-        cfg.spawn.central_url = central_url
-
-    worker_secret = os.environ.get("WORKER_SHARED_SECRET")
-    if worker_secret:
-        cfg.worker_shared_secret = worker_secret
+    # ⚠️ ``CENTRAL_URL`` · ``WORKER_SHARED_SECRET`` env 는 **더 이상 읽지 않는다.**
+    # 둘 다 워커가 중앙의 dispatch HTTP 를 폴링하던 시절의 값이었고(폴링 대상 주소 ·
+    # ``X-Worker-Secret`` 공유 시크릿), 그 서빙 표면과 폴링 소비자가 프랙탈 seam
+    # (중앙 → ``docker exec`` 푸시)으로 대체되며 소비자가 하나도 남지 않았다.
+    # ``HOST_DEPLOY_DIR`` 과 같은 처리 — 기존 배포의 ``.env``·compose 에 남아 있어도
+    # **조용히 무시**된다(값이 아무 동작도 바꾸지 않으므로 경고할 사용자 의도가 없다.
+    # 동작이 달라지는 ``fractal_central`` 은퇴와는 다른 경우다).
 
     # 완료 알림 웹훅 참조(시크릿 파일 참조) env 폴백 — YAML보다 우선. 값이 아니라 참조.
     # ⚠️ 정본은 cfg.notifier 이므로 거기에 적용하고 레거시 cfg.notify 로 미러한다.
@@ -928,34 +1074,64 @@ def _apply_env_overrides(cfg: AppConfig) -> None:
     if fractal is not None and fractal.strip():
         cfg.run.fractal_worker = fractal.strip().lower() in ("1", "true", "yes", "on")
 
-    # 프랙탈 P2 센트럴 신경로 토글 env 폴백(YAML보다 우선). 명시된 truthy/falsy 만 반영.
+    # 프랙탈 센트럴 경로 env 토글(은퇴) — 명시 falsy 는 아래 _retire_fractal_central 가
+    # 경고와 함께 무시한다. 값을 일단 반영해 두는 이유는 그 함수가 "껐다"를 감지하기 위해서다.
     fractal_central = os.environ.get("FRACTAL_CENTRAL")
     if fractal_central is not None and fractal_central.strip():
         cfg.run.fractal_central = fractal_central.strip().lower() in ("1", "true", "yes", "on")
+    _retire_fractal_central(cfg)
 
-    # 호스트 배포 디렉토리(worker 바인드 source용). env HOST_DEPLOY_DIR 폴백 우선.
-    host_deploy_dir = os.environ.get("HOST_DEPLOY_DIR")
-    if host_deploy_dir:
-        cfg.spawn.host_deploy_dir = host_deploy_dir
-    # env 미설정으로 ${HOST_DEPLOY_DIR} 토큰이 미치환으로 남았으면 빈 값으로
-    # 취급한다(→ spawner가 직접 경로 폴백 + 경고). 조용한 broken bind 방지.
-    if "${" in cfg.spawn.host_deploy_dir:
-        cfg.spawn.host_deploy_dir = ""
+    # ⚠️ ``HOST_DEPLOY_DIR`` env 와 ``deploy.host_deploy_dir`` 키는 **제거됐다**.
+    # 워커에 거는 마운트가 전부 named 볼륨이 되어(나머지는 스폰 시 주입 —
+    # :mod:`app.inject`) 호스트 경로를 알 필요가 사라졌기 때문이다. 기존 배포의
+    # .env·config.yaml 에 값이 남아 있어도 **조용히 무시**된다(무해).
 
     # env 는 레거시 필드(spawn.*/secrets.base_dir)에 적용됐다 — deploy 정본으로 되당겨
     # 두 표현이 항상 같은 값을 갖게 한다(역방향 수렴).
-    cfg.deploy.host_deploy_dir = cfg.spawn.host_deploy_dir
     cfg.deploy.docker_host = cfg.spawn.docker_host
     cfg.deploy.workspace_volume = cfg.spawn.workspace_volume
     cfg.deploy.secrets_base_dir = cfg.secrets.base_dir
+
+
+def _retire_fractal_central(cfg: AppConfig) -> None:
+    """``run.fractal_central: false`` (또는 ``FRACTAL_CENTRAL=0``)를 **무시**하고 경고한다.
+
+    fractal-OFF 모드는 은퇴했다. 예전에 OFF 는 "스케줄러 큐 → 워커 HTTP 폴링(구 경로)로
+    돈다"는 뜻이었지만, 그 폴링 소비자(``app/worker.py``)가 프랙탈 경로와 **이중 실행**
+    (같은 티켓 두 번 → 중복 브랜치·변경요청·완료알림)을 일으켜 제거됐다. 소비자가 없는
+    지금 OFF 는 **"티켓이 감지돼도 아무것도 실행되지 않는다"** 를 뜻한다.
+
+    선택지는 두 가지였다 — (a) 부팅 거부, (b) 무시 + 경고. **(b)** 를 택한다:
+
+    - 이 값은 남의 배포에 이미 적혀 있을 수 있는 옛 키다(예전 기본이 OFF 였다). 부팅을
+      거부하면 업그레이드가 곧 장애가 된다 — 설정을 고칠 관리 UI 조차 뜨지 않는다.
+    - 무시해서 잃는 것이 없다. OFF 로 얻을 수 있는 동작이 더 이상 존재하지 않기 때문이다
+      (구 경로는 코드가 없다). 즉 "무시"가 사용자 의도를 왜곡하는 경우가 없다.
+    - 조용히 무시하지는 않는다 — ERROR 로 남겨 왜 값이 안 먹었는지 추적 가능하게 한다.
+
+    ⚠️ 이 함수가 True 로 되돌려도 **경로 성립은 별개**다. 지속 세션(``persistent_session``
+    + 양방향 stream-json)이 꺼져 있으면 ``central_fractal_enabled`` 가 여전히 False 이고,
+    그 경우 main 이 부팅 로그로, 부팅 자가진단이 ``/api/doctor`` 로 그 사실을 드러낸다.
+    """
+    run = getattr(cfg, "run", None)
+    if run is None or bool(getattr(run, "fractal_central", True)):
+        return
+    log.error(
+        "⚠️ run.fractal_central: false 는 **무시됩니다**(항상 ON). 프랙탈 센트럴 세션이 "
+        "유일 실행 경로이며, 예전의 OFF 경로(스케줄러 큐 → 워커 HTTP 폴링)는 이중 실행"
+        "(중복 변경요청·중복 완료알림) 때문에 제거됐습니다. config.yaml 의 run."
+        "fractal_central 키와 env FRACTAL_CENTRAL 은 지워도 됩니다."
+    )
+    run.fractal_central = True
 
 
 def _validate(cfg: AppConfig) -> None:
     """필수키 검증(fail-fast). central 역할에 필요한 최소 집합만 강제.
 
     ⚠️ ``consent.full_permissions`` 는 **여기서 강제하지 않는다** — 동의 키가 없는 기존
-    배포를 깨지 않기 위해 경고만 남긴다. 온보딩 단계의 강제는 후속 검증기의 몫이다
-    (:mod:`app.setup_schema` 는 이미 required 로 선언해 뒀다).
+    배포를 깨지 않기 위해 경고만 남긴다. 설치 단계의 강제는 :mod:`app.setup_validate`
+    (``python -m app.setup validate``)가 한다 — :mod:`app.setup_schema` 의 required
+    선언이 그 근거다.
     """
     missing: list[str] = []
 

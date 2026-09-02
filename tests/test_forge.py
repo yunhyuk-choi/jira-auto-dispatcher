@@ -394,67 +394,75 @@ def test_notifier_env_accepts_neutral_and_legacy_names(tmp_path, monkeypatch):
     assert C.load_config(str(p)).notifier.provider == "none"
 
 
-# --- worker: 변경요청 닫기 forge 라우팅 --------------------------------------
+# --- 변경요청 닫기 forge 라우팅 ----------------------------------------------
+#
+# ⚠️ 이 프리미티브(app/forge.close_change_request)의 파이썬 호출자는 현재 없다 — 취소
+# 롤백을 하던 워커 폴링 루프가 프랙탈 센트럴 세션으로 대체되며 함께 은퇴했다. 그래도
+# **GitLab MR API 와 GitHub PR API 의 모양 차이**는 여기 말고 기록된 곳이 없으므로,
+# 어댑터와 함께 그 계약을 지킨다(옛 tests/test_forge.py 의 worker 섹션에서 이관).
 
 
-def test_default_mr_closer_routes_to_github_pr_api(tmp_path, monkeypatch):
-    import requests
+class _FakeHTTP:
+    """requests 모듈 대역 — put/patch 호출을 기록하고 상태코드를 돌려준다."""
 
-    from app import worker as W
+    def __init__(self, status_code=200):
+        self.status_code = status_code
+        self.calls: list = []
 
-    base = str(tmp_path / "secrets")
-    _write(base, "u/forge-token", "GH-PAT")
-    calls: list = []
+    def put(self, url, **kw):
+        self.calls.append(("put", url, kw))
+        return SimpleNamespace(status_code=self.status_code)
 
-    def fake_patch(url, **kw):
-        calls.append((url, kw))
-        return SimpleNamespace(status_code=200)
+    def patch(self, url, **kw):
+        self.calls.append(("patch", url, kw))
+        return SimpleNamespace(status_code=self.status_code)
 
-    def boom_put(*a, **kw):  # GitLab 경로로 새면 즉시 실패시킨다.
-        raise AssertionError("GitHub PR 인데 GitLab MR API 를 호출했다")
 
-    monkeypatch.setattr(requests, "patch", fake_patch)
-    monkeypatch.setattr(requests, "put", boom_put)
-
-    creds = UserCreds(user="u", forge_token_ref="u/forge-token")
-    ok = W._default_mr_closer("https://github.com/owner/repo/pull/7",
-                              creds, _cfg("github", base))
+def test_close_change_request_routes_to_github_pr_api():
+    http = _FakeHTTP()
+    ok = F.close_change_request("https://github.com/owner/repo/pull/7", "GH-PAT",
+                                config=_cfg("github"), http=http)
     assert ok is True
-    url, kw = calls[0]
+    verb, url, kw = http.calls[0]
+    assert verb == "patch"      # ⚠️ GitLab 의 PUT 이 아니라 GitHub 의 PATCH
     assert url == "https://api.github.com/repos/owner/repo/pulls/7"
     assert kw["json"] == {"state": "closed"}
     assert kw["headers"]["Authorization"] == "Bearer GH-PAT"
 
 
-def test_default_mr_closer_still_routes_gitlab_mr(tmp_path, monkeypatch):
-    import requests
-
-    from app import worker as W
-
-    base = str(tmp_path / "secrets")
-    _write(base, "u/forge-token", "GL-PAT")
-    calls: list = []
-
-    monkeypatch.setattr(requests, "put",
-                        lambda url, **kw: (calls.append((url, kw)),
-                                           SimpleNamespace(status_code=200))[1])
-    creds = UserCreds(user="u", forge_token_ref="u/forge-token")
-    ok = W._default_mr_closer("https://gitlab.example.com/g/p/-/merge_requests/7",
-                              creds, _cfg("gitlab", base))
+def test_close_change_request_routes_to_gitlab_mr_api():
+    http = _FakeHTTP()
+    ok = F.close_change_request("https://gitlab.example.com/g/p/-/merge_requests/7", "GL-PAT",
+                                config=_cfg("gitlab"), http=http)
     assert ok is True
-    url, kw = calls[0]
+    verb, url, kw = http.calls[0]
+    assert verb == "put"
     assert url.endswith("/api/v4/projects/g%2Fp/merge_requests/7")
+    assert kw["params"] == {"state_event": "close"}
     assert kw["headers"]["PRIVATE-TOKEN"] == "GL-PAT"
 
 
-@pytest.mark.parametrize("bad", ["https://github.com/owner/repo", "not-a-url", ""])
-def test_default_mr_closer_is_best_effort_on_bad_urls(bad, tmp_path):
-    from app import worker as W
+def test_close_change_request_prefers_the_url_over_config_kind():
+    """이미 만들어진 링크를 되돌리는 일이라 **링크의 모양**이 config 보다 믿을 만하다."""
+    http = _FakeHTTP()
+    # config 는 gitlab 인데 URL 은 GitHub PR → GitHub API 로 가야 한다.
+    assert F.close_change_request("https://github.com/o/r/pull/3", "PAT",
+                                  config=_cfg("gitlab"), http=http) is True
+    assert http.calls[0][0] == "patch"
 
-    base = str(tmp_path / "secrets")
-    _write(base, "u/forge-token", "PAT")
-    creds = UserCreds(user="u", forge_token_ref="u/forge-token")
-    assert W._default_mr_closer(bad, creds, _cfg("github", base)) is False
+
+@pytest.mark.parametrize("bad", ["https://github.com/owner/repo", "not-a-url", ""])
+def test_close_change_request_is_best_effort_on_bad_urls(bad):
+    http = _FakeHTTP()
+    assert F.close_change_request(bad, "PAT", config=_cfg("github"), http=http) is False
+    assert http.calls == []
+
+
+def test_close_change_request_without_token_never_calls_out():
+    http = _FakeHTTP()
+    assert F.close_change_request("https://github.com/o/r/pull/3", "",
+                                  config=_cfg("github"), http=http) is False
+    assert http.calls == []
 
 
 # --- 프롬프트/알림 용어 ------------------------------------------------------
@@ -474,15 +482,122 @@ def test_prompt_uses_pr_wording_on_github():
     assert "원격(GitLab)" in build_prompt(job_b, _cfg("gitlab"))
 
 
-def test_notify_message_uses_pr_wording_on_github():
-    from app.notify import build_message
+# ⚠️ 알림 **메시지 조립**의 MR/PR 용어 테스트는 제거됐다 — 그 조립기
+# (app/notify.build_message)가 워커 잡-종료 통지자와 함께 은퇴했기 때문이다. 프랙탈
+# 경로의 알림 본문은 에이전트가 쓴 완료-리포트 그대로이고(notify_report.py), 용어를
+# 고르는 자리는 위 프롬프트 테스트가 지킨다.
 
-    result = SimpleNamespace(status="done", mr_url="https://github.com/o/r/pull/5",
-                             final_text="완료")
-    job = {"ticket": "PROJ-1", "autonomy_mode": "A"}
-    creds = UserCreds(user="u")
-    msg = build_message(result=result, job=job, creds=creds, forge_kind="github")
-    assert "PR: https://github.com/o/r/pull/5" in msg
-    assert "PR을 리뷰·머지" in msg
-    # 기본(kind 미지정)은 종전 문구 그대로.
-    assert "MR: " in build_message(result=result, job=job, creds=creds)
+
+# --- base URL 판정 — ⚠️ **토큰이 나갈 곳을 정하는 일이다** --------------------
+#
+# forge.base_url 이 비면 예전에는 요청이 곧장 SaaS(gitlab.com)로 나갔다. 사내 GitLab 을
+# 쓰는 팀이 그 값을 안 적으면 **사내 PAT 가 gitlab.com 으로 전송**됐다 — 진단 실패보다
+# 그쪽이 훨씬 나쁘다. 아래 테스트가 그 회귀를 못박는다.
+
+
+def _cfg_urls(kind="gitlab", base_url="", dlc_meta="", docs="", orchestrator=""):
+    """forge 설정 + 레포 URL 만 갖춘 최소 config 유사 객체."""
+    return SimpleNamespace(
+        forge=SimpleNamespace(kind=kind, base_url=base_url, token_ref=""),
+        run=SimpleNamespace(dlc_meta_repo_url=dlc_meta, docs_repo_url=docs,
+                            orchestrator_repo_url=orchestrator),
+    )
+
+
+@pytest.mark.parametrize("url,expected", [
+    ("https://gitlab.example.com/g/r.git", "https://gitlab.example.com"),
+    ("https://git.corp.example.com:8443/g/r.git", "https://git.corp.example.com:8443"),
+    ("https://oauth2:tok@gitlab.example.com/g/r.git", "https://gitlab.example.com"),
+    ("http://gitlab.internal/g/r.git", "http://gitlab.internal"),
+    ("git@gitlab.example.com:g/r.git", ""),        # scp 형식 — 스킴을 지어내지 않는다
+    ("ssh://git@gitlab.example.com/g/r.git", ""),  # ssh 는 API base URL 이 아니다
+    ("", ""),
+])
+def test_base_url_from_url(url, expected):
+    assert F.base_url_from_url(url) == expected
+
+
+def test_explicit_base_url_wins():
+    r = F.resolve_base_url(_cfg_urls(base_url="https://gitlab.corp.example.com/"))
+    assert r.base_url == "https://gitlab.corp.example.com"
+    assert r.source == F.SOURCE_CONFIG and r.usable
+
+
+def test_base_url_is_derived_from_the_dlc_meta_repo_url():
+    r = F.resolve_base_url(_cfg_urls(dlc_meta="https://gitlab.corp.example.com/g/m.git"))
+    assert r.base_url == "https://gitlab.corp.example.com"
+    assert r.source == F.SOURCE_DERIVED and r.origin == "run.dlc_meta_repo_url"
+
+
+def test_neutral_host_is_accepted_as_evidence():
+    """git.corp.example.com 은 forge 종류를 안 밝히지만, 토큰이 이미 그리로 나간다."""
+    r = F.resolve_base_url(_cfg_urls(dlc_meta="https://git.corp.example.com/g/m.git"))
+    assert r.base_url == "https://git.corp.example.com" and r.source == F.SOURCE_DERIVED
+
+
+def test_saas_host_is_confirmed_not_derived():
+    """⚠️ github.com 을 base_url 로 채우면 오히려 틀린다(API 는 api.github.com)."""
+    r = F.resolve_base_url(_cfg_urls(kind="github",
+                                     dlc_meta="https://github.com/acme/m.git"))
+    assert r.base_url == "" and r.source == F.SOURCE_SAAS and r.usable
+
+    r2 = F.resolve_base_url(_cfg_urls(dlc_meta="https://gitlab.com/acme/m.git"))
+    assert r2.base_url == "" and r2.source == F.SOURCE_SAAS and r2.usable
+
+
+def test_a_url_belonging_to_another_forge_is_ignored():
+    """한 배포가 여러 forge 를 섞어 쓴다 — github.com 레포가 gitlab 토큰의 근거일 리 없다."""
+    r = F.resolve_base_url(_cfg_urls(kind="gitlab",
+                                     dlc_meta="https://github.com/acme/m.git",
+                                     docs="https://gitlab.corp.example.com/g/d.git"))
+    assert r.base_url == "https://gitlab.corp.example.com"
+    assert r.origin == "run.docs_repo_url"
+
+
+def test_no_repo_url_at_all_is_not_usable():
+    """근거가 없으면 SaaS 로 떨어지지 않는다 — 부르는 쪽이 SKIP 해야 한다."""
+    r = F.resolve_base_url(_cfg_urls())
+    assert r.source == F.SOURCE_NONE and not r.usable and r.base_url == ""
+
+
+def test_ssh_only_self_hosted_url_is_unresolved_not_saas():
+    r = F.resolve_base_url(_cfg_urls(dlc_meta="git@gitlab.corp.example.com:g/m.git"))
+    assert r.source == F.SOURCE_UNRESOLVED and not r.usable
+    assert r.host == "gitlab.corp.example.com"
+
+
+def test_orchestrator_repo_url_is_not_evidence():
+    """공개 프레임워크 레포는 고정 리터럴(github.com)이라 조직의 forge 증거가 아니다.
+
+    이걸 근거로 삼으면 GitHub Enterprise 배포가 'SaaS 확인됨'으로 오판된다.
+    """
+    r = F.resolve_base_url(_cfg_urls(
+        kind="github", orchestrator="https://github.com/yunhyuk-choi/ai-dlc-orchestrator.git"))
+    assert r.source == F.SOURCE_NONE and not r.usable
+
+
+def test_loader_fills_base_url_from_repo_url(tmp_path, monkeypatch):
+    """실제 파서가 이 판정을 설정에 반영한다(+근거를 남긴다)."""
+    monkeypatch.setenv("SECRETS_DIR", "/run/secrets")
+    cfg = C.load_config_from_dict({
+        "role": "central",
+        "jira": {"base_url": "https://x", "project": "P", "watcher_token_file": "t"},
+        "secrets": {"base_dir": "${SECRETS_DIR}"},
+        "forge": {"kind": "gitlab"},
+        "run": {"dlc_meta_repo_url": "https://gitlab.corp.example.com/g/m.git"},
+    })
+    assert cfg.forge.base_url == "https://gitlab.corp.example.com"
+    assert cfg.forge.base_url_source == F.SOURCE_DERIVED
+    assert cfg.forge.base_url_origin == "run.dlc_meta_repo_url"
+
+
+def test_loader_leaves_saas_base_url_empty(monkeypatch):
+    monkeypatch.setenv("SECRETS_DIR", "/run/secrets")
+    cfg = C.load_config_from_dict({
+        "role": "central",
+        "jira": {"base_url": "https://x", "project": "P", "watcher_token_file": "t"},
+        "secrets": {"base_dir": "${SECRETS_DIR}"},
+        "forge": {"kind": "github"},
+        "run": {"dlc_meta_repo_url": "https://github.com/acme/m.git"},
+    })
+    assert cfg.forge.base_url == "" and cfg.forge.base_url_source == F.SOURCE_SAAS

@@ -15,21 +15,25 @@
   **등록 사용자에 매핑** → 그 사용자 worker에 잡 **배포**. + 사용자 레지스트리/
   온보딩/관리 UI + 사용자 worker 컨테이너 **동적 spawn**(Docker SDK).
 - **worker** (사용자별 동적 컨테이너, `ROLE=worker DISPATCH_USER=<user>`): Jira를
-  직접 보지 않는다. 중앙을 HTTP 폴링 → 잡 수신 → **그 사용자 정체성**으로
-  오케스트레이터(`claude -p`)를 **기동** → 상태/로그 회신 → 한도로 끊기면 **재개**.
+  직접 보지 않고, **스스로 잡을 가져오지도 않는다.** 상주하며 `docker exec` 주입을
+  받는 실행 표면이다 — central 의 상주 라이브 세션이 `docker exec jad-worker-<user>
+  claude -p …`(`worker_dispatch.py`)로 **그 사용자 정체성**의 오케스트레이터를 직접
+  기동한다. 워커 PID1(`app/main.py::run_worker`)은 주입 materialize + 사전 인가
+  settings 복사 + `/healthz` 서빙만 한다.
 
 - **상태 전이·티켓 팔로우·브랜치/MR 생성은 앱이 흉내내지 말 것.** 그것은
   worker가 실행하는 **오케스트레이터가 사용자 토큰으로** 담당한다. 앱은
   "감지 → 매핑 → 디스패치 → 기동 → 재개"의 파이프라인만 책임진다.
 
-> **두 가지 디스패치 모드가 공존한다 (모순 아님 — 문서화된 두 경로).** 위 설명은
-> **결정적 HTTP-디스패치 경로**(기본, `run.fractal_central` **OFF**)다: central 이
-> 감지→매핑 후 잡을 worker 에 HTTP 로 배포하고 worker 가 폴링한다. 이와 별개로,
-> `run.fractal_central` **ON** 일 때만 도는 **프랙탈-센트럴 라이브 세션 경로**가 있다:
-> 상주 central 라이브 세션(ai-dlc-orchestrator 센트럴 에이전트)이 티켓 이벤트를 받아
-> 네이티브 서브에이전트로 위임한다. 후자의 운영규약은 `CLAUDE.md` 의
-> **"## central 런타임 세션 운영규약"** 섹션이 정본이다. OFF 면 그
-> 경로는 아예 인스턴스화되지 않고 이 결정적 경로가 byte-for-byte 그대로 돈다.
+> **⚠️ 실행 경로는 하나다 — 프랙탈-센트럴 라이브 세션.** 예전에는 두 모드가
+> 공존했다(`run.fractal_central` OFF = 결정적 HTTP-디스패치: central 이 잡을 큐에
+> 넣고 worker 가 `GET /dispatch/<user>/next` 로 폴링해 실행). 그 레거시 소비자
+> (`app/worker.py::worker_loop`)가 프랙탈 경로와 **동시에 살아 있으면서 같은 티켓을
+> 두 번 실행**(중복 브랜치·중복 변경요청·중복 완료알림)했기 때문에, 소비자와 서빙
+> 표면을 함께 제거했다. 지금은 상주 central 라이브 세션(ai-dlc-orchestrator 센트럴
+> 에이전트)이 티켓 이벤트를 받아 네이티브 서브에이전트로 위임하는 경로만 남는다.
+> 운영규약은 `CLAUDE.md` 의 **"## central 런타임 세션 운영규약"** 섹션이 정본이다.
+> 옛 `run.fractal_central` 키는 은퇴했다 — 남아 있어도 무시되고 경고만 남는다.
 
 ## per-user attribution (완전 사용자 귀속) — 불변식
 
@@ -70,14 +74,29 @@ worker가 잡 실행 직전 그 사용자 정체성을 주입한다(`app/agent_r
 7. **시크릿은 값이 아니라 참조** — 레지스트리/config에 토큰 "값"을 넣지 않는다.
    시크릿 파일(secrets.base_dir 상대)만 참조하고 값은 런타임에 읽는다.
 
-## central ↔ worker HTTP 프로토콜
+## central ↔ worker 경로
+
+워커는 central 에 HTTP 로 말하지 않는다. central → worker 는 **`docker exec` 주입**
+(`worker_dispatch.py`) 한 방향이고, 결과는 워커 안의 에이전트가 직접 forge·Jira·알림
+채널에 쓰거나 완료-리포트로 센트럴 세션에 돌려준다.
 
 | 메서드 | 경로 | 방향 | 내용 |
 |---|---|---|---|
-| GET | `/dispatch/<user>/next` | worker→central | 다음 잡 1건, running 전이. 없으면 204 |
-| POST | `/dispatch/<user>/<job>/status` | worker→central | `{status, log?, reset_at?, branch?, session_id?, mr_url?, error?}` |
+| POST | `/webhook/jira` | Jira→central | 이벤트 구동 단일 티켓 트리거(헤더 토큰 인증, 폴링은 백스톱) |
 | POST | `/onboard` | UI→central | 사용자 등록 + worker spawn |
-| GET | `/healthz` | 프로브 | 역할/사용자 헬스 |
+| POST | `/api/jobs/<ticket>/rerun` | UI→central | 수동 재실행 — 센트럴 세션 seam 으로 주입(409=세션 미성립, 503=주입 실패) |
+| GET | `/api/doctor` | UI→central | 부팅 자가진단 스냅샷 |
+| GET | `/healthz` | 프로브 | 역할/사용자 헬스(워커 컨테이너의 유일한 서빙 표면) |
+
+> **은퇴**: `GET /dispatch/<user>/next` · `POST /dispatch/<user>/<job>/status` ·
+> `GET /dispatch/<user>/<job>/control` (그리고 `X-Worker-Secret` 인증)은 레거시 워커
+> 폴링 프로토콜이었고 이중 실행의 원인이라 제거됐다.
+>
+> 그 프로토콜의 설정 노브 두 개도 함께 은퇴했다 — **`WORKER_SHARED_SECRET`**(그
+> `X-Worker-Secret` 공유 시크릿)과 **`CENTRAL_URL` / `spawn.central_url`**(워커가 폴링할
+> 중앙 주소). 코드 어디에도 읽는 곳이 없고, 설치 관문(`render`·`wizard`)도 만들지 않으며
+> `doctor` 도 검사하지 않는다. 옛 `.env`·`config.yaml` 에 남아 있어도 조용히 무시된다
+> (`fractal_central` 처럼 동작이 달라지는 값이 아니라 단순 미사용 값이라 경고도 없다).
 
 ## 레지스트리 스키마 (state/registry.json)
 
@@ -115,9 +134,9 @@ secrets_ref{jira_token,forge_token,claude_oauth_token}`(옛 이름 `gitlab_token
 | 0 (완료) | `auth_login.py`, `main.py`(ROLE 분기 골격), `templates/index.html` | 로그인 이식 + central/worker 분기 진입점 + 관리 UI 골격 |
 | 1 | `config.py`, `state.py` | 설정 로드/검증(central 스키마) + state/*.json(+registry) 영속 |
 | 2 | `jira_client.py` | Jira REST(issue/transition/comment/JQL, 감시 토큰) |
-| 3 | `gate.py`, `queue.py`, `registry.py`, `dispatch.py` | dedup 게이트 + 잡 상태머신 + 레지스트리 CRUD + 사용자별 큐/HTTP + 온보딩 API |
-| 4 | `poller.py`, `webhook.py` | high-watermark 폴링 + 사용자 매핑 + 웹훅 수렴 |
-| 5 | `worker.py`, `agent_runner.py`, `scheduler.py`, `main.py`(배선) | 중앙 폴링 루프 + claude 실행/정체성 주입/한도/재개 + 스케줄러 |
+| 3 | `gate.py`, `queue.py`, `registry.py`, `dispatch.py` | dedup 게이트 + 잡 상태머신 + 레지스트리 CRUD + 잡 등록/완료 상태머신(인프로세스) + 온보딩 API |
+| 4 | `poller.py` (+ `main.py` 의 `/webhook/jira`) | high-watermark 폴링 + 사용자 매핑 + 웹훅 수렴(웹훅은 `poller.trigger_ticket` 에 위임 — 수신 구현은 하나뿐) |
+| 5 | `agent_runner.py`, `scheduler.py`, `main.py`(배선) | claude 실행 계약/정체성 주입/한도/재개 + 스케줄러 (레거시 중앙 폴링 루프 `worker.py` 는 은퇴·삭제) |
 | 6 | `spawner.py`, `Dockerfile`, `docker-compose.yml` | worker 동적 spawn(Docker SDK) + 컨테이너/배포 |
 
 ## ⚠️ 리스크

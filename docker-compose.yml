@@ -6,8 +6,6 @@
 # 계약 정합(반드시 유지 — spawner/config.example.yaml과 일치):
 #   image           jira-auto-dispatcher:latest   (config.spawn.image)
 #   network         jad-net                        (config.spawn.network)
-#   central DNS명    central                        (config.spawn.central_url=http://central:8787)
-#                    → 서비스 키가 'central' 이어야 worker가 http://central:8787 로 도달.
 #
 # ⚠️ 보안: 관리 UI/워커는 도구권한 자율 에이전트(RCE 표면). 신뢰 네트워크 한정, 인터넷 노출 금지.
 #          docker.sock 직결은 호스트 root 동치 → 기본은 socket-proxy 경유(최소 권한). SECURITY.md.
@@ -48,17 +46,20 @@ services:
     environment:
       ROLE: central
       SECRETS_DIR: /run/secrets              # config secrets.base_dir(${SECRETS_DIR})
-      CENTRAL_URL: http://central:8787       # worker→central 폴링 대상(spawn.central_url)
-      WORKER_SHARED_SECRET: ${WORKER_SHARED_SECRET:-}   # dispatch HTTP 인증(.env/호스트 env)
-      # 호스트 배포 디렉토리 절대경로(spawn.host_deploy_dir). worker 바인드 source가
-      # 호스트 docker 데몬 기준으로 해석되므로 필수(sibling container). .env나 셸 env로 주입.
-      # 예: HOST_DEPLOY_DIR=/home/<deploy-user>/deploy/jira-auto-dispatcher
-      HOST_DEPLOY_DIR: ${HOST_DEPLOY_DIR:-}
+      # ⚠️ CENTRAL_URL · WORKER_SHARED_SECRET 은 **더 이상 없다**. 워커가 중앙의 dispatch
+      #    HTTP 를 폴링하던 시절의 값(폴링 대상 주소 · X-Worker-Secret 공유 시크릿)인데,
+      #    그 서빙 표면과 폴링 소비자가 프랙탈 seam(중앙 → docker exec 푸시)으로 대체되며
+      #    읽는 곳이 사라졌다. .env 에 남아 있어도 무시된다.
+      # ⚠️ HOST_DEPLOY_DIR 도 **더 이상 없다**(설치자가 틀리기 쉬운 값이라 제거).
+      #    워커에 거는 마운트는 전부 named 볼륨이고, config·시크릿·알림 웹훅은 central 이
+      #    컨테이너 스펙에 **주입**해 워커가 자기 안에 기록한다(app/inject.py). 그래서
+      #    호스트 절대경로를 아무도 알 필요가 없다. .env 에 남아 있어도 무시된다.
       # central 레포-리졸버(run.repo_resolution: llm)가 신규 티켓의 target_repos를
       # claude로 판단할 때 쓰는 central 자신의 인증 토큰(.env로 주입, 워커 per-user와 별개).
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       # 프랙탈 PUSH: central의 docker CLI가 socket-proxy를 타깃하도록 지정.
-      # ⚠️ 정합 필수: config.yaml 의 spawn.docker_host 와 동일 값이어야 한다.
+      # ⚠️ 정합 필수: config.yaml 의 deploy.docker_host 와 동일 값이어야 한다
+      #    (기본값은 deploy.profile 에서 파생되며 세 프로파일 모두 이 값이다).
       DOCKER_HOST: tcp://socket-proxy:2375
     ports:
       - "8787:8787"                          # 관리 UI — ⚠️ 인터넷 노출 금지.
@@ -69,14 +70,19 @@ services:
       - jad-state:/app/state                 # jobs/watermark/dedup/registry 영속(명명 볼륨)
       - jad-workspace:/app/workspace         # 오케스트레이터 작업 공간(명명 볼륨)
       - ./config:/app/config:ro              # config.yaml(시크릿 값 아님, 파일 참조만)
-      - ./secrets:/run/secrets               # 시크릿 파일(값). central은 온보딩으로 per-user 시크릿을 여기 쓴다(rw 필수). 이미지엔 굽지 말 것. worker는 spawner가 자기 것만 ro로 마운트.
+      - ./secrets:/run/secrets               # 시크릿 파일(값). central은 온보딩으로 per-user 시크릿을 여기 쓴다(rw 필수). 이미지엔 굽지 말 것.
+      #                                        ⚠️ 이 두 바인드는 **compose CLI 가 호스트에서** 해석하므로(central 자신의 마운트) 안전하다.
+      #                                        워커 쪽은 다르다 — 워커는 호스트 데몬이 만들기 때문에 bind 를 쓰지 않고 주입으로 받는다(app/inject.py).
       # --- worker 동적 spawn을 위한 docker 접근 ---
       # (기본) 위 socket-proxy 경유 — central은 docker.sock을 직접 보지 않는다.
-      #        ⚠️ 정합 필수: config.yaml 의 spawn.docker_host: tcp://socket-proxy:2375
+      #        ⚠️ **로컬(Docker Desktop) 포함 모든 프로파일의 기본**이다. 이 파일을 고칠
+      #           일이 없다 — config.yaml 의 deploy.docker_host 도 tcp://socket-proxy:2375
+      #           으로 파생된다(app/setup_schema.PROFILE_DEFAULTS).
       #
       # (대안) docker.sock 직결 — 편하지만 호스트 root 동치(특권 상승 표면, 비권장).
       #        socket-proxy 서비스/depends_on 제거 후 아래 한 줄을 추가하고
-      #        config.yaml 의 spawn.docker_host: unix:///var/run/docker.sock 로 되돌린다.
+      #        config.yaml 에 deploy.docker_host: unix:///var/run/docker.sock 을 **명시**한다
+      #        (명시 값이 프로파일 파생을 이긴다). ⚠️ 한쪽만 바꾸면 조용히 어긋난다.
       #   - /var/run/docker.sock:/var/run/docker.sock
 
   # --- worker(사용자별)는 compose에 없음 ---
@@ -84,6 +90,9 @@ services:
   #   같은 image(jira-auto-dispatcher:latest) · 같은 network(jad-net) ·
   #   ROLE=worker DISPATCH_USER=<user> · per-user 볼륨 jad-<username>(:/home/app/.claude) ·
   #   비-root(config.spawn.run_as, 기본 1000:1000). 상세는 app/spawner.py.
+  #   워커 마운트는 **named 볼륨 2개뿐**(jad-<user> · jad-workspace)이고 bind 는 없다.
+  #   config·per-user 시크릿·알림 웹훅은 스폰 시 주입되어 워커의 tmpfs(/run/secrets)와
+  #   /app/config 에 워커가 직접 기록한다.
 
 networks:
   jad-net:

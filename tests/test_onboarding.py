@@ -39,6 +39,8 @@ _FULL = {
     "git_email": "yh@x",
     "autonomy_mode": "A",
     "scope": "PROJ, PORTAL",
+    # 합류자 **본인**의 풀 퍼미션 동의 — 없으면 등록이 통과하지 않는다(서버 강제).
+    "consent_full_permissions": True,
 }
 
 
@@ -93,15 +95,91 @@ def test_onboard_duplicate_409(tmp_path, isolated_state):
     assert res.status_code == 409
 
 
-def test_onboard_optional_forge_token_omitted(tmp_path, isolated_state):
+def test_onboard_requires_forge_token(tmp_path, isolated_state):
+    """개인 forge 토큰 없이 등록되면 워커는 커밋만 하고 **MR/PR 을 못 만든다**.
+
+    에러 없이 반쪽만 도는 그 상태가 이 시스템에서 가장 비싼 실패 모드라 필수로 올렸다.
+    이 배포가 forge 를 안 쓰는 경우는 없다(forge.kind 는 기본값 있는 필수, dlc-meta URL 도
+    필수, 두 자율 모드 모두 원격 push 를 지시한다) — 그래서 조건부가 아니라 무조건이다.
+    """
     client, reg, base = _wire(tmp_path)
     data = dict(_FULL)
     del data["forge_token"]
-    assert client.post("/onboard", json=data).status_code == 201
+    res = client.post("/onboard", json=data)
+    assert res.status_code == 400
+    body = res.get_json()
+    assert "forge_token" in body["missing"]
+    # ⚠️ 아무 것도 쓰지 않았다 — 검증이 시크릿 저장보다 앞선다.
+    assert reg.get("testuser") is None
+    assert not os.path.exists(os.path.join(base, "testuser"))
+
+
+def test_onboard_requires_own_consent(tmp_path, isolated_state):
+    """설치자의 동의로 갈음하지 않는다 — 본인 동의 없이는 서버가 막는다."""
+    client, reg, base = _wire(tmp_path)
+    for value in (None, False, "네"):
+        data = dict(_FULL)
+        if value is None:
+            del data["consent_full_permissions"]
+        else:
+            data["consent_full_permissions"] = value
+        res = client.post("/onboard", json=data)
+        assert res.status_code == 400, value
+        keys = [f["key"] for f in res.get_json()["findings"]]
+        assert "consent_full_permissions" in keys, value
+        assert reg.get("testuser") is None
+        assert not os.path.exists(os.path.join(base, "testuser"))
+
+
+def test_onboard_records_consent_with_server_timestamp(tmp_path, isolated_state):
+    """동의 시각은 **서버 수신 시각**으로 기록한다(클라이언트가 보낸 시각은 안 쓴다)."""
+    client, reg, _ = _wire(tmp_path)
+    data = dict(_FULL)
+    data["consent_accepted_at"] = "1999-01-01T00:00:00+09:00"   # 클라이언트 위조 시도
+    res = client.post("/onboard", json=data)
+    assert res.status_code == 201
+
     rec = reg.get("testuser")
-    assert rec.secrets_ref.forge_token == ""
-    assert rec.secrets_ref.gitlab_token == ""
-    assert not os.path.exists(os.path.join(base, "testuser", "forge-token"))
+    assert rec.consent.full_permissions is True
+    stamped = rec.consent.accepted_at
+    assert stamped and not stamped.startswith("1999")
+    # ISO-8601 로 실제 파싱된다(감사 흔적).
+    from datetime import datetime
+
+    datetime.fromisoformat(stamped)
+    # 레지스트리 왕복(직렬화)에서도 살아남는다.
+    from app.registry import UserRecord
+
+    assert UserRecord.from_dict(rec.to_dict()).consent.accepted_at == stamped
+    assert res.get_json()["consent_accepted_at"] == stamped
+
+
+def test_onboard_accepts_form_encoded_consent_checkbox(tmp_path, isolated_state):
+    """HTML 폼 인코딩(체크박스는 "on", 목록은 쉼표 문자열)도 그대로 받는다."""
+    client, reg, _ = _wire(tmp_path)
+    form = {k: ("on" if k == "consent_full_permissions" else v)
+            for k, v in _FULL.items()}
+    res = client.post("/onboard", data=form)
+    assert res.status_code == 201
+    rec = reg.get("testuser")
+    assert rec.consent.full_permissions is True
+    assert rec.scope.projects == ["PROJ", "PORTAL"]
+
+
+def test_onboard_reports_findings_per_field(tmp_path, isolated_state):
+    """오류를 **전부 모아** 필드별 키로 돌려준다(UI 가 칸별로 표시한다)."""
+    client, _reg, _ = _wire(tmp_path)
+    res = client.post("/onboard", json={"username": "x",
+                                        "consent_full_permissions": True,
+                                        "autonomy_mode": "Z"})
+    assert res.status_code == 400
+    body = res.get_json()
+    assert body["ok"] is False and body["error_count"] >= 2
+    keys = {f["key"] for f in body["findings"]}
+    assert {"jira_token", "forge_token", "claude_setup_token"} <= keys
+    assert "autonomy_mode" in keys        # 허용값 밖(A|B)
+    # findings 에는 힌트가 있고 값은 없다.
+    assert all("hint" in f for f in body["findings"])
 
 
 def test_enable_triggers_spawn(tmp_path, isolated_state):
@@ -216,3 +294,378 @@ def test_onboard_prefers_new_forge_token_field(tmp_path, isolated_state):
     assert client.post("/onboard", json=data).status_code == 201
     with open(os.path.join(base, "testuser", "forge-token"), encoding="utf-8") as fh:
         assert fh.read() == "NEW-VAL"
+
+
+# ---------------------------------------------------------------------------
+# 설정 자가진단 게이트 — 잘못된 설정으로 워커를 띄우지 않는다
+# ---------------------------------------------------------------------------
+
+
+def _wire_with_doctor(tmp_path, results):
+    """대역 진단 결과를 물린 온보딩 앱(실제 검사는 부르지 않는다)."""
+    from app import doctor_runtime as DR
+
+    base = str(tmp_path / "secrets")
+    reg = Registry()
+    cfg = SimpleNamespace(secrets=SimpleNamespace(base_dir=base))
+    doctor = DR.DoctorRuntime(cfg, run_checks=lambda _cfg, **_kw: list(results))
+    doctor.run_once()
+    app = Flask(__name__)
+    register_onboarding_api(app, {"registry": reg, "config": cfg, "spawner": None,
+                                  "doctor": doctor})
+    return app.test_client(), reg, base
+
+
+def _check(name, status):
+    from app import setup_doctor as D
+
+    return D.CheckResult(name, status, f"{name} 가 잘못됐습니다", f"{name} 를 고치세요")
+
+
+def test_onboard_is_blocked_when_a_fatal_check_failed(tmp_path, isolated_state):
+    """docker 에 닿지 못하는 상태로 사용자를 붙이면 조용히 실패하는 잡만 쌓인다."""
+    from app import setup_doctor as D
+
+    client, reg, base = _wire_with_doctor(
+        tmp_path, [_check("docker", D.STATUS_FAIL)])
+    res = client.post("/onboard", json=_FULL)
+    assert res.status_code == 409
+    body = res.get_json()
+    assert body["blocking"] == ["docker"]
+    assert body["failures"][0]["hint"]          # 어떻게 고치는지가 응답에 있다
+    # ⚠️ 아무 것도 쓰지 않았다 — 레지스트리도 시크릿 파일도 그대로다.
+    assert reg.get("testuser") is None
+    assert not os.path.exists(os.path.join(base, "testuser"))
+    # 토큰 값이 응답에 실리지 않는다(관리 UI 에는 인증이 없다).
+    raw = res.get_data(as_text=True)
+    assert "JIRA-TOK-VAL" not in raw and "CLAUDE-TOK-VAL" not in raw
+
+
+def test_onboard_is_not_blocked_by_a_degrading_failure(tmp_path, isolated_state):
+    """central 자신의 git 경로(dlc-meta)가 깨져도 잡은 돈다 — 설치를 막지 않는다."""
+    from app import setup_doctor as D
+
+    client, _reg, _base = _wire_with_doctor(tmp_path, [_check("dlc_meta", D.STATUS_FAIL)])
+    assert client.post("/onboard", json=_FULL).status_code == 201
+
+
+def test_onboard_is_not_blocked_before_the_first_diagnosis(tmp_path, isolated_state):
+    """진단이 아직 안 돌았으면 막지 않는다 — 부팅 직후 관리 UI 가 잠기면 안 된다."""
+    from app import doctor_runtime as DR
+
+    base = str(tmp_path / "secrets")
+    cfg = SimpleNamespace(secrets=SimpleNamespace(base_dir=base))
+    app = Flask(__name__)
+    register_onboarding_api(app, {"registry": Registry(), "config": cfg,
+                                  "spawner": None,
+                                  "doctor": DR.DoctorRuntime(cfg)})   # 한 번도 안 돌았다
+    assert app.test_client().post("/onboard", json=_FULL).status_code == 201
+
+
+def test_onboard_works_without_a_doctor_component(tmp_path, isolated_state):
+    """doctor 컴포넌트가 없는 조립(테스트·임베드)에서도 온보딩은 그대로 동작한다."""
+    client, _reg, _base = _wire(tmp_path)
+    assert client.post("/onboard", json=_FULL).status_code == 201
+
+
+# ---------------------------------------------------------------------------
+# 준비물 안내 · accountId 조회 — 합류자가 값을 어디서 구하는가
+# ---------------------------------------------------------------------------
+
+
+def _wire_full_config(tmp_path, kind="gitlab"):
+    """forge·jira·run 섹션이 있는 config 로 배선(안내 렌더가 그것을 읽는다)."""
+    base = str(tmp_path / "secrets")
+    cfg = SimpleNamespace(
+        secrets=SimpleNamespace(base_dir=base),
+        forge=SimpleNamespace(kind=kind, base_url="", base_url_source="",
+                              base_url_origin=""),
+        jira=SimpleNamespace(base_url="https://acme.atlassian.net", project="PROJ"),
+        run=SimpleNamespace(
+            dlc_meta_repo_url="https://gitlab.acme.example/acme/dlc-meta.git",
+            orchestrator_repo_url="https://github.com/yunhyuk-choi/ai-dlc-orchestrator.git",
+            docs_repo_url=""),
+    )
+    app = Flask(__name__)
+    register_onboarding_api(app, {"registry": Registry(), "config": cfg,
+                                  "spawner": None})
+    return app.test_client(), cfg
+
+
+def test_guide_endpoint_renders_from_instance_config(tmp_path, isolated_state):
+    """준비물 안내는 HTML 에 박히지 않고 **이 인스턴스 설정**에서 렌더된다."""
+    client, _cfg = _wire_full_config(tmp_path, kind="gitlab")
+    body = client.get("/api/onboarding/guide").get_json()
+
+    assert body["forge"]["kind"] == "gitlab"
+    assert body["forge"]["scope"] == "api"
+    # 사내 GitLab 을 쓰면 토큰 발급 링크도 그 호스트를 가리킨다.
+    assert body["forge"]["url"].startswith("https://gitlab.acme.example/")
+    assert body["jira"]["myself_url"].startswith("https://acme.atlassian.net/")
+    # 2단 절차(로컬 SETTER + 웹 등록)가 안내에 있다.
+    assert [s["id"] for s in body["steps"]] == ["local", "web"]
+    # 필수 목록에 forge 토큰과 본인 동의가 있다.
+    assert "forge_token" in body["required"]
+    assert body["consent_key"] in body["required"]
+
+
+def test_guide_endpoint_switches_with_forge_kind(tmp_path, isolated_state):
+    client, _cfg = _wire_full_config(tmp_path, kind="github")
+    body = client.get("/api/onboarding/guide").get_json()
+    assert body["forge"]["scope"] == "repo"
+    assert body["forge"]["change_abbr"] == "PR"
+    assert "GitLab" not in body["forge"]["path"]
+
+
+def test_guide_endpoint_carries_no_secrets(tmp_path, isolated_state):
+    """관리 UI 에는 인증이 없다 — 안내가 시크릿을 실으면 그대로 유출이다."""
+    client, cfg = _wire_full_config(tmp_path)
+    raw = client.get("/api/onboarding/guide").get_data(as_text=True)
+    assert cfg.secrets.base_dir not in raw
+    for token in ("JIRA-TOK-VAL", "GL-TOK-VAL", "CLAUDE-TOK-VAL"):
+        assert token not in raw
+
+
+def test_guide_endpoint_survives_a_partial_config(tmp_path, isolated_state):
+    """secrets 만 있는 조립(테스트·임베드)에서도 500 이 아니라 안내가 나온다."""
+    client, _reg, _base = _wire(tmp_path)
+    res = client.get("/api/onboarding/guide")
+    assert res.status_code == 200
+    assert res.get_json()["sections"]
+
+
+def test_whoami_reuses_the_setup_discovery(tmp_path, isolated_state, monkeypatch):
+    """accountId 조회는 설치 관문이 쓰는 discover_account 를 그대로 재사용한다."""
+    client, _cfg = _wire_full_config(tmp_path)
+    seen = {}
+
+    class _FakeClient:
+        def __init__(self, base_url, email, token, *a, **kw):
+            seen["base_url"] = base_url
+            seen["email"] = email
+            seen["token"] = token
+
+        def myself(self):
+            return {"accountId": "557058:abc", "displayName": "테스터",
+                    "emailAddress": "you@example.com", "active": True}
+
+    monkeypatch.setattr("app.jira_client.JiraClient", _FakeClient)
+    res = client.post("/api/onboarding/whoami",
+                      json={"jira_email": "you@example.com", "jira_token": "TOK"})
+    assert res.status_code == 200
+    assert res.get_json()["account_id"] == "557058:abc"
+    # 대상 사이트는 **인스턴스 설정**이 정한다(요청이 임의 호스트를 고를 수 없다).
+    assert seen["base_url"] == "https://acme.atlassian.net"
+    # 토큰은 응답에 실리지 않는다.
+    assert "TOK" not in res.get_data(as_text=True)
+
+
+def test_whoami_requires_credentials(tmp_path, isolated_state):
+    client, _cfg = _wire_full_config(tmp_path)
+    assert client.post("/api/onboarding/whoami", json={}).status_code == 400
+
+
+def test_whoami_is_unavailable_without_a_configured_site(tmp_path, isolated_state):
+    """jira.base_url 이 없으면 조회하지 않는다(추측한 호스트로 자격을 보내지 않는다)."""
+    client, _reg, _base = _wire(tmp_path)
+    res = client.post("/api/onboarding/whoami",
+                      json={"jira_email": "a@b", "jira_token": "T"})
+    assert res.status_code == 503
+
+
+def test_whoami_reports_auth_failure_without_the_token(tmp_path, isolated_state,
+                                                       monkeypatch):
+    client, _cfg = _wire_full_config(tmp_path)
+
+    class _Failing:
+        def __init__(self, *a, **kw):
+            pass
+
+        def myself(self):
+            from app.jira_client import JiraError
+
+            raise JiraError("unauthorized", status_code=401)
+
+    monkeypatch.setattr("app.jira_client.JiraClient", _Failing)
+    res = client.post("/api/onboarding/whoami",
+                      json={"jira_email": "a@b", "jira_token": "SECRET-TOK"})
+    assert res.status_code == 502
+    raw = res.get_data(as_text=True)
+    assert "SECRET-TOK" not in raw
+    assert res.get_json()["error"]
+
+
+def test_doctor_gate_runs_before_validation(tmp_path, isolated_state):
+    """자가진단 차단이 입력값 검증보다 **앞선다** — 게이트 순서를 깨지 않는다."""
+    from app import setup_doctor as D
+
+    client, reg, base = _wire_with_doctor(tmp_path, [_check("docker", D.STATUS_FAIL)])
+    # 비어 있는(=검증 실패할) 요청이라도 409(자가진단 차단)로 먼저 막힌다.
+    res = client.post("/onboard", json={})
+    assert res.status_code == 409
+    assert res.get_json()["blocking"] == ["docker"]
+
+
+# --- 작업 범위(scope) — 기본 포함 여부 + 추가 프로젝트 ------------------------
+
+
+def _scope_cfg(tmp_path, projects=("PROJ",)):
+    """온보딩 범위 질문이 읽는 최소 config(인스턴스 기본 프로젝트 포함)."""
+    return SimpleNamespace(
+        secrets=SimpleNamespace(base_dir=str(tmp_path / "secrets")),
+        jira=SimpleNamespace(base_url="https://x.atlassian.net",
+                             project=projects[0] if projects else "",
+                             projects=list(projects[1:])),
+    )
+
+
+def _wire_with_config(tmp_path, cfg):
+    reg = Registry()
+    app = Flask(__name__)
+    register_onboarding_api(app, {"registry": reg, "config": cfg, "spawner": None})
+    return app.test_client(), reg
+
+
+def test_onboard_default_choice_inherits_instance_projects(tmp_path, isolated_state):
+    """기본 프로젝트만 받겠다면 빈 목록으로 저장한다 — 기본이 늘어나면 따라간다."""
+    client, reg = _wire_with_config(tmp_path, _scope_cfg(tmp_path, ("PROJ", "TEAM")))
+    payload = {k: v for k, v in _FULL.items() if k != "scope"}
+    assert client.post("/onboard", json=payload).status_code == 201
+    rec = reg.get("testuser")
+    assert rec.scope.projects == []                       # 상속(빈 값이 의도다)
+
+    from app import scope as SC
+    assert SC.user_projects(rec, SC.instance_projects(_scope_cfg(tmp_path,
+                                                                ("PROJ", "TEAM")))) ==         ["PROJ", "TEAM"]
+
+
+def test_onboard_extra_projects_are_pinned_on_top_of_the_default(tmp_path, isolated_state):
+    client, reg = _wire_with_config(tmp_path, _scope_cfg(tmp_path, ("PROJ",)))
+    res = client.post("/onboard", json={**_FULL, "scope": "TEAM"})
+    assert res.status_code == 201
+    assert reg.get("testuser").scope.projects == ["PROJ", "TEAM"]
+
+
+def test_onboard_can_opt_out_of_the_default_project(tmp_path, isolated_state):
+    client, reg = _wire_with_config(tmp_path, _scope_cfg(tmp_path, ("PROJ",)))
+    res = client.post("/onboard", json={**_FULL, "scope": "TEAM",
+                                        "scope_include_default": False})
+    assert res.status_code == 201
+    assert reg.get("testuser").scope.projects == ["TEAM"]
+
+
+def test_onboard_rejects_a_registration_that_would_receive_nothing(tmp_path, isolated_state):
+    """기본 제외 + 추가 없음 = 받을 티켓이 없는 등록 — 조용히 만들지 않고 되묻는다."""
+    client, reg = _wire_with_config(tmp_path, _scope_cfg(tmp_path, ("PROJ",)))
+    res = client.post("/onboard", json={**_FULL, "scope": "",
+                                        "scope_include_default": False})
+    assert res.status_code == 400
+    assert "scope" in res.get_json()["missing"]
+    assert reg.get("testuser") is None
+
+
+def test_onboard_rejects_malformed_project_keys(tmp_path, isolated_state):
+    """조용히 버리지 않는다 — 적은 값이 왜 사라졌는지 알 수 없게 되면 안 된다."""
+    client, reg = _wire_with_config(tmp_path, _scope_cfg(tmp_path, ("PROJ",)))
+    res = client.post("/onboard", json={**_FULL, "scope": 'TEAM") OR ("x'})
+    assert res.status_code == 400
+    assert reg.get("testuser") is None
+
+
+# --- username 이름 규칙(경로 탈출·컨테이너 이름 오염 차단) ---------------------
+#
+# 이 값은 식별자로만 쓰이지 않는다 — 그대로 ``secrets/<username>/`` 디렉토리 이름이 되고
+# ``jad-worker-<username>`` 컨테이너 이름이 된다. 관리 UI 는 무인증이므로(SECURITY.md)
+# 모양 검증이 없으면 "임의 위치에 0600 파일 쓰기"가 된다.
+
+_ESCAPES = [
+    "../evil",              # 상위 한 칸
+    "../../etc/x",          # 여러 칸
+    "a/b",                  # 하위 경로(디렉토리를 이름으로 쓴다)
+    "..",                   # 상위 그 자체
+    "/abs",                 # 절대경로
+    "C:/win",               # 드라이브 표기
+    "a" + chr(92) + "b",   # 백슬래시 구분자
+    "has space",            # 공백(셸·docker 인자 오조작)
+    ".hidden",              # 점으로 시작
+    "-flag",                # 대시로 시작(CLI 옵션 오인)
+    "a.",                   # 점으로 끝(Windows 가 잘라내 이름이 겹친다)
+    "CON",                  # Windows 예약 장치명
+    "nul",                  # 예약 장치명(소문자도 예약이다)
+    "user" + chr(10) + "name",  # 개행(로그 라인 조작)
+    "中文",             # 비ASCII(파일시스템 정규화로 같은 이름이 둘이 된다)
+    "x" * 33,               # 길이 상한 초과
+]
+
+
+def test_onboard_rejects_usernames_that_escape_the_secrets_directory(tmp_path,
+                                                                     isolated_state):
+    """경로가 될 수 있는 이름은 전부 400 이고, **아무 파일도 쓰지 않는다.**"""
+    for i, bad in enumerate(_ESCAPES):
+        # ⚠️ 디렉토리 이름에 bad 를 쓰지 않는다 — 그게 바로 이 테스트가 막는 동작이다.
+        client, reg, base = _wire(tmp_path / f"bad{i}")
+        res = client.post("/onboard", json={**_FULL, "username": bad})
+        assert res.status_code == 400, (bad, res.get_data(as_text=True))
+        body = res.get_json()
+        assert "username" in body["missing"] or any(
+            f["key"] == "username" for f in body["findings"]), bad
+        assert reg.get(bad) is None
+        # secrets.base_dir 자체가 생기지 않았다(= 어디에도 쓰지 않았다).
+        assert not os.path.exists(base), bad
+
+
+def test_onboard_rejection_does_not_echo_the_submitted_username(tmp_path,
+                                                                isolated_state):
+    """거부는 알리되 **입력값을 되비추지 않는다** — 관리 UI 는 무인증이다."""
+    client, _reg, _base = _wire(tmp_path)
+    probe = "../<img src=x onerror=alert(1)>"
+    res = client.post("/onboard", json={**_FULL, "username": probe})
+    assert res.status_code == 400
+    raw = res.get_data(as_text=True)
+    assert probe not in raw
+    assert "onerror" not in raw
+    assert "<img" not in raw
+    # 그래도 무엇이 왜 막혔는지는 말한다(조용한 거부 금지).
+    finding = next(f for f in res.get_json()["findings"] if f["key"] == "username")
+    assert finding["code"] == "bad_format"
+    assert "경로 구분자" in finding["message"]     # 값 없이 **분류**로 알려 준다
+    assert finding["hint"]                         # 고치는 방법(규칙)이 붙는다
+
+
+def test_onboard_accepts_ordinary_usernames(tmp_path, isolated_state):
+    """정상적인 사람 이름은 그대로 통과한다(규칙이 실사용을 막으면 안 된다)."""
+    for i, good in enumerate(["yhchoi", "yh.choi", "u1", "a", "A_b-c", "x" * 32]):
+        client, reg, base = _wire(tmp_path / f"ok{i}")
+        res = client.post("/onboard", json={**_FULL, "username": good})
+        assert res.status_code == 201, (good, res.get_data(as_text=True))
+        assert reg.get(good) is not None
+        assert reg.get(good).container.name == f"jad-worker-{good}"
+        assert os.path.isfile(os.path.join(base, good, "jira-token")), good
+
+
+def test_doctor_gate_still_precedes_username_validation(tmp_path, isolated_state):
+    """게이트 순서 불변 — 자가진단 차단이 **모양 검증보다 먼저** 돈다."""
+    from app import setup_doctor as D
+
+    client, reg, _base = _wire_with_doctor(tmp_path, [_check("docker", D.STATUS_FAIL)])
+    res = client.post("/onboard", json={**_FULL, "username": "../evil"})
+    assert res.status_code == 409          # 400 이 아니다
+    assert res.get_json()["blocking"] == ["docker"]
+
+
+def test_write_secret_refuses_to_assemble_an_escaping_path(tmp_path):
+    """심층 방어 — 검증을 통과한 값만 온다고 가정하지 않는다(직접 호출 경로)."""
+    from app.onboarding import UnsafeSecretPath, _write_secret
+
+    base = str(tmp_path / "secrets")
+    for bad in ("../evil", "a/b", "..", ""):
+        try:
+            _write_secret(base, bad, "jira-token", "TOK")
+        except UnsafeSecretPath as exc:
+            assert bad not in str(exc) or not bad   # 값을 되비추지 않는다
+        else:
+            raise AssertionError(f"막히지 않았다: {bad!r}")
+    assert not os.path.exists(base)
+    # 정상 이름은 그대로 동작하고 참조를 돌려준다.
+    assert _write_secret(base, "alice", "jira-token", "TOK") == "alice/jira-token"
+    assert open(os.path.join(base, "alice", "jira-token"), encoding="utf-8").read() == "TOK"
