@@ -162,6 +162,29 @@ run:
 - 레거시 키(`spawn.docker_host`·`spawn.workspace_volume`·`secrets.base_dir`)도 계속 읽으므로
   기존 `config.yaml` 은 그대로 둬도 동작한다.
 
+#### 한 호스트에 여러 벌 띄우려면 (선택 — 평가·스테이징·프로덕션)
+
+기본 배포는 컨테이너·네트워크·볼륨 이름을 `jad-*` 로 고정한다. 그래서 **같은 호스트에서
+두 번째 스택을 띄우면** `Conflict. The container name "/jad-socket-proxy" is already in use`
+로 멈춘다. 이름 접두어를 인스턴스마다 나누면 된다 — 노브는 `.env` 의 `JAD_INSTANCE`
+하나이고, **미설정이면 `jad`** 라 지금 배포는 아무것도 달라지지 않는다.
+
+```bash
+# 두 번째 인스턴스는 **별도 디렉토리**에 배포한다(소스·config·secrets 를 각자 갖는다).
+cd /opt/jad-stg
+cat >> .env <<'EOF'
+JAD_INSTANCE=jad-stg      # 컨테이너·네트워크·볼륨 이름 접두어
+JAD_PORT=8788             # 관리 UI 호스트 포트(인스턴스마다 달라야 한다)
+EOF
+docker compose up -d
+```
+
+`jad-stg-central` · `jad-stg-socket-proxy` · `jad-stg-net` · `jad-stg-workspace` ·
+`jad-stg-worker-<user>` 로 전부 갈린다. compose 가 그 값으로 리소스를 만든 뒤 같은 값을
+central 에도 넘기므로 **compose 가 만든 이름과 central 이 부르는 이름이 어긋날 수 없다.**
+`config.yaml` 의 `deploy.instance` 로도 적을 수 있지만 정본은 `.env` 쪽이다(다르면 env 를
+따르고 부팅 로그에 ERROR 가 남는다). 상세와 주의점은 DEPLOY.md §9.2.
+
 ### 2.3 호스트 OS 별 표기 (리눅스 / 맥 / 윈도우)
 
 코드에는 플랫폼 분기가 없다 — 컨테이너 안은 항상 리눅스다. 호스트 절대경로를 직접 적는
@@ -407,7 +430,8 @@ printf '%s' '<JIRA_API_TOKEN>'  > secrets/service/jira-token
 printf '%s' '<FORGE_PAT>'       > secrets/service/forge-token
 chmod -R go-rwx secrets && find secrets -type f -exec chmod 600 {} \;
 
-# (3) central 자기 claude 토큰 — .env 가 담는 값은 이것 하나뿐이다.
+# (3) central 자기 claude 토큰 — .env 가 담는 **시크릿**은 이것 하나뿐이다
+#     (한 호스트에 여러 인스턴스를 띄울 때만 JAD_INSTANCE·JAD_PORT 가 더 붙는다 — §2.2).
 #     ⚠️ HOST_DEPLOY_DIR 은 더 이상 필요 없다 — 워커 마운트가 전부 named 볼륨이다(§2.2).
 #     ⚠️ WORKER_SHARED_SECRET 도 더 이상 필요 없다(은퇴 — §2.5). 옛 .env 에 남아 있어도 무시된다.
 printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' '<claude setup-token 값>' >> .env
@@ -473,7 +497,8 @@ git clone <이 저장소> ~/jira-auto-dispatcher && cd ~/jira-auto-dispatcher
 cp config/config.example.yaml config/config.yaml   # → §2 대로 채운다
 
 # ⚠️ 호스트 절대경로를 적을 항목은 없다(§2.2).
-# ⚠️ WORKER_SHARED_SECRET 은 은퇴했다(§2.5) — .env 가 담는 값은 아래 하나뿐이다.
+# ⚠️ WORKER_SHARED_SECRET 은 은퇴했다(§2.5) — .env 가 담는 시크릿은 아래 하나뿐이다
+#    (한 호스트 다중 인스턴스면 JAD_INSTANCE·JAD_PORT 가 더 붙는다 — §2.2).
 printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' '<claude setup-token 값>' >> .env
 chmod 600 .env
 

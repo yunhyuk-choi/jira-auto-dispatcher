@@ -46,6 +46,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from app import naming
 from app import scope as _scope_mod
 from app.setup_schema import (
     DEPLOY_PROFILES,
@@ -129,6 +130,20 @@ class DeployConfig:
     """
 
     profile: str = "local"
+    #: **인스턴스 이름** — 이 배포가 만드는 docker 리소스 이름의 접두어(기본 ``jad``).
+    #:
+    #: 한 호스트에 이 시스템을 여러 벌(평가·스테이징·프로덕션) 띄우기 위한 유일한 노브다.
+    #: 여기서 네트워크(``<instance>-net``)·공유 볼륨(``<instance>-workspace``)·워커
+    #: 컨테이너(``<instance>-worker-<user>``)·per-user 볼륨(``<instance>-<user>``)이
+    #: 파생되고, compose 는 같은 값을 env ``JAD_INSTANCE`` 로 읽어 자기 컨테이너·네트워크·
+    #: 볼륨 이름을 짓는다. 조립 규칙과 "무엇이 계약이고 무엇이 관례인지"는
+    #: :mod:`app.naming` 참조.
+    #:
+    #: ⚠️ **compose 와 반드시 같은 값이어야 한다.** compose 는 ``.env`` 의 ``JAD_INSTANCE``
+    #: 를 보고 실제 네트워크·볼륨을 만들고, 그 값을 central 컨테이너에 env 로도 넣는다 —
+    #: 그래서 env 가 이 필드를 **이긴다**(:func:`_apply_env_overrides`). env 가 알려 주는
+    #: 것이 "실제로 만들어진 이름"이기 때문이다. 둘이 어긋나면 로더가 ERROR 로 알린다.
+    instance: str = "jad"
     docker_host: str = "tcp://socket-proxy:2375"
     secrets_base_dir: str = ""
     workspace_volume: str = "jad-workspace"
@@ -176,15 +191,22 @@ class JiraConfig:
     #: 인스턴스 기본값이 바로 그 합집합이다.
     projects: list = field(default_factory=list)
     poll_interval_sec: int = 60
-    #: **자격 재확인 주기(초)** — 폴러가 ``GET /rest/api/3/myself`` 로 감시 토큰이 아직
-    #: 살아 있는지 확인하는 최소 간격. 0 이하면 재확인을 끈다.
+    #: **운영 중 재확인 주기(초)** — 폴러가 "이 침묵이 진짜인가"를 되묻는 최소 간격.
+    #: 0 이하면 재확인을 전부 끈다. (이름은 자격 확인만 있던 시절 그대로 — 기존 배포의
+    #: config.yaml 을 깨지 않는다.)
     #:
-    #: 왜 필요한가: Jira Cloud 는 자격이 틀려도 JQL 검색에 **200 + 빈 배열**을 준다
-    #: (``/myself`` 만 401). 그래서 토큰이 만료·회수되면 폴러는 "매칭 티켓 없음"과
-    #: 구별하지 못한 채 **영원히 조용히** 돈다. 왜 매 폴이 아닌가: 티켓이 하나라도
-    #: 돌아온 폴은 그 자체가 자격 증거라 확인이 필요 없고, 빈 폴마다 확인하면
-    #: (기본 60초 주기) 하루 1,440회의 순수 진단 요청이 는다. 기본 30분이면 하루 48회로
-    #: 줄면서 최악의 감지 지연이 30분이다 — "영원히 모른다"와 바꿀 만하다.
+    #: 두 가지를 이 주기로 함께 본다(:mod:`app.poller` 축0):
+    #:   - ``GET /rest/api/3/myself`` — 감시 토큰이 아직 살아 있는가.
+    #:   - ``GET /rest/api/3/project/{key}`` — 감시 대상 프로젝트가 아직 실재하는가
+    #:     (삭제·키 변경·감시 계정의 '찾아보기' 권한 회수).
+    #:
+    #: 왜 필요한가: Jira Cloud 는 자격이 틀려도, 프로젝트가 없어도 JQL 검색에 **200 + 빈
+    #: 배열**을 준다(``/myself`` 만 401 · ``/project/{key}`` 만 404). 그래서 토큰이 만료·
+    #: 회수되거나 프로젝트가 사라지면 폴러는 "매칭 티켓 없음"과 구별하지 못한 채 **영원히
+    #: 조용히** 돈다. 왜 매 폴이 아닌가: 빈 폴마다 확인하면(기본 60초 주기) 하루 1,440회의
+    #: 순수 진단 요청이 는다. 기본 30분이면 하루 48회로 줄면서 최악의 감지 지연이 30분이다
+    #: — "영원히 모른다"와 바꿀 만하다. 노브를 하나로 두는 이유는 두 확인이 같은 질문에
+    #: 답하기 때문이다 — 둘로 나누면 한쪽만 꺼 놓은 배포가 생긴다.
     auth_recheck_sec: int = 1800
     watcher_token_file: str = ""  # 중앙 감시 토큰(내 것/봇). secrets.base_dir 상대
     watcher_email: str = ""       # Basic auth actor(감시 계정 이메일). env JIRA_WATCHER_EMAIL 폴백
@@ -579,14 +601,20 @@ def _build_deploy(deploy: dict, spawn: dict, secrets: dict) -> DeployConfig:
             f"deploy.profile 은 {'|'.join(DEPLOY_PROFILES)} 여야 합니다: {profile!r}"
         )
     derived = PROFILE_DEFAULTS[profile]
+    # 인스턴스 이름(기본 ``jad``) — 이름 공간 접두어. 프로파일 파생과 **독립**이다
+    # (배포 형태와 "몇 번째 인스턴스인가"는 서로 다른 질문이다).
+    instance = str(deploy.get("instance", "") or "").strip() or naming.DEFAULT_INSTANCE
     return DeployConfig(
         profile=profile,
+        instance=instance,
         docker_host=str(_pick(deploy, "docker_host", spawn, "docker_host",
                               derived["docker_host"])),
         secrets_base_dir=str(_pick(deploy, "secrets_base_dir", secrets, "base_dir",
                                    derived["secrets_base_dir"])),
+        # 명시하지 않았으면 **인스턴스 이름에서 파생**한다. 기본 인스턴스(``jad``)에서는
+        # 그 결과가 프로파일 기본값(``jad-workspace``)과 같으므로 기존 배포는 무변경이다.
         workspace_volume=str(_pick(deploy, "workspace_volume", spawn, "workspace_volume",
-                                   derived["workspace_volume"])),
+                                   naming.default_workspace_volume(instance))),
     )
 
 
@@ -869,7 +897,10 @@ def _build_config(raw: dict) -> AppConfig:
         ),
         spawn=SpawnConfig(
             image=str(spawn.get("image", "jira-auto-dispatcher:latest")),
-            network=str(spawn.get("network", "jad-net")),
+            # 명시하지 않았으면 **인스턴스 이름에서 파생**(기본 인스턴스면 ``jad-net`` —
+            # 예전 하드코딩 기본값과 같다). 명시 값은 언제나 이긴다.
+            network=str(spawn.get("network")
+                        or naming.default_network_name(deploy.instance)),
             mem_limit=str(spawn.get("mem_limit", "4g")),
             run_as=str(spawn.get("run_as", "1000:1000")),
             # docker_host·workspace_volume 은 deploy 가 정본이다
@@ -1027,6 +1058,8 @@ def _apply_env_overrides(cfg: AppConfig) -> None:
     if secrets_dir and (not cfg.secrets.base_dir or "${SECRETS_DIR}" in cfg.secrets.base_dir):
         cfg.secrets.base_dir = cfg.secrets.base_dir.replace("${SECRETS_DIR}", secrets_dir) or secrets_dir
 
+    _apply_instance_override(cfg, os.environ.get("JAD_INSTANCE"))
+
     # ⚠️ ``CENTRAL_URL`` · ``WORKER_SHARED_SECRET`` env 는 **더 이상 읽지 않는다.**
     # 둘 다 워커가 중앙의 dispatch HTTP 를 폴링하던 시절의 값이었고(폴링 대상 주소 ·
     # ``X-Worker-Secret`` 공유 시크릿), 그 서빙 표면과 폴링 소비자가 프랙탈 seam
@@ -1091,6 +1124,42 @@ def _apply_env_overrides(cfg: AppConfig) -> None:
     cfg.deploy.docker_host = cfg.spawn.docker_host
     cfg.deploy.workspace_volume = cfg.spawn.workspace_volume
     cfg.deploy.secrets_base_dir = cfg.secrets.base_dir
+
+
+def _apply_instance_override(cfg: AppConfig, env_instance: Any) -> None:
+    """env ``JAD_INSTANCE`` 로 인스턴스 이름을 덮어쓴다(파생 이름도 함께 옮긴다).
+
+    **왜 env 가 config.yaml 을 이기는가**: compose 는 ``.env`` 의 ``JAD_INSTANCE`` 를 보고
+    네트워크·볼륨·컨테이너를 **실제로 만든 다음**, 같은 값을 central 컨테이너에 env 로
+    넣는다. 즉 env 는 "설정에 적힌 희망"이 아니라 **호스트에 실재하는 이름**이다. 두 값이
+    어긋날 때 config.yaml 을 따르면 central 은 존재하지 않는 네트워크에 워커를 붙이려다
+    실패한다 — 그래서 실재하는 쪽을 따르고, 어긋났다는 사실은 ERROR 로 남긴다(조용히
+    한쪽을 버리면 왜 이름이 다른지 추적할 수 없다).
+
+    함께 옮기는 것: ``spawn.network``·``deploy.workspace_volume``. 단, **파생 기본값과
+    같을 때만** 옮긴다 — 설치자가 이름을 직접 적어 뒀다면 그건 명시적 의사표시이므로
+    인스턴스가 바뀌어도 흔들지 않는다.
+    """
+    new = str(env_instance or "").strip()
+    if not new:
+        return
+    old = str(getattr(cfg.deploy, "instance", "") or "").strip() or naming.DEFAULT_INSTANCE
+    if new == old:
+        return
+    if old != naming.DEFAULT_INSTANCE:
+        log.error(
+            "⚠️ 인스턴스 이름이 어긋납니다 — env JAD_INSTANCE=%r 인데 config.yaml 의 "
+            "deploy.instance 는 %r 입니다. compose 가 실제로 만든 네트워크·볼륨·컨테이너는 "
+            "env 쪽 이름이므로 **env 를 따릅니다.** 두 값을 같게 맞추세요(.env 의 "
+            "JAD_INSTANCE 가 스택 전체의 단일 노브입니다).", new, old,
+        )
+    cfg.deploy.instance = new
+    # 파생 기본값을 쓰고 있던 이름만 새 인스턴스로 옮긴다(명시 이름은 그대로 존중).
+    if cfg.spawn.network == naming.default_network_name(old):
+        cfg.spawn.network = naming.default_network_name(new)
+    if cfg.deploy.workspace_volume == naming.default_workspace_volume(old):
+        cfg.deploy.workspace_volume = naming.default_workspace_volume(new)
+        cfg.spawn.workspace_volume = cfg.deploy.workspace_volume
 
 
 def _retire_fractal_central(cfg: AppConfig) -> None:

@@ -11,6 +11,10 @@
 
 레코드 스키마(1 사용자):
     username            로그인/식별 키(고유). worker의 DISPATCH_USER.
+                        ⚠️ 고유성은 **대소문자를 무시하고** 본다 — 시크릿 디렉토리
+                        (``secrets/<user>/``)가 대소문자를 구별하지 않는 파일시스템에
+                        놓이면 ``Alice``·``alice`` 가 서로의 토큰을 덮어쓴다
+                        (:func:`username_key`).
     display_name        표시 이름
     jira_account_id     Jira 담당자 계정ID(폴러 매핑 키)
     jira_email          Jira 계정 이메일(Basic auth actor)
@@ -72,8 +76,9 @@ _RESERVED_STEMS = "con|prn|aux|nul|com[1-9]|lpt[1-9]"
 #:      임의 위치에 0600 파일을 쓰는 통로가 된다. 그래서 경로 문자·상위 표기·공백·제어
 #:      문자·비ASCII 를 전부 뺀다(비ASCII 는 파일시스템 정규화 차이로 같은 이름이 두 개가
 #:      되는 문제까지 따라온다).
-#:   2. **docker 컨테이너·볼륨 이름** ``jad-worker-<username>``·``jad-<username>``
-#:      (:mod:`app.spawner`). docker 가 허용하는 이름은
+#:   2. **docker 컨테이너·볼륨 이름** ``<instance>-worker-<username>``·
+#:      ``<instance>-<username>`` (:mod:`app.spawner`·:mod:`app.naming`).
+#:      docker 가 허용하는 이름은
 #:      ``[a-zA-Z0-9][a-zA-Z0-9_.-]*`` 다 — 즉 영숫자·``_``·``.``·``-`` 뿐이고, 이 규칙은
 #:      그 집합을 **넘지 않는다**(우리 쪽이 더 좁다).
 #:
@@ -86,8 +91,9 @@ _RESERVED_STEMS = "con|prn|aux|nul|com[1-9]|lpt[1-9]"
 #:   - **길이 1~32** — 사람이 읽는 이름의 상한. 컨테이너 이름 접두어(``jad-worker-``)를
 #:     붙여도 여유가 넉넉하다.
 #:
-#: ⚠️ 대소문자는 **허용한다**(기존 이름을 무효로 만들지 않기 위해). 그 대가는
-#: 대소문자 무시 파일시스템에서의 이름 충돌이며, 알려진 잔여 이슈로 남긴다.
+#: ⚠️ 대소문자는 **허용한다**(기존 이름을 무효로 만들지 않기 위해). 그 대가인 대소문자
+#: 무시 파일시스템에서의 이름 충돌은 모양이 아니라 **등록 시 중복 검사**로 막는다
+#: (:func:`username_key` · :meth:`Registry.find_case_conflict`).
 USERNAME_PATTERN = (
     rf"(?!(?i:{_RESERVED_STEMS})(?:\..*)?\Z)"
     rf"[A-Za-z0-9](?:[A-Za-z0-9._-]{{0,{USERNAME_MAX_LEN - 2}}}[A-Za-z0-9])?"
@@ -111,6 +117,32 @@ def is_valid_username(value: Any) -> bool:
     **같은 이 함수**를 본다 — 판정이 두 벌이 되면 한쪽이 반드시 낡는다.
     """
     return bool(isinstance(value, str) and USERNAME_RE.fullmatch(value))
+
+
+def username_key(value: Any) -> str:
+    """**대소문자 무시 파일시스템에서 같은 자리를 쓰게 되는** 이름들의 공통 키.
+
+    왜 필요한가 (실제로 무엇이 겹치는가):
+        ``Alice`` 와 ``alice`` 는 이 레지스트리에서 **서로 다른 두 등록**이다(dict 키가
+        정확 일치이므로). 그런데 온보딩이 자격증명을 쓰는 자리
+        (:func:`app.onboarding._write_secret` → ``secrets/<username>/``)는 **호스트
+        파일시스템**이고, Windows(NTFS 기본)·macOS(APFS 기본)는 대소문자를 구별하지 않는다.
+        그래서 나중에 등록한 쪽이 앞사람의 ``jira-token``·``forge-token``·
+        ``claude-oauth-token`` 을 **조용히 덮어쓴다** — 그 뒤로 Alice 의 워커는 alice 의
+        자격증명으로 남의 Jira·forge 에 글을 쓴다. 정확 일치 중복 검사는 이걸 통과시킨다.
+
+    ⚠️ **docker 이름은 이 문제를 겪지 않는다.** 컨테이너(``<instance>-worker-<user>``)와
+    볼륨(``<instance>-<user>``)의 이름은 항상 리눅스 docker 데몬이 바이트 단위로 비교한다
+    (Docker Desktop 도 리눅스 VM 안에서 돈다) — ``Alice`` 와 ``alice`` 는 서로 다른
+    컨테이너·서로 다른 볼륨이다. 겹치는 것은 **호스트에 바인드된 시크릿 디렉토리 하나**다.
+    그래도 검사는 username 단위로 한 번만 한다 — 한 사람이 다른 사람의 토큰을 받는 순간
+    컨테이너가 갈라져 있다는 사실은 위안이 되지 않는다.
+
+    ``casefold()`` 를 쓴다 — 이름 규칙이 ASCII 만 허용하므로(:data:`USERNAME_PATTERN`)
+    신규 이름에서는 ``lower()`` 와 결과가 같고, 규칙 이전에 등록된 비ASCII 이름에서는
+    더 넓게(안전한 쪽으로) 접힌다.
+    """
+    return str(value or "").casefold()
 
 
 # secrets_ref 안에 실토큰이 섞여 들어오는 것을 막기 위한 참조 키 화이트리스트.
@@ -318,6 +350,49 @@ class Registry:
                 len(legacy_names), ", ".join(repr(n) for n in legacy_names),
                 USERNAME_HINT,
             )
+        self._warn_case_conflicts()
+
+    def _warn_case_conflicts(self) -> None:
+        """이미 등록돼 있는 **대소문자만 다른 이름 짝**을 경고로 드러낸다.
+
+        ⚠️ 부팅을 막지 않는다 — 이유는 :meth:`__init__` 의 이름 규칙 처리와 같다. 이
+        파일은 운영 중인 등록의 정본이고, 한 줄 때문에 central 이 뜨지 않으면 설정을 고칠
+        관리 UI 도 함께 사라진다. 그리고 여기서 **어느 쪽을 떨어뜨릴지 고를 근거가 없다**
+        (둘 다 실재하는 사람이다). 그래서 새 등록은 :meth:`find_case_conflict` 로 막고,
+        이미 들어와 있는 짝은 사람이 보고 손으로 정리하도록 이름을 찍어 준다.
+
+        경고가 뜨는 배포에서 실제로 일어나는 일: 두 사람의 시크릿이 대소문자 무시
+        파일시스템에서 같은 ``secrets/<user>/`` 를 쓰므로 **나중에 등록한 쪽의 토큰만
+        남는다**(:func:`username_key`). 한쪽을 지우고 다른 이름으로 다시 등록해야 한다.
+        """
+        groups: dict = {}
+        for name in self._users:
+            groups.setdefault(username_key(name), []).append(name)
+        clashes = [names for names in groups.values() if len(names) > 1]
+        if not clashes:
+            return
+        log.warning(
+            "⚠️ 대소문자만 다른 username 이 함께 등록돼 있습니다(부팅은 막지 않습니다). "
+            "%d짝: %s. 대소문자를 구별하지 않는 파일시스템(Windows·macOS 기본)에서는 이들이 "
+            "**같은 secrets/<user>/ 디렉토리**를 쓰므로 나중에 등록한 쪽이 앞사람의 Jira·"
+            "forge·Claude 토큰을 덮어씁니다 — 한쪽을 삭제하고 겹치지 않는 이름으로 다시 "
+            "등록한 뒤 그 사람의 토큰을 재발급하세요.",
+            len(clashes),
+            " / ".join(", ".join(repr(n) for n in sorted(names)) for names in clashes),
+        )
+
+    def find_case_conflict(self, username: str) -> Optional[str]:
+        """``username`` 과 **대소문자만 다른** 기존 등록 이름(없으면 None).
+
+        정확 일치는 여기서 걸리지 않는다 — 그건 "덮어쓰기(갱신)"이지 충돌이 아니고,
+        호출부가 먼저 판정한다(:mod:`app.onboarding`).
+        """
+        key = username_key(username)
+        with self._lock:
+            for existing in self._users:
+                if existing != username and username_key(existing) == key:
+                    return existing
+        return None
 
     def _persist(self) -> None:
         state.save_registry({"users": [u.to_dict() for u in self._users.values()]})
@@ -355,10 +430,24 @@ class Registry:
 
         dict/UserRecord 모두 허용. 시크릿 "값"이 secrets_ref로 섞여 들어와도
         참조 키만 통과시킨다(방어). username 필수.
+
+        **심층 방어** — *신규* 이름이 기존 이름과 대소문자만 다르면 거부한다
+        (:func:`username_key`). 온보딩이 이미 같은 판정으로 409 를 주지만
+        (:mod:`app.onboarding`), 레지스트리는 시크릿이 **이미 파일로 쓰인 뒤**에 불리는
+        마지막 관문이라 여기서도 본다 — 상류 게이트가 빠지거나 다른 호출부가 생겼을 때
+        조용히 남의 토큰을 덮어쓰는 등록이 성립하면 안 된다. 기존 이름을 **그대로** 다시
+        upsert 하는 것(갱신·컨테이너 상태 반영)은 충돌이 아니다.
         """
         rec = record if isinstance(record, UserRecord) else UserRecord.from_dict(record)
         if not rec.username:
             raise ValueError("upsert: username은 필수입니다")
+        clash = self.find_case_conflict(rec.username)
+        if clash is not None:
+            raise ValueError(
+                f"이미 등록된 사용자 {clash!r} 와 대소문자만 다른 username 입니다 — "
+                "대소문자를 구별하지 않는 파일시스템에서는 두 사람이 같은 "
+                "secrets/<user>/ 디렉토리를 쓰게 되어 토큰이 서로 덮어써집니다. "
+                "구별되는 이름을 쓰세요.")
         # secrets_ref는 참조 키만 유지(값이 실수로 섞이는 것 방지는 from_dict가 이미
         # 화이트리스트 필드만 취함 — 여기서는 존재 필드 재확인).
         _ = _SECRETS_REF_KEYS  # 문서화용 상수 참조

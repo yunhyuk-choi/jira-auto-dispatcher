@@ -135,3 +135,63 @@ def test_registry_keeps_a_legacy_username_and_never_blocks_boot(isolated_state, 
     warned = " ".join(r.getMessage() for r in caplog.records)
     assert "../legacy-escape" in warned
     assert "normal" not in warned or "../legacy-escape" in warned
+
+
+def test_case_only_duplicate_is_refused_at_upsert(isolated_state):
+    """``Alice`` 와 ``alice`` 는 대소문자 무시 파일시스템에서 **같은 시크릿 디렉토리**다.
+
+    레지스트리 dict 는 정확 일치라 둘을 다른 사람으로 받아들이지만, 온보딩이 토큰을 쓰는
+    ``secrets/<user>/`` 는 호스트 파일시스템이고 Windows·macOS 기본은 대소문자를
+    구별하지 않는다 → 나중 등록이 앞사람의 토큰을 덮어쓴다. 그래서 조립 자체를 거부한다.
+    """
+    import pytest
+
+    from app.registry import Registry
+
+    r = Registry()
+    r.upsert(_rec(username="Alice", account_id="acc-A"))
+    with pytest.raises(ValueError) as caught:
+        r.upsert(_rec(username="alice", account_id="acc-a"))
+    assert "Alice" in str(caught.value)
+    # 기존 등록은 흔들리지 않는다.
+    assert r.get("Alice") is not None and r.get("alice") is None
+
+    # **같은 이름을 그대로 다시 upsert 하는 것은 충돌이 아니다**(갱신 경로).
+    r.upsert(_rec(username="Alice", account_id="acc-A2"))
+    assert r.get("Alice").jira_account_id == "acc-A2"
+
+
+def test_find_case_conflict_ignores_exact_match(isolated_state):
+    from app.registry import Registry
+
+    r = Registry()
+    r.upsert(_rec(username="yh.choi"))
+    assert r.find_case_conflict("yh.choi") is None      # 정확 일치는 충돌이 아니다
+    assert r.find_case_conflict("YH.Choi") == "yh.choi"
+    assert r.find_case_conflict("other") is None
+
+
+def test_existing_case_conflict_warns_but_never_blocks_boot(isolated_state, caplog):
+    """이미 들어와 있는 충돌 짝은 **경고로 드러내고 부팅은 막지 않는다.**
+
+    떨어뜨리면 그 사람이 예고 없이 사라지고, 예외로 올리면 한 줄이 central 부팅 전체를
+    막는다 — 그리고 여기서는 **어느 쪽을 버릴지 고를 근거도 없다**(둘 다 실재하는 사람이다).
+    선례는 형식 위반 이름 처리와 같다.
+    """
+    from app import state
+    from app.registry import Registry
+
+    state.save_registry({"users": [
+        {"username": "Alice", "jira_account_id": "acc-A"},
+        {"username": "alice", "jira_account_id": "acc-a"},
+        {"username": "bob", "jira_account_id": "acc-b"},
+    ]})
+
+    with caplog.at_level("WARNING", logger="jad.registry"):
+        reg = Registry()
+
+    assert reg.get("Alice") is not None and reg.get("alice") is not None
+    assert reg.find_by_account_id("acc-b") is not None
+    warned = " ".join(r.getMessage() for r in caplog.records)
+    assert "Alice" in warned and "alice" in warned
+    assert "bob" not in warned                          # 충돌 없는 이름은 조용하다

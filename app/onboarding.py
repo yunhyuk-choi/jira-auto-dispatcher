@@ -46,7 +46,7 @@ import logging
 
 from flask import jsonify, request
 
-from app import inject
+from app import inject, naming
 from app import scope as scope_mod
 from app import user_schema as US
 from app.registry import UserRecord, is_valid_username
@@ -263,9 +263,25 @@ def register_onboarding_api(app, comps: dict) -> None:
 
         username = str(answers["username"]).strip()
 
-        # 2) username 중복 검증.
+        # 2) username 중복 검증 — 정확 일치 + **대소문자 무시**.
         if registry.get(username) is not None:
             return jsonify({"error": "이미 등록된 username", "username": username}), 409
+        # 2-1) 대소문자만 다른 이름은 **다른 등록인데 같은 시크릿 디렉토리**를 쓴다.
+        #      ``Alice`` 와 ``alice`` 는 레지스트리에서는 두 사람이지만, 아래 3)이 토큰을
+        #      쓰는 ``secrets/<user>/`` 는 호스트 파일시스템이고 Windows·macOS 기본 설정은
+        #      대소문자를 구별하지 않는다 → 나중에 등록한 쪽이 앞사람의 Jira·forge·Claude
+        #      토큰을 조용히 덮어쓰고, 그때부터 그 사람의 워커는 **남의 자격증명**으로 돈다.
+        #      그래서 아무 것도 쓰기 전에 막는다(:func:`app.registry.username_key`).
+        clash = registry.find_case_conflict(username)
+        if clash is not None:
+            return jsonify({
+                "error": f"이미 등록된 '{clash}' 와 대소문자만 다른 username 입니다 — "
+                         "대소문자를 구별하지 않는 파일시스템에서는 두 사람이 같은 시크릿 "
+                         "디렉토리를 쓰게 되어 토큰이 서로 덮어써집니다. 구별되는 이름을 "
+                         "쓰세요.",
+                "username": username,
+                "conflicts_with": clash,
+            }), 409
 
         # 2.5) 작업 범위 확정 — 인스턴스 기본 프로젝트 포함 여부 + 추가 프로젝트.
         #      ⚠️ 빈 목록은 "제한 없음"이 아니라 **"인스턴스 기본값 상속"** 이다
@@ -328,7 +344,10 @@ def register_onboarding_api(app, comps: dict) -> None:
                     "full_permissions": answers.get(US.CONSENT_KEY) is True,
                     "accepted_at": str(answers.get(US.CONSENT_AT_KEY, "") or ""),
                 },
-                "container": {"name": f"jad-worker-{username}", "status": "absent"},
+                # 컨테이너 이름은 **spawner 가 실제로 짓는 이름**과 같아야 한다(인스턴스
+                # 접두어 포함) — 조립은 단일 원천에 맡긴다(app/naming.py).
+                "container": {"name": naming.worker_container_name(config, username),
+                              "status": "absent"},
                 "secrets_ref": secrets_ref,
             }
         )

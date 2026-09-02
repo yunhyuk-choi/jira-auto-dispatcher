@@ -24,13 +24,15 @@
 | 이미지 | `jira-auto-dispatcher:latest` (central·worker 공용 단일 이미지) |
 | 네트워크 | `jad-net` (compose가 생성; 동적 worker가 이름으로 합류) |
 | 관리 UI 포트 | `8787` (⚠️ 신뢰 네트워크 한정 — 인터넷 노출 금지) |
+| 인스턴스 이름 | `jad` (기본) — 컨테이너·네트워크·볼륨 이름 접두어. 한 호스트에 여러 벌 띄울 때만 바꾼다(§9.2) |
 
 계약 정합(이 3개는 `Dockerfile`·`docker-compose.yml`·`config/config.yaml`·`app/spawner.py`가
 모두 동일해야 한다):
 
 - **image** = `jira-auto-dispatcher:latest`
-- **network** = `jad-net`
-- **central DNS** = `http://central:8787` (compose 서비스 키가 `central`)
+- **network** = `jad-net` (= `<인스턴스>-net`)
+- **central DNS** = `http://central:8787` (compose **서비스 키**가 `central` — 컨테이너
+  이름과 무관하다. 그래서 컨테이너 이름에 접두어를 붙여도 이 주소는 그대로다)
 
 ---
 
@@ -381,3 +383,45 @@ worker 의 bind 마운트가 전부 사라지면서 `deploy.host_deploy_dir` / e
 > ⚠️ **부분 업그레이드 금지**: 새 central + 낡은 워커 이미지 조합이면, 워커가 주입 env 를
 > 해석하지 못해 config 없이 부팅한다(크래시 루프 — 조용하지 않고 로그에 바로 뜬다).
 > 위 2번처럼 이미지를 함께 올리면 발생하지 않는다.
+
+### 9.2 한 호스트에 여러 인스턴스 (평가·스테이징·프로덕션)
+
+컨테이너·네트워크·볼륨 이름은 **인스턴스 접두어**에서 파생한다. 접두어는 `.env` 의
+`JAD_INSTANCE` 하나이고 **미설정이면 `jad`** 다 — 지금 도는 배포는 아무것도 달라지지 않는다.
+
+```bash
+# 두 번째 인스턴스: 별도 디렉토리에 배포하고 .env 에 두 줄만 추가
+mkdir -p /opt/jad-stg && cd /opt/jad-stg      # 소스·config·secrets 는 이 디렉토리에 따로
+cat >> .env <<'EOF'
+JAD_INSTANCE=jad-stg      # 컨테이너·네트워크·볼륨 접두어
+JAD_PORT=8788             # 관리 UI 호스트 포트(인스턴스마다 달라야 한다)
+EOF
+docker compose up -d
+```
+
+이 한 값이 옮기는 것:
+
+| 대상 | 기본(`jad`) | `JAD_INSTANCE=jad-stg` |
+|---|---|---|
+| central 컨테이너 | `jad-central` | `jad-stg-central` |
+| socket-proxy 컨테이너 | `jad-socket-proxy` | `jad-stg-socket-proxy` |
+| 네트워크 | `jad-net` | `jad-stg-net` |
+| 공유 워크스페이스 볼륨 | `jad-workspace` | `jad-stg-workspace` |
+| worker 컨테이너 | `jad-worker-<user>` | `jad-stg-worker-<user>` |
+| worker per-user 볼륨 | `jad-<user>` | `jad-stg-<user>` |
+
+- **compose 와 central 이 어긋날 수 없다**: compose 가 그 값으로 리소스를 만든 뒤 같은 값을
+  central 에 env 로 넘기고, central 의 config 가 거기서 `spawn.network`·
+  `deploy.workspace_volume`·워커 이름을 파생한다(`app/naming.py`). `config.yaml` 의
+  `deploy.instance` 를 따로 적어 두고 `.env` 와 다르면 **env 를 따르고 부팅 로그에 ERROR** 가
+  남는다(compose 가 실제로 만든 이름이 env 쪽이기 때문).
+- **바꾸지 않는 것**: compose 서비스 키(`central`·`socket-proxy`)와 이미지 태그. 서비스 키는
+  네트워크 DNS(`tcp://socket-proxy:2375`)가 쓰고, 이미지는 인스턴스끼리 공유해도 무해하다
+  (⚠️ 다만 두 인스턴스가 **서로 다른 버전**을 돌려야 하면 `image:`/`build` 도 따로 태그해야
+  한다 — 같은 태그를 재빌드하면 다른 인스턴스가 재생성될 때 새 이미지를 집는다).
+- **상태 볼륨(`jad-state`)** 은 이름을 고정하지 않는다 — compose 프로젝트 접두어가 붙어
+  이미 인스턴스별로 갈린다(별도 디렉토리 = 다른 프로젝트명). 같은 디렉토리에서 두 벌을
+  띄우려면 `COMPOSE_PROJECT_NAME` 도 함께 나눈다.
+- **인스턴스 이름을 나중에 바꾸면** 네트워크·볼륨이 새로 만들어진다 — 기존 공유 워크스페이스
+  볼륨의 클론은 따라오지 않는다(레포는 다시 clone 된다. 잡 상태는 `jad-state` 에 있으므로
+  프로젝트가 같으면 유지된다).

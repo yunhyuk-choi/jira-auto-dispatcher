@@ -153,9 +153,11 @@ def build_central_components(config_path: str = "config/config.yaml") -> dict:
     # app/doctor_runtime.py). 컨테이너 안에서 도는 덕에 /run/secrets·socket-proxy 같은
     # **컨테이너 관점** 값까지 판정된다(호스트에서 돌린 doctor 는 그걸 SKIP 한다).
     doctor = DoctorRuntime(cfg, config_path=config_path, project_dir=".")
-    # 폴러가 **운영 중** 감지한 Jira 자격 실패를 진단에 실어 관리 UI 배너로 드러낸다.
-    # (부팅 진단은 한 번만 돈다 — 토큰은 그 뒤에 만료된다. app/poller.py 축0 참조.)
+    # 폴러가 **운영 중** 감지한 Jira 자격 실패·없는 감시 프로젝트를 진단에 실어 관리 UI
+    # 배너로 드러낸다. (부팅 진단은 한 번만 돈다 — 토큰은 그 뒤에 만료되고, 프로젝트는 그
+    # 뒤에 삭제·개명된다. 둘 다 폴러가 조용해지는 것으로만 나타난다 — app/poller.py 축0.)
     poller.set_auth_reporter(doctor.note_jira_auth)
+    poller.set_project_reporter(doctor.note_jira_projects)
 
     components = {
         "config": cfg,

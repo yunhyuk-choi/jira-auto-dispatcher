@@ -27,11 +27,13 @@
     잡만 쌓이기** 때문이다. 고르는 기준은 그 상수의 주석 참조.
 
 운영 중 실측 반영:
-    진단은 부팅 때 한 번 돈다. 그런데 **토큰은 운영 중에 만료·회수된다** — 그때부터
+    진단은 부팅 때 한 번 돈다. 그런데 **설정은 운영 중에 낡는다** — 토큰이 만료·회수되고,
+    감시하던 프로젝트가 삭제·개명되거나 감시 계정의 권한이 회수된다. 어느 쪽이든 그때부터
     폴러는 아무 티켓도 못 읽으면서 "할 일 없음"처럼 조용히 돈다(Jira Cloud 는 자격이
-    틀려도 JQL 검색에 200 + 빈 배열을 준다). 폴러가 그것을 감지하면
-    :meth:`DoctorRuntime.note_jira_auth` 로 여기 실어, 부팅 진단이 아니라 **지금 사실**이
-    ``/api/doctor`` 와 관리 UI 배너에 뜨게 한다.
+    틀려도, 프로젝트가 없어도 JQL 검색에 200 + 빈 배열을 준다). 폴러가 그것을 감지하면
+    :meth:`DoctorRuntime.note_jira_auth`(자격)·:meth:`DoctorRuntime.note_jira_projects`
+    (프로젝트 실재)로 여기 실어, 부팅 진단이 아니라 **지금 사실**이 ``/api/doctor`` 와
+    관리 UI 배너에 뜨게 한다.
 
 시크릿 규율:
     :class:`app.setup_doctor.CheckResult` 는 이미 값이 아니라 존재·응답코드·마스킹된
@@ -257,6 +259,48 @@ class DoctorRuntime:
                 f"못하고 있습니다",
                 "jira.watcher_token_file 이 가리키는 토큰을 재발급하고 "
                 "jira.watcher_email 과 짝이 맞는지 확인한 뒤 '다시 진단' 하세요.")
+        self.note_runtime_check(result)
+
+    def note_jira_projects(self, missing: list, checked: list,
+                           undetermined: Optional[list] = None) -> None:
+        """폴러가 **폴링 중 실측한** 감시 프로젝트 실재를 ``jira_search`` 검사에 반영한다.
+
+        왜 자격과 따로 오는가:
+            빈 폴의 위장은 둘이다 — 자격 만료(``jira_auth``)와 **없는 프로젝트**. 후자는
+            자격이 멀쩡한데도 JQL 이 200 + 빈 목록을 주는 경우이고(프로젝트 삭제·키 변경·
+            감시 계정의 '찾아보기' 권한 회수), 부팅 진단의 ``jira_search`` 가 보던 바로 그
+            사실이다(:func:`app.setup_doctor._project_existence_failure`). 운영 중에 그게
+            바뀌면 부팅 진단 결과는 낡은다 — 그래서 폴러가 같은 검사 이름으로 덮어쓴다.
+
+        온보딩 게이트에 미치는 영향(의도된 것):
+            ``jira_search`` 도 :data:`BLOCKING_CHECKS` 다. 감시 프로젝트가 사라진 상태에서
+            사용자를 새로 붙이면 그 사람은 **영원히 티켓을 받지 못하는 워커**를 갖게 된다.
+            프로젝트가 돌아오면(또는 설정을 고치면) 다음 확인에서 PASS 가 기록돼 풀린다.
+
+        Args:
+            missing: 404 로 확인된 **없는(또는 볼 수 없는)** 프로젝트 키.
+            checked: 실재가 확인된 키.
+            undetermined: 확인하지 못한 키(5xx·네트워크 — 판정 보류). 실패 근거로 쓰지
+                않고 메시지에만 싣는다.
+
+        ⚠️ 인자는 전부 **프로젝트 키**다(시크릿 아님). 진단 응답은 인증 없이 읽히므로
+        폴러가 응답 본문·토큰을 여기로 넘기지 않는다.
+        """
+        pending = list(undetermined or [])
+        tail = f"(확인 보류: {', '.join(pending)})" if pending else ""
+        if missing:
+            result = setup_doctor.CheckResult(
+                "jira_search", setup_doctor.STATUS_FAIL,
+                f"폴링 중 **없는 프로젝트** 감지: {', '.join(missing)}{tail} — JQL 은 없는 "
+                f"프로젝트에도 오류가 아니라 빈 결과를 주므로 '할 일 없음'처럼 보이지만 그 "
+                f"프로젝트의 티켓은 하나도 오지 않습니다",
+                "프로젝트가 삭제·개명됐는지, 감시 계정(jira.watcher_email)의 '찾아보기' "
+                "권한이 살아 있는지 확인하고 config.yaml 의 jira.project · jira.projects "
+                "를 고친 뒤 '다시 진단' 하세요.")
+        else:
+            result = setup_doctor.CheckResult(
+                "jira_search", setup_doctor.STATUS_PASS,
+                f"폴링 중 프로젝트 실재 확인({', '.join(checked) or '-'}){tail}")
         self.note_runtime_check(result)
 
     def note_runtime_check(self, result: Any) -> None:

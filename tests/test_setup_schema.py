@@ -167,6 +167,7 @@ _KEY_TO_ATTR = {
     "run.docs_repo": "run.docs_repo",
     "run.docs_repo_url": "run.docs_repo_url",
     "deploy.profile": "deploy.profile",
+    "deploy.instance": "deploy.instance",
     "deploy.docker_host": "deploy.docker_host",
     "deploy.secrets_base_dir": "deploy.secrets_base_dir",
     "deploy.workspace_volume": "deploy.workspace_volume",
