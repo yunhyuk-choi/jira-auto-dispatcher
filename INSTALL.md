@@ -254,7 +254,19 @@ id 로 건다. 커스텀필드 id·전이 id 는 **인스턴스마다 완전히 
 **형식상 유효한 모양 그대로** 남아 눈으로 넘어간다. 그 결과가 조용한 오작동이다:
 
 - 상태 이름이 어긋나면 폴러는 **에러 없이 아무 티켓도 못 찾는다**(가장 알아채기 어렵다).
+- **프로젝트 키**가 어긋나도 똑같다. JQL 은 없는 프로젝트에도 오류가 아니라 **200 + 빈
+  목록**을 준다(실측). 그래서 `doctor` 의 `jira_search` 는 표본이 0건이면
+  `GET /rest/api/3/project/{key}` 로 **프로젝트 실재까지** 확인한다(`jira.projects` 의
+  추가 프로젝트도 함께). 없으면 FAIL 이다 — 초록불로 넘어가지 않는다.
 - 이 인스턴스에 없는 커스텀필드를 보내면 Jira 가 400 → 착수·완료가 통째로 막힌다.
+- ⚠️ `actual_start`·`actual_end`(실제 시작/종료일)에는 **기본값이 없다.** 조직 고유
+  워크플로우 필드라 어떤 id 도 남의 인스턴스에서 맞다고 보장할 수 없기 때문이다(실측:
+  옛 기본값 `customfield_10187`/`customfield_10186` 은 다른 사이트에 아예 없었고 그쪽
+  실제 값은 `customfield_10352`/`customfield_10353` 이었다). 비워 두면 완료 전이에 그
+  필드를 **보내지 않으며**, 워크플로우가 정말 요구한다면 Jira 가 "필수입니다"라고 정확히
+  말해 준다. `discover --only custom_fields` 로 실측해 채운다.
+  **기존 배포 주의**: 이전에는 위 두 id 가 코드 기본값이었다. 그 값을 쓰고 있었다면
+  `config.yaml` 의 `jira.custom_fields` 에 명시해야 완료 전이 동작이 그대로 유지된다.
 
 `discover` 는 `jira.base_url` · `jira.watcher_email` · `jira.watcher_token_file` 만 채운
 `config.yaml` 로도 돌아간다(나머지를 채우기 **전에** 쓰라고 만든 것이다).
@@ -581,6 +593,8 @@ docker compose exec central python -m app.setup doctor
 | 티켓이 감지되지 않음 | `jira.project`/`jira.projects`·사용자 `scope.projects`(그 사람 범위 밖 티켓은 버려진다)·`jira.trigger_statuses`(상태 **이름**)·assignee accountId 매핑 중 하나. 폴링 주기(기본 60s)도 기다렸는지 | `--only jira_search` (프로젝트 키까지) |
 | 폴러가 아무 JQL 도 안 던짐(로그에 "감시할 프로젝트가 없어") | 인스턴스 기본값(`jira.project`)도 없고 등록 사용자 `scope.projects` 도 전부 비었다 — 전 프로젝트를 긁지 않으려고 **의도적으로** 멈춘 것이다 | `--only jira_search` |
 | "티켓 없음"처럼 조용히 넘어감 대신 에러 | Jira **Server/DC** 를 가리켰다 — Cloud 전용이다 | `--only jira_auth,jira_search` |
+| 진단은 전부 초록불인데 티켓이 하나도 안 잡힘 | 감시 프로젝트 키가 이 사이트에 **없다**(JQL 은 없는 프로젝트에도 200 + 빈 목록을 준다). 감시 계정에 그 프로젝트 '찾아보기' 권한이 없어도 같은 증상 | `--only jira_search` (프로젝트 실재까지 확인한다) |
+| `discover`/`doctor` 가 404 를 "Cloud 전용" 이라고 함 | **옛 오진.** 지금은 Jira 가 본문에 적어 준 이유(예: `키가 'HAN'인 프로젝트를 찾을 수 없습니다.`)를 그대로 보여주고, Server/DC 추정은 Jira 가 아무 말도 하지 않았을 때만 한다 | `--only jira_auth,jira_search` |
 | 잡이 running 으로 안 넘어감 | 자원 어드미션이 큐잉 중일 수 있다(`admission.min_free_mem_mb`·`max_load_per_core`) | — |
 | MR 작성자가 엉뚱한 사용자 | worker 가 앰비언트 자격증명으로 push 했다 — per-user forge 토큰 경로를 확인 | — |
 | 알림이 안 감 | `notifier.provider` 가 `none` 이거나 목록 밖 값(경고만 남기고 미발송) | `--only notifier` |

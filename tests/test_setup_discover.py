@@ -187,10 +187,23 @@ def test_configured_field_id_absent_from_instance_is_flagged():
 def test_example_default_ids_are_flagged_as_absent_too():
     """설정을 아예 안 준 경우의 '오늘의 기본값'도 남의 인스턴스 값이다."""
     section = D.discover_custom_fields(FakeJira(), make_cfg())
-    configured = section.data["logical_keys"]["actual_start"]["configured"]
+    configured = section.data["logical_keys"]["start_date"]["configured"]
     assert configured["source"] == "default"
     assert configured["exists"] is False
-    assert "actual_start" in section.data["invalid_configured"]
+    assert "start_date" in section.data["invalid_configured"]
+
+
+def test_logical_key_without_a_default_is_unset_not_broken():
+    """기본값이 없는 논리 키(actual_*)는 '미설정'이지 오류가 아니다 — 오탐을 만들지 않는다.
+
+    남의 인스턴스 id 를 기본값으로 두지 않기로 했으므로(app/jira_client.py), 여기서
+    ⚠️ 로 잡을 대상도 없다. 대신 '보내지 않는다'는 사실을 말해 준다.
+    """
+    section = D.discover_custom_fields(FakeJira(), make_cfg())
+    configured = section.data["logical_keys"]["actual_start"]["configured"]
+    assert configured["id"] == "" and configured["source"] == "default"
+    assert "actual_start" not in section.data["invalid_configured"]
+    assert "미설정" in "\n".join(section.lines)
 
 
 def test_unknown_status_name_is_flagged():

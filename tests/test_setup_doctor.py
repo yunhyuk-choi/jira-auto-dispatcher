@@ -149,12 +149,21 @@ def test_secrets_check_never_prints_secret_contents(tmp_path):
 
 
 class FakeJira:
-    """JiraClient 대역 — 지정한 결과/예외를 그대로 낸다."""
+    """JiraClient 대역 — 지정한 결과/예외를 그대로 낸다.
 
-    def __init__(self, me=None, page=None, error=None):
+    ``missing_projects`` 에 담긴 키는 ``get_project`` 에서 **실측과 같은 모양의** 404
+    (본문에 Jira 가 이유를 적어 준)로 실패한다. ``project_error`` 는 그 밖의 실패
+    (권한·5xx)를 흉내낸다 — 그건 '없다'의 근거가 아니라 판정 보류다.
+    """
+
+    def __init__(self, me=None, page=None, error=None, missing_projects=(),
+                 project_error=None):
         self._me = me or {"displayName": "봇 계정"}
         self._page = page if page is not None else {"issues": [{"key": "ACME-1"}]}
         self._error = error
+        self._missing = set(missing_projects)
+        self._project_error = project_error
+        self.project_calls = []
 
     def myself(self):
         if self._error:
@@ -165,6 +174,17 @@ class FakeJira:
         if self._error:
             raise self._error
         return self._page
+
+    def get_project(self, key):
+        self.project_calls.append(key)
+        if self._project_error:
+            raise self._project_error
+        if key in self._missing:
+            raise JiraError(
+                f"GET /rest/api/3/project/{key} → HTTP 404", status_code=404,
+                body={"errorMessages": [f"키가 '{key}'인 프로젝트를 찾을 수 없습니다."]},
+            )
+        return {"key": key, "name": f"{key} 프로젝트"}
 
 
 def test_jira_auth_success():
@@ -253,6 +273,115 @@ def test_jira_search_skips_the_extra_probe_when_issues_came_back():
     r = D.check_jira_search(make_cfg(), client=jira)
     assert r.status == D.STATUS_PASS
     assert jira.myself_calls == 0
+
+
+# --- 없는 프로젝트 = 빈 결과의 두 번째 위장(실측 2026-09) ---------------------
+
+
+def test_jira_search_fails_when_the_project_does_not_exist():
+    """★ 자격은 멀쩡한데 프로젝트 키가 없으면 JQL 은 200 + 빈 목록을 준다 — 초록불 금지.
+
+    실측: ``{"jql": "project = HAN"}`` → 200 ``{"issues": [], "isLast": true}`` 인데
+    ``GET /project/HAN`` 은 404 ``키가 'HAN'인 프로젝트를 찾을 수 없습니다``. 이걸 잡지
+    않으면 폴러는 영원히 조용히 아무 일도 하지 않고 진단만 PASS 로 남는다.
+    """
+    jira = FakeJira(page={"issues": [], "isLast": True}, missing_projects={"HAN"})
+    r = D.check_jira_search(make_cfg(jira={"project": "HAN"}), client=jira)
+    assert r.status == D.STATUS_FAIL
+    assert "HAN" in r.message and "없는 프로젝트" in r.message
+    # Jira 가 한 말을 그대로 보여 준다(우리 추측이 아니라).
+    assert "찾을 수 없습니다" in r.message
+    assert jira.project_calls == ["HAN"]
+
+
+def test_jira_search_checks_every_watched_project_not_just_the_primary():
+    """복수 감시 대상 중 **하나만** 틀려도 잡는다 — 표본 1건은 나머지 키를 증명하지 못한다."""
+    jira = FakeJira(page={"issues": [{"key": "ACME-1"}]}, missing_projects={"NOPE"})
+    cfg = make_cfg(jira={"project": "ACME", "projects": ["NOPE"]})
+    r = D.check_jira_search(cfg, client=jira)
+    assert r.status == D.STATUS_FAIL
+    assert "NOPE" in r.message and "찾을 수 없습니다" in r.message
+    # 대표(ACME)는 실재하므로 '없는 프로젝트' 목록에 들지 않는다.
+    assert "ACME" not in r.message
+    assert jira.project_calls == ["ACME", "NOPE"]
+
+
+def test_jira_search_passes_and_says_projects_were_verified():
+    """실재가 확인되면 그 사실을 보고에 남긴다(무엇을 근거로 초록불인지 보이게)."""
+    jira = FakeJira(page={"issues": [], "isLast": True})
+    r = D.check_jira_search(make_cfg(), client=jira)
+    assert r.status == D.STATUS_PASS
+    assert "표본 0건" in r.message and "프로젝트 실재 확인 1개" in r.message
+
+
+def test_jira_search_does_not_fail_on_an_undetermined_project_probe():
+    """404 가 아닌 실패(권한·5xx)는 '없다'의 근거가 아니다 — 정상 배포를 막지 않는다."""
+    jira = FakeJira(page={"issues": [], "isLast": True},
+                    project_error=JiraError("GET → HTTP 500", status_code=500))
+    r = D.check_jira_search(make_cfg(), client=jira)
+    assert r.status == D.STATUS_PASS
+    assert "확인 보류" not in r.message      # 확인된 것이 하나도 없으면 꼬리말도 없다
+
+
+def test_jira_search_holds_judgement_when_the_client_cannot_probe():
+    """``get_project`` 가 없는 클라이언트(옛 대역)면 판정 보류 — 없는 근거로 FAIL 금지."""
+    class _NoProbe:
+        def myself(self):
+            return {"displayName": "봇 계정"}
+
+        def search_jql_page(self, jql, fields=None, max_results=50, next_page_token=None):
+            return {"issues": [], "isLast": True}
+
+    r = D.check_jira_search(make_cfg(), client=_NoProbe())
+    assert r.status == D.STATUS_PASS
+
+
+# --- 404 해석 — Jira 가 한 말이 우리 추측을 이긴다 ----------------------------
+
+
+def test_404_with_a_jira_message_is_not_blamed_on_server_dc():
+    """★ 실측된 오진 차단 — 없는 프로젝트의 404 를 'Cloud 전용'으로 바꾸지 않는다.
+
+    리허설에서 discover 의 statuses 조회가 404 를 받자 "이 시스템은 Jira Cloud 전용입니다
+    (Server/DC 미지원)" 라고 보고했다. 같은 사이트에서 인증은 성공했고 base_url 도
+    ``.atlassian.net`` 이었으니 완전한 오진이었다 — 진짜 이유는 Jira 가 본문에 적어 준
+    "키가 'HAN'인 프로젝트를 찾을 수 없습니다." 였다.
+    """
+    err = JiraError("GET → HTTP 404", status_code=404,
+                    body={"errorMessages": ["키가 'HAN'인 프로젝트를 찾을 수 없습니다."]})
+    r = D._jira_failure("statuses", err, "https://acme.atlassian.net")
+    assert r.status == D.STATUS_FAIL
+    assert "키가 'HAN'인 프로젝트를 찾을 수 없습니다." in r.message
+    assert "Server/DC" not in r.message and "Server/DC" not in r.hint
+    assert "프로젝트 키" in r.hint
+
+
+def test_404_without_a_jira_message_still_points_at_cloud_only_support():
+    """반대로 Jira 가 아무 말도 안 했으면(경로 자체가 없음) 그때는 Server/DC 를 지목한다."""
+    r = D._jira_failure("jira_auth", JiraError("GET → HTTP 404", status_code=404),
+                        "https://acme.example.com")
+    assert r.status == D.STATUS_FAIL
+    assert "Cloud" in r.hint
+
+
+def test_404_on_a_non_cloud_base_url_adds_the_cloud_possibility():
+    """base_url 이 Cloud 로 보이지 않을 때만 Server/DC 를 **부가 가능성**으로 덧붙인다."""
+    err = JiraError("GET → HTTP 404", status_code=404,
+                    body={"errorMessages": ["Project not found"]})
+    cloudish = D._jira_failure("statuses", err, "https://acme.atlassian.net")
+    onprem = D._jira_failure("statuses", err, "https://jira.acme.example.com")
+    assert "Cloud" not in cloudish.hint
+    assert "Cloud" in onprem.hint and "Project not found" in onprem.message
+
+
+def test_405_is_still_read_as_an_absent_endpoint():
+    """405/410 은 엔드포인트 부재의 강한 신호다 — 본문이 있어도 해석을 유지한다."""
+    err = JiraError("POST → HTTP 405", status_code=405,
+                    body={"errorMessages": ["Method Not Allowed"]})
+    r = D._jira_failure("jira_search", err, "https://acme.atlassian.net")
+    assert "이 경로가 이 사이트에 없습니다" in r.message
+    assert "Method Not Allowed" in r.message
+    assert "Cloud" in r.hint
 
 
 # ---------------------------------------------------------------------------

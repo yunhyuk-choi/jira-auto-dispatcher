@@ -591,11 +591,18 @@ def test_auto_selected_custom_field_can_be_overridden(tmp_path):
 
 
 def test_unconfirmed_custom_field_falls_back_to_the_declared_default(tmp_path):
-    """확정하지 못한 항목은 추측하지 않고 기본값 유지를 **기본 선택**으로 제시한다."""
+    """확정하지 못한 항목은 추측하지 않고 기본값 유지를 **기본 선택**으로 제시한다.
+
+    ``actual_start`` 는 선언된 기본값 자체가 없다(조직 고유 필드 — 남의 id 를 밀어넣지
+    않는다). 그래서 '기본값 유지'가 곧 **미설정**이고, 그 사실을 명시 빈 값으로 남긴다
+    (완료 전이에 그 필드를 보내지 않는다).
+    """
     code, _responder, _out = run(tmp_path)
     assert code == W.EXIT_OK
     answers = json.loads((tmp_path / "setup-answers.json").read_text(encoding="utf-8"))
-    assert answers["jira"]["custom_fields"]["actual_start"] == "customfield_10187"
+    assert answers["jira"]["custom_fields"]["actual_start"] == ""
+    # 기본값이 있는 항목은 그대로 유지된다(대조군).
+    assert answers["jira"]["custom_fields"]["due_date"] == "duedate"
 
 
 # ---------------------------------------------------------------------------

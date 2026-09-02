@@ -421,6 +421,13 @@ def discover_custom_fields(client: Any, cfg: Any, base_url: str = "") -> Section
             lines.append(f"  ℹ️ 현재는 예시 기본값 {configured_id!r}"
                          f"({by_id[configured_id]['name']})가 쓰입니다 — 우연히 이 "
                          f"인스턴스에도 존재하지만, 의도한 필드인지 확인하세요.")
+        else:
+            # 기본값이 없는 논리 키(actual_start·actual_end)이거나 명시로 비운 경우.
+            # **오류가 아니다** — 그 필드를 보내지 않을 뿐이다. 다만 워크플로우가 그것을
+            # 요구하면 전이가 400 으로 막히므로, 채울 수 있다는 사실을 알려 준다.
+            lines.append("  ℹ️ 현재 미설정 — 이 필드를 전송하지 않습니다. 이 워크플로우가 "
+                         "그 필드를 요구한다면 위 후보에서 골라 채우세요"
+                         "(요구하지 않으면 그대로 두는 것이 맞습니다).")
 
     data = {"logical_keys": logical, "field_count": len(by_id),
             "invalid_configured": problems}

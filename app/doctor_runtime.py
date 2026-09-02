@@ -69,6 +69,14 @@ log = logging.getLogger("jad.doctor")
 #:
 #: ⚠️ 목록에 **관리 UI 로 고칠 수 있는 것은 없다** — 전부 config.yaml·시크릿 파일·호스트
 #: 환경이라 UI 밖에서 고친다. 그래서 "고칠 방법이 UI 뿐인데 UI 를 막는" 자충수가 아니다.
+#:
+#: ⚠️ ``jira_search`` 는 2026-09 부터 **프로젝트 실재**까지 본다(없는 프로젝트 키 →
+#: ``GET /rest/api/3/project/{key}`` 404 → FAIL). 판정이 그만큼 엄격해졌지만 **정상
+#: 배포가 새로 막히지는 않는다** — 새로 FAIL 이 되는 조건은 "감시 대상 프로젝트가 이
+#: 사이트에 없다(또는 감시 계정이 볼 수 없다)"뿐이고, 그건 이미 폴러가 아무 티켓도 받지
+#: 못하는 상태다. 즉 이 게이트는 *동작하던 배포*가 아니라 *조용히 죽어 있던 배포*를
+#: 막는다. 404 가 아닌 실패(권한 조회 오류·5xx·네트워크)는 **판정 보류**로 두어 오탐이
+#: 온보딩을 막지 않게 한다(:func:`app.setup_doctor._project_existence_failure`).
 BLOCKING_CHECKS: tuple = (
     "config", "secrets", "jira_auth", "jira_search", "docker",
 )

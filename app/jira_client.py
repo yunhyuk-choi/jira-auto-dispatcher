@@ -39,6 +39,24 @@
     이 모듈 상수는 **설정이 없을 때의 폴백**이다(하위호환 — 기존 배포는 아무것도 안 바꿔도
     오늘과 동일하게 동작). 설정 주입은 :meth:`JiraClient.from_config` 를 쓴다.
 
+    ⚠️ 단 **'실제 시작일/종료일'(actual_start·actual_end) 에는 기본값을 두지 않는다**
+    (빈 값 = 미설정). 이 둘은 Jira 표준 필드가 아니라 특정 조직이 만든 워크플로우 필드라,
+    어떤 id 를 적어도 "대체로 맞는 값"이 될 수 없다 — 실측(2026-09 실계정 리허설)에서
+    옛 기본값 ``customfield_10187``/``customfield_10186`` 은 그 인스턴스에 아예 없었다.
+    미설정이면 그 필드를 **아예 보내지 않으며**(:meth:`_fields_payload`), 워크플로우가
+    그 필드를 요구한다면 Jira 가 "이 필드는 필수입니다"라고 정확히 말해 준다. 남의 id 를
+    실어 "그런 필드는 이 화면에 없다 400"을 맞는 것보다 훨씬 고치기 쉬운 실패다.
+    (기존 배포는 ``jira.custom_fields`` 에 자기 id 를 적어야 한다 — INSTALL/CHANGELOG 참조.)
+
+⚠️ **404 를 함부로 해석하지 않는다**:
+    Jira 는 4xx 본문에 이유를 **직접** 적어 준다(``{"errorMessages": ["키가 'HAN'인
+    프로젝트를 찾을 수 없습니다."]}``). 상태코드만 보고 "Server/DC 아니냐"로 덮어쓰면 그
+    사실이 지워진다(실측된 오진). :func:`error_messages` 로 원문을 뽑아 **그대로** 보여
+    주고, Server/DC 추정은 *Jira 가 아무 말도 하지 않았을 때*(=경로 자체가 없어 JSON 에러
+    본문조차 없을 때)만 한다 — 판정은 :func:`app.setup_doctor._endpoint_absent_failure`.
+    예외는 JQL 검색 경로 하나뿐이다: 없는 프로젝트에도 200 을 주는 경로라 거기서의 404 는
+    자원 부재로 읽힐 수 없다(:meth:`JiraClient._cloud_only_error` 의 근거).
+
     자기 인스턴스의 값을 알아내는 법:
         - 커스텀필드 id: ``GET /rest/api/3/field`` (또는 ``GET /rest/api/2/issue/{key}`` 응답)
         - 전이 id/이름:  ``GET /rest/api/2/issue/{key}/transitions``
@@ -53,6 +71,7 @@ from __future__ import annotations
 import logging
 import unicodedata
 from typing import Any, Iterable, Optional
+from urllib.parse import quote
 
 import requests
 
@@ -63,10 +82,16 @@ log = logging.getLogger("jad.jira")
 # ---------------------------------------------------------------------------
 
 # 커스텀 필드 상수 — 이 코드가 처음 운영된 인스턴스의 값. 다른 인스턴스에서는 다르다.
-FIELD_START_DATE = "customfield_10015"   # 시작날짜(착수)
-FIELD_DUE_DATE = "duedate"               # 마감일(착수)
-FIELD_ACTUAL_START = "customfield_10187"  # 실제 시작일(완료)
-FIELD_ACTUAL_END = "customfield_10186"    # 실제 종료일(완료)
+FIELD_START_DATE = "customfield_10015"   # 시작날짜(착수) — Cloud 가 흔히 프로비저닝하는 id
+FIELD_DUE_DATE = "duedate"               # 마감일(착수) — 표준 시스템 필드(어디서나 같다)
+
+#: 실제 시작일/종료일(완료 전이) — **기본값 없음**(빈 값 = 미설정 → 전송하지 않음).
+#: 옛 기본값은 ``customfield_10187``/``customfield_10186`` 이었으나 그것은 최초 운영
+#: 인스턴스의 값일 뿐이고, 실측에서 다른 인스턴스에는 존재하지 않았다(그 인스턴스의 실제
+#: 값은 ``customfield_10352``/``customfield_10353``). 조직 고유 필드라 안전한 기본값이
+#: 존재할 수 없으므로 **묻지 않고 보내지 않는다** — 모듈 docstring 의 판단 근거 참조.
+FIELD_ACTUAL_START = ""                   # 실제 시작일(완료) — 설정 없으면 미전송
+FIELD_ACTUAL_END = ""                     # 실제 종료일(완료) — 설정 없으면 미전송
 DONE_TRANSITION_ID = "41"                 # 완료 전이(그 인스턴스의 값 — 레거시 폴백 전용)
 
 #: 논리 키 → 오늘의 기본 커스텀필드 id. 논리 키 목록의 정본은
@@ -101,6 +126,10 @@ LABELS_PATH = "/rest/api/3/label"
 
 #: 프로젝트의 **이슈 타입별** 상태 목록.
 PROJECT_STATUSES_PATH = "/rest/api/3/project/{key}/statuses"
+
+#: 프로젝트 **단건** 조회 — "이 키의 프로젝트가 이 사이트에 실재하는가"의 유일한 명확한 답.
+#: JQL 은 없는 프로젝트에도 200 + 빈 목록을 준다(실측) — 그 위장을 깨는 것이 이 경로다.
+PROJECT_PATH = "/rest/api/3/project/{key}"
 
 #: :meth:`JiraClient.list_labels` 의 한 페이지 크기·최대 페이지 수(무한 루프 방어).
 LABELS_PAGE_SIZE = 1000
@@ -138,6 +167,45 @@ class JiraError(Exception):
         super().__init__(message)
         self.status_code = status_code
         self.body = body
+
+
+#: :func:`error_messages` 가 돌려주는 문자열의 최대 길이(로그·진단 한 줄에 실린다).
+ERROR_MESSAGE_LIMIT = 300
+
+
+def error_messages(exc: Any, limit: int = ERROR_MESSAGE_LIMIT) -> str:
+    """Jira **자신이 말한 실패 이유**를 응답 본문에서 뽑는다(없으면 빈 문자열).
+
+    Jira 는 4xx 본문에 ``{"errorMessages": [...], "errors": {필드: 사유}}`` 로 정확한
+    이유를 적어 준다 — 예: ``키가 'HAN'인 프로젝트를 찾을 수 없습니다.`` 우리가 상태코드만
+    보고 해석을 덧씌우면(404 → "Server/DC 아닌가요?") 그 사실이 지워지고, 설치자는 멀쩡한
+    ``base_url`` 을 의심하며 시간을 버린다(실측된 오진).
+
+    ⚠️ **본문이 dict 일 때만** 읽는다. 문자열 본문(HTML 로그인 페이지·프록시 에러)은
+    Jira 가 말한 것이 아니라 *경로가 없다*는 신호이므로 여기서 빈 문자열을 돌려주고,
+    호출부가 그때만 Server/DC 를 의심하게 한다.
+
+    시크릿: 본문에 담기는 것은 Jira 의 사용자용 에러 문구다(자격 값이 아니다). 그래도
+    길이를 잘라 무한정 싣지 않는다.
+    """
+    body = getattr(exc, "body", None)
+    if not isinstance(body, dict):
+        return ""
+    parts: list = []
+    for item in body.get("errorMessages") or []:
+        text = str(item).strip()
+        if text:
+            parts.append(text)
+    errors = body.get("errors")
+    if isinstance(errors, dict):
+        for field_key, reason in errors.items():
+            text = str(reason).strip()
+            if text:
+                parts.append(f"{field_key}: {text}")
+    joined = " / ".join(parts)
+    if limit and len(joined) > limit:
+        joined = joined[:limit] + "…"
+    return joined
 
 
 class JiraClient:
@@ -238,6 +306,8 @@ class JiraClient:
         """논리 키 → 이 인스턴스의 필드 id 확정(3분기).
 
         1. 키가 **없다** → 모듈 상수 기본값을 쓴다(하위호환 — 기존 배포 무변경).
+           단 그 기본값 자체가 **빈 값**이면(``actual_start``·``actual_end``) 미설정과
+           같다 — 안전한 기본값이 존재하지 않는 필드라 넣지 않는다(모듈 docstring).
         2. 키가 **비어 있지 않은 값**으로 있다 → 그 값을 쓴다.
         3. 키가 **빈 값**(``""``/``None``)으로 있다 → "이 인스턴스엔 그 필드가 없다"는
            명시 의사표시로 보고 **결과에서 제외**한다 → 그 필드는 아예 전송되지 않는다.
@@ -254,8 +324,9 @@ class JiraClient:
                 if field_id:
                     resolved[logical] = field_id
                 # else: 명시 빈 값 → 비활성(키를 넣지 않는다)
-            else:
+            elif str(default_id or "").strip():
                 resolved[logical] = default_id
+            # else: 기본값이 없는 논리 키 → 비활성(키를 넣지 않는다)
         for logical, field_id in ov.items():
             if logical in DEFAULT_CUSTOM_FIELDS:
                 continue
@@ -372,6 +443,22 @@ class JiraClient:
         찾지 않고 **이름으로 후보를 추리는** 것이 이 조회의 목적이다.
         """
         return self._json_array(self._request("GET", FIELDS_PATH), FIELDS_PATH)
+
+    def get_project(self, project_key: str) -> dict:
+        """프로젝트 단건 GET (:data:`PROJECT_PATH`) — **실재 확인 전용 읽기**.
+
+        왜 필요한가: JQL 은 **없는 프로젝트에도 200 + 빈 목록**을 준다(실측:
+        ``{"jql": "project = HAN"}`` → ``{"issues": [], "isLast": true}``, 같은 사이트에서
+        ``GET /project/HAN`` 은 404 ``키가 'HAN'인 프로젝트를 찾을 수 없습니다``). 즉
+        프로젝트 키 오타는 검색만으로는 **절대** 드러나지 않고, 폴러는 영원히 조용히
+        아무것도 하지 않는다. 이 경로만이 그 질문에 명확히 답한다.
+
+        Raises:
+            JiraError: 404(그 키의 프로젝트가 없거나 이 자격으로 볼 수 없다 — Jira 가
+                본문에 이유를 적어 준다) · 401/403(자격) · 네트워크.
+        """
+        path = PROJECT_PATH.format(key=quote(str(project_key or "").strip(), safe=""))
+        return self._json_or_empty(self._request("GET", path))
 
     def project_statuses(self, project_key: str) -> list:
         """프로젝트의 **이슈 타입별** 상태 GET (:data:`PROJECT_STATUSES_PATH`).
@@ -612,12 +699,22 @@ class JiraClient:
         Server/DC 에는 ``/rest/api/3/search/jql`` 이 없어 404(또는 405/410)가 난다. 원문
         HTTP 에러만 올리면 설치자는 "권한 문제인가?"를 헤매게 되므로 원인을 지목해 준다.
         그 밖의 실패(401/403/5xx 등)는 원문 그대로 올린다.
+
+        ⚠️ **Jira 가 한 말을 지우지 않는다.** 본문에 ``errorMessages`` 가 있으면 그것을
+        **앞세워** 싣는다(우리 해석보다 원문이 정확하다). 이 자리에서 Cloud 전용 해석을
+        유지하는 것은 근거가 있어서다 — *이 경로에 한해* 404 는 곧 경로 부재다. 없는
+        프로젝트로 검색해도 Cloud 는 404 가 아니라 **200 + 빈 목록**을 준다(실측). 즉
+        여기서의 404 를 '자원 없음'으로 읽을 여지는 없다. 반대로 프로젝트·이슈처럼 자원을
+        직접 지목하는 경로의 404 는 :func:`app.setup_doctor._endpoint_absent_failure` 가
+        Jira 원문 우선으로 해석한다(그 자리에서 Cloud 전용 오진이 실측됐다).
         """
         if exc.status_code not in _ENDPOINT_ABSENT_STATUS:
             return exc
+        detail = error_messages(exc)
         return JiraError(
             f"JQL 검색 엔드포인트({SEARCH_JQL_PATH})가 이 사이트에 없습니다"
-            f"(HTTP {exc.status_code}). 이 경로는 **Jira Cloud 전용**이며 Jira "
+            f"(HTTP {exc.status_code}"
+            f"{', Jira 응답: ' + detail if detail else ''}). 이 경로는 **Jira Cloud 전용**이며 Jira "
             f"Server/Data Center 에는 존재하지 않습니다 — 이 시스템은 현재 Jira Cloud 만 "
             f"지원합니다. jira.base_url 이 Cloud 사이트"
             f"(보통 https://<사이트>.atlassian.net)를 가리키는지 확인하세요. "

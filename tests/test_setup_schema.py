@@ -129,6 +129,11 @@ def test_jira_custom_field_keys_match_todays_constants():
     assert defaults["due_date"] == J.FIELD_DUE_DATE
     assert defaults["actual_start"] == J.FIELD_ACTUAL_START
     assert defaults["actual_end"] == J.FIELD_ACTUAL_END
+    assert set(defaults) == set(J.DEFAULT_CUSTOM_FIELDS)
+    # ★ 조직 고유 워크플로우 필드에는 **기본값을 두지 않는다** — 어떤 id 도 남의
+    # 인스턴스에서 맞다고 보장할 수 없다(실측: 옛 기본값 customfield_10187/10186 은 그
+    # 사이트에 존재하지 않았고 실제 값은 10352/10353 이었다). 미설정 = 미전송.
+    assert defaults["actual_start"] == "" and defaults["actual_end"] == ""
 
 
 # --- 스키마 ↔ 파서 드리프트 방지 ---------------------------------------------

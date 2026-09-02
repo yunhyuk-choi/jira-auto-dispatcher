@@ -277,6 +277,59 @@ def _jira_client(cfg: Any, project_dir: str) -> tuple:
     return JiraClient.from_config(cfg, email, token), ""
 
 
+#: Jira Cloud 사이트로 볼 수 있는 호스트 접미사(Server/DC 추정의 **신호**로만 쓴다).
+CLOUD_HOST_SUFFIXES: tuple = (".atlassian.net", ".jira.com")
+
+
+def _looks_like_cloud(base_url: str) -> bool:
+    """이 base_url 이 Jira Cloud 사이트로 보이는가(모르면 True — 함부로 의심하지 않는다).
+
+    Cloud 사이트에도 커스텀 도메인을 붙일 수 있으므로 "아니다"를 단정하지 않는다. 이
+    판정은 오직 *Server/DC 를 의심해도 되는가* 의 보조 신호로만 쓴다.
+    """
+    from urllib.parse import urlparse
+
+    host = (urlparse(str(base_url or "")).hostname or "").lower()
+    if not host:
+        return True
+    return any(host.endswith(suffix) for suffix in CLOUD_HOST_SUFFIXES)
+
+
+def _endpoint_absent_failure(name: str, exc: Any, code: int, base_url: str) -> CheckResult:
+    """404/405/410 을 **Jira 가 한 말 우선**으로 해석한다.
+
+    ⚠️ 실측된 오진: 없는 프로젝트 키로 ``/project/{key}/statuses`` 를 부르면 404 가 나는데,
+    그것을 일괄 "이 시스템은 Jira Cloud 전용입니다(Server/DC 미지원)" 로 보고했다. 같은
+    사이트에서 인증은 성공했고 base_url 도 ``.atlassian.net`` 이었으니 **완전한 오진**
+    이었고, 진짜 이유는 Jira 가 응답 본문에 이미 적어 준 상태였다 —
+    ``키가 'HAN'인 프로젝트를 찾을 수 없습니다.``
+
+    그래서 규칙을 이렇게 좁힌다:
+        - Jira 가 ``errorMessages`` 로 이유를 말했다(404) → **그 원문을 그대로 보여준다.**
+          Server/DC 는 base_url 이 Cloud 로 보이지 않을 때만 *부가 가능성*으로 덧붙인다.
+        - Jira 가 아무 말도 하지 않았다(JSON 에러 본문 없음 = 경로 자체가 없다) 또는
+          405/410(엔드포인트 부재의 강한 신호) → 그때만 Server/DC 를 지목한다.
+    """
+    from app.jira_client import error_messages
+
+    detail = error_messages(exc)
+    cloud_hint = (f"이 시스템은 **Jira Cloud 전용**입니다(Server/DC 미지원). "
+                  f"jira.base_url 이 https://<사이트>.atlassian.net 인지 "
+                  f"확인하세요. 현재: {base_url!r}")
+    if detail and code == 404:
+        hint = ("Jira 가 지목한 자원이 이 사이트에 실제로 있는지 확인하세요 — "
+                "프로젝트 키·이슈 키·필드 id 는 인스턴스마다 다릅니다(인증과는 별개 "
+                "문제입니다).")
+        if not _looks_like_cloud(base_url):
+            hint += f" 그리고 {cloud_hint}"
+        return CheckResult(name, STATUS_FAIL,
+                           f"HTTP 404 — Jira 응답: {detail}", hint)
+    message = f"HTTP {code} — 이 경로가 이 사이트에 없습니다"
+    message += (f"(Jira 응답: {detail})" if detail
+                else "(Jira 가 이유를 말하지 않았습니다 — 경로 자체가 없다는 뜻입니다)")
+    return CheckResult(name, STATUS_FAIL, message, cloud_hint)
+
+
 def _jira_failure(name: str, exc: Any, base_url: str) -> CheckResult:
     """:class:`app.jira_client.JiraError` 를 상태코드별 안내로 바꾼다."""
     code = getattr(exc, "status_code", None)
@@ -290,11 +343,7 @@ def _jira_failure(name: str, exc: Any, base_url: str) -> CheckResult:
                            "그 계정에 이 사이트/프로젝트 권한이 있는지, 라이선스가 "
                            "붙어 있는지, CAPTCHA 로 잠기지 않았는지 확인하세요.")
     if code in (404, 405, 410):
-        return CheckResult(name, STATUS_FAIL,
-                           f"HTTP {code} — 이 경로가 이 사이트에 없습니다",
-                           f"이 시스템은 **Jira Cloud 전용**입니다(Server/DC 미지원). "
-                           f"jira.base_url 이 https://<사이트>.atlassian.net 인지 "
-                           f"확인하세요. 현재: {base_url!r}")
+        return _endpoint_absent_failure(name, exc, code, base_url)
     if code is None:
         return CheckResult(name, STATUS_FAIL, f"연결 실패: {exc}",
                            "DNS·프록시·아웃바운드 방화벽을 확인하세요(이 호스트에서 "
@@ -339,8 +388,15 @@ def check_jira_search(cfg: Any, *, project_dir: str = ".", client: Any = None) -
     ``jira_auth`` 는 FAIL 인데 ``jira_search`` 만 초록불인 모순된 진단이 나온다
     (실제로 리허설에서 그렇게 나왔다).
 
-    표본이 1건이라도 있으면 추가 호출을 하지 않는다 — 이슈가 돌아왔다는 것이 곧
+    표본이 1건이라도 있으면 자격 재확인 호출을 하지 않는다 — 이슈가 돌아왔다는 것이 곧
     자격이 받아들여졌다는 증거다.
+
+    ⚠️ **빈 결과의 두 번째 위장 — 없는 프로젝트**(실측 2026-09). 자격은 멀쩡한데 프로젝트
+    키가 틀린 경우, JQL 은 오류가 아니라 **200 + 빈 목록**을 준다(``{"jql": "project =
+    HAN"}`` → ``{"issues": [], "isLast": true}``. 같은 사이트에서 ``GET /project/HAN`` 은
+    404 ``키가 'HAN'인 프로젝트를 찾을 수 없습니다``). 그래서 표본 0건이면 자격만이 아니라
+    **프로젝트 실재까지** 확인한다(:func:`_project_existence_failure`). 확인하지 않으면
+    "설정을 잘못 적으면 시스템이 영원히 조용히 아무것도 안 하는데 진단은 초록불"이 된다.
     """
     from app.jira_client import JiraError
 
@@ -377,8 +433,66 @@ def check_jira_search(cfg: Any, *, project_dir: str = ".", client: Any = None) -
         auth_reason = _auth_confirmation_failure(client, base_url)
         if auth_reason is not None:
             return auth_reason
+    # 프로젝트 실재 확인. 표본이 0건이면 **언제나** 확인한다(빈 결과가 오타를 가린다).
+    # 표본이 있어도 감시 대상이 여럿이면 확인한다 — 그 1건이 어느 프로젝트에서 왔는지
+    # 모르므로, 나머지 키의 오타는 여전히 가려져 있다.
+    verified = ""
+    if count == 0 or len(projects) > 1:
+        missing_reason, verified = _project_existence_failure(client, projects, base_url)
+        if missing_reason is not None:
+            return missing_reason
     return CheckResult("jira_search", STATUS_PASS,
-                       f"JQL 검색 경로 정상(project={shown}, 표본 {count}건)")
+                       f"JQL 검색 경로 정상(project={shown}, 표본 {count}건){verified}")
+
+
+def _project_existence_failure(client: Any, projects: list, base_url: str) -> tuple:
+    """감시 대상 프로젝트가 **이 사이트에 실재하는가** → ``(FAIL 결과|None, 꼬리말)``.
+
+    ``GET /rest/api/3/project/{key}`` 만이 이 질문에 명확히 답한다 — JQL 은 없는
+    프로젝트에도 200 + 빈 목록을 주기 때문이다(:func:`check_jira_search` 참조).
+
+    판정 규율:
+        - 404 → **없다**(또는 이 자격으로 볼 수 없다. 둘 다 폴러는 아무것도 못 받는다).
+          Jira 가 본문에 적어 준 이유를 그대로 싣는다.
+        - 그 밖의 실패(401/403/5xx/네트워크) → **판정 보류**. 검색은 이미 성공했으므로
+          없는 근거로 FAIL 을 만들지 않는다(정상 배포를 막지 않는다).
+        - ``client`` 에 ``get_project`` 가 없다(옛 대역 등) → 판정 보류.
+    """
+    from app.jira_client import JiraError, error_messages
+
+    get_project = getattr(client, "get_project", None)
+    if get_project is None:
+        return None, ""
+    missing: list = []
+    undetermined: list = []
+    for key in projects:
+        try:
+            get_project(key)
+        except JiraError as exc:
+            if getattr(exc, "status_code", None) == 404:
+                detail = error_messages(exc)
+                missing.append(f"{key}({detail})" if detail else key)
+            else:
+                undetermined.append(key)
+        except Exception:       # noqa: BLE001 — 진단이 예외로 죽지 않게(판정 보류)
+            undetermined.append(key)
+    if missing:
+        return CheckResult(
+            "jira_search", STATUS_FAIL,
+            f"이 사이트에 **없는 프로젝트**를 감시하도록 설정돼 있습니다: "
+            f"{', '.join(missing)}. JQL 은 없는 프로젝트에도 오류가 아니라 **빈 결과**를 "
+            f"주므로, 이대로 두면 폴러는 영원히 조용히 아무 티켓도 찾지 못합니다.",
+            "jira.project · jira.projects 의 키를 Jira 에서 확인하세요(이슈 키의 "
+            "앞부분입니다). 키가 맞다면 감시 계정(jira.watcher_email)에 그 프로젝트 "
+            "'찾아보기' 권한이 있는지 보세요 — 권한이 없어도 똑같이 404 입니다.",
+        ), ""
+    checked = [p for p in projects if p not in undetermined]
+    if not checked:
+        return None, ""
+    tail = f" · 프로젝트 실재 확인 {len(checked)}개"
+    if undetermined:
+        tail += f"(확인 보류: {', '.join(undetermined)})"
+    return None, tail
 
 
 def _auth_confirmation_failure(client: Any, base_url: str):

@@ -217,9 +217,13 @@ bash scripts/observe-job.sh <TICKET> <user> http://localhost:8787   # /api/jobs 
 
 - `/api/jobs`에서 해당 티켓 잡의 상태 전이: `queued` → `running` → `done`.
 - Jira 티켓: `해야 할 일` → `진행 중` → (성공 시) `완료`.
-  - ⚠️ **착수(진행 중) 전이 시 필수필드**: `duedate`, `customfield_10015`(시작 날짜).
-    **완료 전이 전 필수필드**: `customfield_10186`, `customfield_10187`. 이 채움/전이는
-    worker 안 오케스트레이터가 ISSUE-TRACKER-ADAPTER 규율로 수행한다(누락 시 전이 실패 → 2.4).
+  - ⚠️ **필수필드는 인스턴스마다 다르다** — 아래는 이 코드가 처음 운영된 인스턴스의 값이다.
+    착수(진행 중) 전이 시 `duedate` + 시작 날짜(`jira.custom_fields.start_date`, 그 인스턴스는
+    `customfield_10015`), 완료 전이 시 실제 시작/종료일(`actual_start`·`actual_end`, 그
+    인스턴스는 `customfield_10187`/`customfield_10186`). `actual_*` 는 **코드 기본값이 없으므로**
+    자기 인스턴스 값을 `jira.custom_fields` 에 적어야 전이에 실린다(안 적으면 보내지 않는다 —
+    워크플로우가 요구하면 Jira 가 "필수입니다"로 막는다). 실측: `discover --only custom_fields`.
+    이 채움/전이는 worker 안 오케스트레이터가 ISSUE-TRACKER-ADAPTER 규율로 수행한다(→ 2.4).
 - forge(GitLab/GitHub): `auto/<TICKET>` 브랜치 존재. 커밋 author = 사용자 이름/이메일
   (README "per-user attribution").
 - autonomy=A면 MR 초안 + `/api/jobs`의 `mr_url` 채워짐. **자동 머지는 없다**(사람 리뷰 게이트).

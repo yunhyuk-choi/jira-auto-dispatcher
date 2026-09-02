@@ -870,7 +870,10 @@ def _pick_custom_fields(s: _Session, result) -> None:
             continue
         options = [(f"{c.get('name')} — {c.get('id')} [{c.get('tier')}]", str(c.get("id", "")))
                    for c in candidates if c.get("id")]
-        options.append((f"(기본값 유지: {fallback})", fallback))
+        # 기본값이 없는 논리 키(actual_start·actual_end)는 "미설정"이 곧 안전한 선택이다 —
+        # 그 필드를 아예 보내지 않는다(남의 인스턴스 id 를 밀어넣지 않는다).
+        options.append(((f"(기본값 유지: {fallback})" if fallback
+                         else "(미설정 — 이 필드를 전송하지 않습니다)"), fallback))
         picked = s.io.ask_choice(
             f"  {key}({desc}) 를 고르세요", options,
             default_index=len(options) - 1, other_label="직접 id 입력",
@@ -878,6 +881,9 @@ def _pick_custom_fields(s: _Session, result) -> None:
                       f"엉뚱한 필드에 날짜가 박힙니다.")
         if picked:
             chosen[key] = picked
+        elif not fallback:
+            # 고르지 않았다는 사실을 **명시 빈 값**으로 남긴다(config.yaml 에 의도가 보인다).
+            chosen.setdefault(key, "")
     if chosen:
         s.set("jira.custom_fields", chosen)
 

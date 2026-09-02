@@ -100,17 +100,46 @@ def test_transition_posts_correct_path_and_body():
 
 
 def test_transition_done_prefills_actual_dates():
+    """'실제 시작/종료일'은 **그 인스턴스의 id 를 설정한 경우에만** 전이에 실린다."""
     captured = {}
 
     def responder(method, url, kwargs):
         captured["json"] = kwargs.get("json")
         return FakeResponse(204)
 
-    c = make_client(responder)
+    c = make_client_from_config(
+        responder,
+        custom_fields={"actual_start": "customfield_10352",
+                       "actual_end": "customfield_10353"},
+        done_transition_id="41",
+    )
     c.transition_done("PROJ-9", "2026-08-01", "2026-08-10")
     fields = captured["json"]["fields"]
-    assert fields[FIELD_ACTUAL_START] == "2026-08-01"
-    assert fields[FIELD_ACTUAL_END] == "2026-08-10"
+    assert fields["customfield_10352"] == "2026-08-01"
+    assert fields["customfield_10353"] == "2026-08-10"
+    assert captured["json"]["transition"]["id"] == "41"
+
+
+def test_actual_date_fields_have_no_default_and_are_not_sent():
+    """★ 남의 인스턴스 customfield id 를 기본값으로 밀어넣지 않는다.
+
+    ``actual_start``·``actual_end`` 는 조직 고유 워크플로우 필드라 안전한 기본값이 없다
+    (실측: 옛 기본값 customfield_10187/10186 은 다른 인스턴스에 아예 없었다 — 그쪽 실제
+    값은 10352/10353). 설정하지 않으면 **아예 보내지 않는다** — 없는 필드를 보내 400 을
+    맞는 대신, 워크플로우가 정말 그 필드를 요구하면 Jira 가 '필수입니다'라고 정확히 말하게
+    둔다(그 편이 고칠 곳을 지목해 준다).
+    """
+    captured = {}
+
+    def responder(method, url, kwargs):
+        captured["json"] = kwargs.get("json")
+        return FakeResponse(204)
+
+    assert FIELD_ACTUAL_START == "" and FIELD_ACTUAL_END == ""
+    c = make_client(responder)               # 레거시(설정 미주입) 경로
+    assert c.field_id("actual_start") is None and c.field_id("actual_end") is None
+    c.transition_done("PROJ-9", "2026-08-01", "2026-08-10")
+    assert "fields" not in captured["json"]  # 필드 없이 전이만 보낸다
     assert captured["json"]["transition"]["id"] == "41"
 
 
@@ -204,7 +233,8 @@ def test_custom_fields_from_config_override_module_constants():
     assert fields == {"customfield_99001": "2026-08-01", FIELD_DUE_DATE: "2026-08-10"}
     # 일부만 준 매핑에서 나머지 논리 키는 모듈 상수 폴백.
     assert c.field_id("due_date") == FIELD_DUE_DATE
-    assert c.field_id("actual_start") == FIELD_ACTUAL_START
+    # actual_start 는 모듈 상수 자체가 '미설정'이라 폴백해도 비활성이다.
+    assert c.field_id("actual_start") is None
     assert c.field_id("actual_end") == "customfield_99002"
 
 
@@ -264,9 +294,10 @@ def test_done_transition_matches_by_name_when_id_unknown():
         posted["json"] = kwargs.get("json")
         return FakeResponse(204)
 
-    c = make_client_from_config(responder, done_transition_names=["완료", "Done"])
+    c = make_client_from_config(responder, done_transition_names=["완료", "Done"],
+                                custom_fields={"actual_start": "customfield_10352"})
     assert c.transition_done("PROJ-3", "2026-08-01", "2026-08-10") == "31"
-    assert posted["json"]["fields"][FIELD_ACTUAL_START] == "2026-08-01"
+    assert posted["json"]["fields"]["customfield_10352"] == "2026-08-01"
 
 
 def test_done_transition_name_match_is_normalized():
@@ -384,7 +415,8 @@ def test_from_config_with_empty_jira_section_keeps_legacy_defaults():
                                                done_transition_id="",
                                                done_transition_names=[]))
     c = JiraClient.from_config(cfg, "you@example.com", "tok")
-    assert c.custom_fields == dict(DEFAULT_CUSTOM_FIELDS)
+    # 기본값이 **있는** 논리 키만 활성화된다(빈 기본값 = 미설정 = 전송 안 함).
+    assert c.custom_fields == {k: v for k, v in DEFAULT_CUSTOM_FIELDS.items() if v}
     assert c.done_transition_id == ""
     # names 가 비어 있으면 미주입으로 취급 → 레거시 폴백 경로가 살아 있다.
     assert c.done_transition_names == list(DEFAULT_DONE_TRANSITION_NAMES)
@@ -404,6 +436,50 @@ def test_search_jql_404_surfaces_cloud_only_dependency():
     msg = str(exc.value)
     assert "Jira Cloud" in msg and "Server/Data Center" in msg
     assert exc.value.status_code == 404
+    # Jira 가 한 말도 함께 싣는다(우리 해석이 원문을 지우지 않는다).
+    assert "null for uri" in msg
+
+
+def test_error_messages_extracts_what_jira_actually_said():
+    """★ 404 해석의 근거 — Jira 는 본문에 이유를 **직접** 적어 준다."""
+    from app.jira_client import error_messages
+
+    exc = JiraError("GET → HTTP 404", status_code=404,
+                    body={"errorMessages": ["키가 'HAN'인 프로젝트를 찾을 수 없습니다."],
+                          "errors": {}})
+    assert error_messages(exc) == "키가 'HAN'인 프로젝트를 찾을 수 없습니다."
+    # errors 맵도 함께 싣는다(필드 단위 사유).
+    exc2 = JiraError("POST → HTTP 400", status_code=400,
+                     body={"errorMessages": [], "errors": {"customfield_10187": "필드 없음"}})
+    assert error_messages(exc2) == "customfield_10187: 필드 없음"
+    # ⚠️ 문자열 본문(HTML 로그인 페이지 등)은 'Jira 가 한 말'이 아니다 — 빈 문자열.
+    assert error_messages(JiraError("x", status_code=404, body="<html>Log in</html>")) == ""
+    assert error_messages(JiraError("연결 끊김")) == ""
+
+
+def test_get_project_probes_project_existence():
+    """★ JQL 이 못 하는 질문 — '이 프로젝트 키가 이 사이트에 있는가'."""
+    seen = []
+
+    def responder(method, url, kwargs):
+        seen.append((method, url))
+        return FakeResponse(200, {"key": "PROJ", "name": "프로젝트"})
+
+    assert make_client(responder).get_project("PROJ")["key"] == "PROJ"
+    assert seen == [("GET", "https://your-org.atlassian.net/rest/api/3/project/PROJ")]
+
+
+def test_get_project_404_keeps_the_jira_message():
+    """없는 프로젝트의 404 는 **Jira 원문 그대로** 올라온다(Cloud 전용으로 덮지 않는다)."""
+    def responder(method, url, kwargs):
+        return FakeResponse(404, {"errorMessages": ["키가 'HAN'인 프로젝트를 찾을 수 없습니다."]})
+
+    with pytest.raises(JiraError) as exc:
+        make_client(responder).get_project("HAN")
+    assert exc.value.status_code == 404
+    assert "Server/Data Center" not in str(exc.value)
+    from app.jira_client import error_messages
+    assert "찾을 수 없습니다" in error_messages(exc.value)
 
 
 def test_search_jql_html_response_raises_instead_of_empty_result():
