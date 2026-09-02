@@ -741,3 +741,125 @@ def test_auth_probe_is_skipped_for_clients_without_myself(isolated_state):
     poller, noted = _wire_auth(jira)
     assert poller.poll_once() == 0
     assert noted == []
+
+
+# --- 축0(2): 감시 프로젝트 실재 확인(빈 결과의 두 번째 위장) --------------------
+#
+# ★ 실측: 없는 프로젝트 키로도 JQL 은 200 + 빈 목록을 준다. 같은 사이트에서
+#   GET /rest/api/3/project/HAN 만 404 다. 설치 시점의 doctor 는 이걸 잡지만, 프로젝트는
+#   **운영 중에** 삭제·개명되고 감시 계정의 '찾아보기' 권한도 회수된다 — 그때부터 폴러는
+#   다시 조용해지고 아무도 모른다.
+
+
+class ProjectProbeJira(AuthProbeJira):
+    """``get_project`` 까지 갖춘 대역 — 지정한 키만 404 를 낸다(호출 기록)."""
+
+    def __init__(self, issues=None, auth_error=None, missing=(), boom=()):
+        super().__init__(issues=issues, auth_error=auth_error)
+        self._missing = set(missing)
+        self._boom = set(boom)
+        self.project_calls: list = []
+
+    def get_project(self, key):
+        from app.jira_client import JiraError
+
+        self.project_calls.append(key)
+        if key in self._missing:
+            raise JiraError("GET → HTTP 404", status_code=404)
+        if key in self._boom:
+            raise JiraError("GET → HTTP 503", status_code=503)
+        return {"key": key}
+
+
+def _wire_projects(jira, *, clock=None):
+    poller, noted = _wire_auth(jira, clock=clock)
+    seen: list = []
+    poller.set_project_reporter(
+        lambda missing, checked, undetermined: seen.append((missing, checked, undetermined)))
+    return poller, noted, seen
+
+
+def test_empty_poll_detects_a_project_that_disappeared(isolated_state):
+    """★ 자격은 멀쩡한데 프로젝트가 없다 — 그 둘을 갈라서 보고한다."""
+    jira = ProjectProbeJira(missing={"PROJ"})
+    poller, noted, seen = _wire_projects(jira)
+    assert poller.poll_once() == 0
+    assert noted == [(True, "/myself 확인")]           # 자격은 살아 있다
+    assert jira.project_calls == ["PROJ"]
+    assert seen == [(["PROJ"], [], [])]
+
+
+def test_project_probe_reports_pass_when_projects_are_alive(isolated_state):
+    jira = ProjectProbeJira()
+    poller, _, seen = _wire_projects(jira)
+    poller.poll_once()
+    assert seen == [([], ["PROJ"], [])]
+
+
+def test_project_probe_runs_even_when_tickets_came_back(isolated_state):
+    """감시 프로젝트가 여럿이면 한쪽이 티켓을 주는 동안 다른 쪽이 사라져도 폴이 비지 않는다.
+
+    빈 폴로 한정하면 그 경우를 영원히 못 잡는다 — 그래서 폴이 비었는지와 무관하게
+    주기마다 확인한다(주기 게이트가 이미 비용을 잡는다). 자격은 티켓 수신으로 증명되므로
+    ``/myself`` 는 부르지 않는다.
+    """
+    jira = ProjectProbeJira(issues=[_issue("PROJ-1", "a1")], missing={"PROJ"})
+    poller, noted, seen = _wire_projects(jira)
+    assert poller.poll_once() == 1
+    assert jira.myself_calls == 0
+    assert noted == [(True, "검색 결과로 확인(티켓 수신)")]
+    assert seen == [(["PROJ"], [], [])]
+
+
+def test_project_probe_is_skipped_while_credentials_are_rejected(isolated_state):
+    """자격이 거부되는 동안에는 프로젝트를 묻지 않는다 — 401/403 은 '없다'와 구별되지 않는다."""
+    from app.jira_client import JiraError
+
+    jira = ProjectProbeJira(auth_error=JiraError("GET → HTTP 401", status_code=401))
+    poller, noted, seen = _wire_projects(jira)
+    poller.poll_once()
+    assert noted == [(False, "HTTP 401")]
+    assert jira.project_calls == [] and seen == []
+
+
+def test_project_probe_respects_the_recheck_interval(isolated_state):
+    """매 폴마다 때리지 않는다 — 자격 확인과 **같은 주기 노브**를 쓴다."""
+    clock = _SettableClock(_FIXED_NOW)
+    jira = ProjectProbeJira()
+    poller, _, _ = _wire_projects(jira, clock=clock)
+    poller.config.jira.auth_recheck_sec = 1800
+    poller.poll_once()
+    assert jira.project_calls == ["PROJ"]
+    clock.now = _FIXED_NOW + timedelta(seconds=120)
+    poller.poll_once()                      # 주기 안 — 건너뛴다
+    assert jira.project_calls == ["PROJ"]
+    clock.now = _FIXED_NOW + timedelta(seconds=3600)
+    poller.poll_once()                      # 주기 경과 — 다시 확인
+    assert jira.project_calls == ["PROJ", "PROJ"]
+
+
+def test_project_probe_can_be_switched_off_with_the_same_knob(isolated_state):
+    jira = ProjectProbeJira()
+    poller, _, seen = _wire_projects(jira)
+    poller.config.jira.auth_recheck_sec = 0
+    poller.poll_once()
+    assert jira.project_calls == [] and seen == []
+
+
+def test_a_non_404_failure_is_undetermined_not_a_missing_project(isolated_state):
+    """5xx·네트워크는 **판정 보류** — 없는 근거로 실패를 만들지 않는다(부팅 진단과 같은 규율).
+
+    전부 보류면 아무 것도 보고하지 않는다(직전 관측을 흔들지 않는다).
+    """
+    jira = ProjectProbeJira(boom={"PROJ"})
+    poller, _, seen = _wire_projects(jira)
+    poller.poll_once()
+    assert jira.project_calls == ["PROJ"] and seen == []
+
+
+def test_project_probe_is_skipped_for_clients_without_get_project(isolated_state):
+    """``get_project`` 가 없는 클라이언트면 조용히 건너뛴다(옛 대역 하위호환)."""
+    jira = AuthProbeJira()
+    poller, _, seen = _wire_projects(jira)
+    poller.poll_once()
+    assert seen == []

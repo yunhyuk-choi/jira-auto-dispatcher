@@ -95,6 +95,29 @@ def test_onboard_duplicate_409(tmp_path, isolated_state):
     assert res.status_code == 409
 
 
+def test_onboard_case_only_duplicate_409_before_writing_any_secret(tmp_path, isolated_state):
+    """``Alice`` 뒤에 오는 ``alice`` 는 **아무 것도 쓰기 전에** 막힌다.
+
+    두 이름은 레지스트리에서는 다른 사람이지만 시크릿은 같은 ``secrets/<user>/`` 에
+    쓰인다(Windows·macOS 기본 파일시스템은 대소문자를 구별하지 않는다) — 통과시키면
+    나중 등록이 앞사람의 Jira·forge·Claude 토큰을 덮어쓰고, 그 사람의 워커는 **남의
+    자격증명**으로 돈다.
+    """
+    client, reg, base = _wire(tmp_path)
+    first = dict(_FULL, username="Alice")
+    assert client.post("/onboard", json=first).status_code == 201
+
+    second = dict(_FULL, username="alice", jira_token="OTHER-JIRA-TOK")
+    res = client.post("/onboard", json=second)
+    assert res.status_code == 409
+    body = res.get_json()
+    assert body["conflicts_with"] == "Alice"
+
+    # 등록도 시크릿도 남지 않았다 — 앞사람의 토큰이 그대로 살아 있다.
+    assert reg.get("alice") is None
+    assert open(os.path.join(base, "Alice", "jira-token"), encoding="utf-8").read()         == "JIRA-TOK-VAL"
+
+
 def test_onboard_requires_forge_token(tmp_path, isolated_state):
     """개인 forge 토큰 없이 등록되면 워커는 커밋만 하고 **MR/PR 을 못 만든다**.
 

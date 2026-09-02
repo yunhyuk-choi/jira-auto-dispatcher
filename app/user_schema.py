@@ -141,9 +141,10 @@ _IDENTITY = S.SchemaSection(
             type=S.FieldType.STRING,
             required=True,
             description=(
-                "내부 식별자(공백 없이). worker 컨테이너 이름(``jad-worker-<username>``)과 "
+                "내부 식별자(공백 없이). worker 컨테이너 이름(``<instance>-worker-<username>``)과 "
                 "시크릿 폴더명(``secrets/<username>/``)이 여기서 나온다. 등록 후에는 바꿀 "
-                "수 없다."
+                "수 없다. ⚠️ 이미 등록된 이름과 **대소문자만 다른** 이름은 쓸 수 없다 — 대소문자를 "
+                "구별하지 않는 파일시스템에서 두 사람이 같은 시크릿 폴더를 쓰게 된다."
             ),
             example="yhchoi",
             # ⚠️ 이 값은 **식별자로만 쓰이지 않는다** — 그대로 디렉토리 이름과 docker

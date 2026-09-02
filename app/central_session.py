@@ -53,7 +53,7 @@ import time
 import uuid
 from typing import Any, Callable, List, Optional
 
-from app import agent_runner
+from app import agent_runner, naming
 from app.agent_runner import (
     _close_stdin,
     _encode_user_message,
@@ -72,7 +72,12 @@ log = logging.getLogger("jad.central_session")
 # 리더 스레드 조인/드레인 유예(초).
 _DRAIN_JOIN_SEC = 5
 
-# 워커 컨테이너 이름 접두(사용자별). spawner 규약과 동일(jad-worker-<user>).
+#: 워커 컨테이너 이름 접두(사용자별) — **기본 인스턴스의 값**(``jad-worker-``).
+#:
+#: ⚠️ 접두어의 단일 원천은 :func:`app.naming.worker_container_prefix` 이며 인스턴스 이름
+#: (``deploy.instance``)에서 파생된다 — spawner 가 그 이름으로 컨테이너를 만들기 때문에
+#: 여기서 다르게 지으면 ``docker exec`` 가 **없는 컨테이너**를 때린다. 이 상수는 config 를
+#: 손에 쥐지 못한 호출부(대역·옛 시그니처)의 폴백으로만 남는다.
 WORKER_CONTAINER_PREFIX = "jad-worker-"
 
 # 검증 가능한 신뢰 하네스(trusted plumbing)의 **안정 절대경로**. 프레임(§3.1·§3.2)이
@@ -177,7 +182,7 @@ def build_worker_exec_command(
     config: Any = None,
     session_id: Optional[str] = None,
     instruction: Optional[str] = None,
-    container_prefix: str = WORKER_CONTAINER_PREFIX,
+    container_prefix: Optional[str] = None,
 ) -> List[str]:
     """워커 세션을 구동/이어주입할 ``docker exec`` 커맨드 구성(순수, 결정적).
 
@@ -203,7 +208,12 @@ def build_worker_exec_command(
     run = getattr(config, "run", None)
     claude_bin = getattr(run, "claude_bin", "claude") if run else "claude"
     sid = resolve_worker_session_id(session_id, user, ticket)
-    container = f"{container_prefix}{user}"
+    # 컨테이너 이름 접두어는 **spawner 가 실제로 지은 이름**과 같아야 한다 —
+    # 인스턴스 이름(deploy.instance)에서 파생하는 단일 원천(app/naming.py)을 쓴다.
+    # 명시 인자는 존중한다(호출부가 이미 이름을 알고 있는 경우·테스트).
+    prefix = (container_prefix if container_prefix is not None
+              else naming.worker_container_prefix(config))
+    container = f"{prefix}{user}"
     session_flag = ["--session-id", sid] if first else ["--resume", sid]
     prompt = instruction if instruction is not None else ticket
     return [

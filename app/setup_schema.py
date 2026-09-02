@@ -639,6 +639,25 @@ _DEPLOY = SchemaSection(
             example="tcp://socket-proxy:2375",
         ),
         SchemaField(
+            key="deploy.instance",
+            type=FieldType.STRING,
+            default="jad",
+            description=(
+                "이 배포가 만드는 docker 리소스 이름의 **접두어**(기본 ``jad``). 한 호스트에 "
+                "여러 인스턴스(평가·스테이징·프로덕션)를 띄울 때만 바꾼다 — 네트워크"
+                "(``<instance>-net``)·공유 볼륨(``<instance>-workspace``)·워커 컨테이너"
+                "(``<instance>-worker-<user>``)가 여기서 파생된다. ⚠️ 정본은 ``.env`` 의 "
+                "``JAD_INSTANCE`` 다(compose 가 그 값으로 실제 리소스를 만들고 central 에도 "
+                "넘긴다) — 여기 적은 값과 다르면 env 가 이긴다."
+            ),
+            example="jad",
+            pattern=r"[A-Za-z0-9][A-Za-z0-9._-]{0,30}[A-Za-z0-9]",
+            pattern_hint=(
+                "영문자·숫자로 시작하고 끝나며 가운데에 ``.`` ``_`` ``-`` 만 쓸 수 있습니다"
+                "(docker 이름 규칙). 예: ``jad``, ``jad-stg``."
+            ),
+        ),
+        SchemaField(
             key="deploy.secrets_base_dir",
             type=FieldType.STRING,
             required=True,

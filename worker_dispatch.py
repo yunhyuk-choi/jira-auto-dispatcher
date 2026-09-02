@@ -50,8 +50,9 @@ import sys
 import unicodedata
 from typing import Any, Callable, Optional
 
+from app import naming
 from app.central_session import (
-    WORKER_CONTAINER_PREFIX,
+    WORKER_CONTAINER_PREFIX,  # noqa: F401 — 재-export(옛 임포트 하위호환)
     build_worker_exec_command,
     resolve_worker_session_id,
 )
@@ -468,7 +469,7 @@ def run_dispatch(
         return {
             "user": user, "ticket": ticket, "session_id": sid,
             "mode": "resume" if resume else "session-id",
-            "container": f"{WORKER_CONTAINER_PREFIX}{user}",
+            "container": naming.worker_container_name(config, user),
             "status": "timeout", "returncode": None,
             "report_extracted": False,
             "report": f"[timeout] worker_dispatch 가 {timeout_sec}s 안에 끝나지 않음",
@@ -495,7 +496,7 @@ def run_dispatch(
         "ticket": ticket,
         "session_id": sid,
         "mode": "resume" if resume else "session-id",
-        "container": f"{WORKER_CONTAINER_PREFIX}{user}",
+        "container": naming.worker_container_name(config, user),
         "status": status,
         "returncode": rc,
         "report_extracted": report_extracted,

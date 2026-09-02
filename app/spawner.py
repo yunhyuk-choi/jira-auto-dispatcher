@@ -12,7 +12,9 @@
 컨테이너 스펙(config.spawn + 사용자 레코드에서 조립):
     image           spawn.image (예: jira-auto-dispatcher:latest, 단일 이미지)
     network         spawn.network (예: jad-net — central과 같은 사설망)
-    name            jad-worker-<username> (레지스트리 container.name)
+    name            <instance>-worker-<username> (레지스트리 container.name).
+                    접두어는 deploy.instance(기본 jad)에서 온다 — 한 호스트에 여러 인스턴스를
+                    띄우기 위한 이름 공간. 조립 단일 원천은 :mod:`app.naming`.
     user            비-root (기본 1000:1000 — 특권 축소)
     env:
         ROLE=worker
@@ -24,8 +26,8 @@
         JIRA_EMAIL                                # Jira actor 이메일
         JAD_INJECT_CONFIG / JAD_INJECT_SECRETS    # 스폰 시 주입 페이로드(app.inject)
     volumes (**named 볼륨 2개뿐 — bind 마운트 없음**):
-        jad-<username>:/home/app/.claude (rw)          # 사용자 ~/.claude 영속(인증/세션)
-        jad-workspace:<run.workspace_dir> (rw)         # 공유 워크스페이스(단일 클론)
+        <instance>-<username>:/home/app/.claude (rw)   # 사용자 ~/.claude 영속(인증/세션)
+        <instance>-workspace:<run.workspace_dir> (rw)  # 공유 워크스페이스(단일 클론)
     tmpfs:
         /run/secrets                                   # 주입 시크릿이 사는 곳(RAM 전용)
     restart_policy  unless-stopped (상시 폴링)
@@ -72,7 +74,7 @@ import os
 import posixpath
 from typing import Any, Callable, Optional
 
-from app import inject
+from app import inject, naming
 from app.config import DEFAULT_CONFIG_PATH, read_secret
 from app.registry import USERNAME_HINT, is_valid_username
 
@@ -100,6 +102,8 @@ SETTINGS_SECRET_FILENAME = "claude-settings.json"
 # 공유 워크스페이스 named 볼륨의 컨테이너 내부 bind 경로 폴백(run.workspace_dir 미설정 시).
 # central compose(jad-workspace → /app/workspace)와 정합.
 DEFAULT_WORKSPACE_DIR = "/app/workspace"
+#: 기본 인스턴스의 공유 워크스페이스 볼륨 이름(하위호환 상수 — 실제 폴백은
+#: :func:`app.naming.default_workspace_volume` 이 인스턴스 이름에서 파생한다).
 DEFAULT_WORKSPACE_VOLUME = "jad-workspace"
 
 # 사전 인가 기본 레벨.
@@ -257,13 +261,22 @@ class Spawner:
                 f"이름 규칙에 맞지 않습니다. 규칙: {USERNAME_HINT}")
         return username
 
-    @staticmethod
-    def container_name(username: str) -> str:
-        return f"jad-worker-{Spawner._checked_username(username)}"
+    def container_name(self, username: str) -> str:
+        """워커 컨테이너 이름 — ``<instance>-worker-<username>`` (기본 ``jad-worker-…``).
 
-    @staticmethod
-    def volume_name(username: str) -> str:
-        return f"jad-{Spawner._checked_username(username)}"
+        접두어는 :mod:`app.naming` 단일 원천에서 온다 — 같은 문자열을 온보딩(레지스트리
+        레코드)과 프랙탈 PUSH(``docker exec``)도 조립하므로 여기서 직접 짓지 않는다.
+
+        ⚠️ 예전엔 ``@staticmethod`` 였다. 인스턴스 접두어가 생기면서 **config 를 봐야**
+        이름을 지을 수 있게 됐다(한 호스트 다중 인스턴스 — :mod:`app.naming`).
+        """
+        return naming.worker_container_name(
+            self.config, self._checked_username(username))
+
+    def volume_name(self, username: str) -> str:
+        """per-user ``~/.claude`` 볼륨 이름 — ``<instance>-<username>`` (기본 ``jad-…``)."""
+        return naming.user_volume_name(
+            self.config, self._checked_username(username))
 
     # -- 스폰 시 주입 페이로드 조립(호스트 경로 없음) --
 
@@ -527,7 +540,7 @@ class Spawner:
         username = user.username
 
         workspace_volume = getattr(getattr(cfg, "spawn", None), "workspace_volume", "") \
-            or DEFAULT_WORKSPACE_VOLUME
+            or naming.default_workspace_volume(naming.instance_name(cfg))
         workspace_dir = getattr(getattr(cfg, "run", None), "workspace_dir", "") \
             or DEFAULT_WORKSPACE_DIR
 
