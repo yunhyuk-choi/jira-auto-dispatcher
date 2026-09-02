@@ -570,3 +570,102 @@ def test_onboard_rejects_malformed_project_keys(tmp_path, isolated_state):
     res = client.post("/onboard", json={**_FULL, "scope": 'TEAM") OR ("x'})
     assert res.status_code == 400
     assert reg.get("testuser") is None
+
+
+# --- username 이름 규칙(경로 탈출·컨테이너 이름 오염 차단) ---------------------
+#
+# 이 값은 식별자로만 쓰이지 않는다 — 그대로 ``secrets/<username>/`` 디렉토리 이름이 되고
+# ``jad-worker-<username>`` 컨테이너 이름이 된다. 관리 UI 는 무인증이므로(SECURITY.md)
+# 모양 검증이 없으면 "임의 위치에 0600 파일 쓰기"가 된다.
+
+_ESCAPES = [
+    "../evil",              # 상위 한 칸
+    "../../etc/x",          # 여러 칸
+    "a/b",                  # 하위 경로(디렉토리를 이름으로 쓴다)
+    "..",                   # 상위 그 자체
+    "/abs",                 # 절대경로
+    "C:/win",               # 드라이브 표기
+    "a" + chr(92) + "b",   # 백슬래시 구분자
+    "has space",            # 공백(셸·docker 인자 오조작)
+    ".hidden",              # 점으로 시작
+    "-flag",                # 대시로 시작(CLI 옵션 오인)
+    "a.",                   # 점으로 끝(Windows 가 잘라내 이름이 겹친다)
+    "CON",                  # Windows 예약 장치명
+    "nul",                  # 예약 장치명(소문자도 예약이다)
+    "user" + chr(10) + "name",  # 개행(로그 라인 조작)
+    "中文",             # 비ASCII(파일시스템 정규화로 같은 이름이 둘이 된다)
+    "x" * 33,               # 길이 상한 초과
+]
+
+
+def test_onboard_rejects_usernames_that_escape_the_secrets_directory(tmp_path,
+                                                                     isolated_state):
+    """경로가 될 수 있는 이름은 전부 400 이고, **아무 파일도 쓰지 않는다.**"""
+    for i, bad in enumerate(_ESCAPES):
+        # ⚠️ 디렉토리 이름에 bad 를 쓰지 않는다 — 그게 바로 이 테스트가 막는 동작이다.
+        client, reg, base = _wire(tmp_path / f"bad{i}")
+        res = client.post("/onboard", json={**_FULL, "username": bad})
+        assert res.status_code == 400, (bad, res.get_data(as_text=True))
+        body = res.get_json()
+        assert "username" in body["missing"] or any(
+            f["key"] == "username" for f in body["findings"]), bad
+        assert reg.get(bad) is None
+        # secrets.base_dir 자체가 생기지 않았다(= 어디에도 쓰지 않았다).
+        assert not os.path.exists(base), bad
+
+
+def test_onboard_rejection_does_not_echo_the_submitted_username(tmp_path,
+                                                                isolated_state):
+    """거부는 알리되 **입력값을 되비추지 않는다** — 관리 UI 는 무인증이다."""
+    client, _reg, _base = _wire(tmp_path)
+    probe = "../<img src=x onerror=alert(1)>"
+    res = client.post("/onboard", json={**_FULL, "username": probe})
+    assert res.status_code == 400
+    raw = res.get_data(as_text=True)
+    assert probe not in raw
+    assert "onerror" not in raw
+    assert "<img" not in raw
+    # 그래도 무엇이 왜 막혔는지는 말한다(조용한 거부 금지).
+    finding = next(f for f in res.get_json()["findings"] if f["key"] == "username")
+    assert finding["code"] == "bad_format"
+    assert "경로 구분자" in finding["message"]     # 값 없이 **분류**로 알려 준다
+    assert finding["hint"]                         # 고치는 방법(규칙)이 붙는다
+
+
+def test_onboard_accepts_ordinary_usernames(tmp_path, isolated_state):
+    """정상적인 사람 이름은 그대로 통과한다(규칙이 실사용을 막으면 안 된다)."""
+    for i, good in enumerate(["yhchoi", "yh.choi", "u1", "a", "A_b-c", "x" * 32]):
+        client, reg, base = _wire(tmp_path / f"ok{i}")
+        res = client.post("/onboard", json={**_FULL, "username": good})
+        assert res.status_code == 201, (good, res.get_data(as_text=True))
+        assert reg.get(good) is not None
+        assert reg.get(good).container.name == f"jad-worker-{good}"
+        assert os.path.isfile(os.path.join(base, good, "jira-token")), good
+
+
+def test_doctor_gate_still_precedes_username_validation(tmp_path, isolated_state):
+    """게이트 순서 불변 — 자가진단 차단이 **모양 검증보다 먼저** 돈다."""
+    from app import setup_doctor as D
+
+    client, reg, _base = _wire_with_doctor(tmp_path, [_check("docker", D.STATUS_FAIL)])
+    res = client.post("/onboard", json={**_FULL, "username": "../evil"})
+    assert res.status_code == 409          # 400 이 아니다
+    assert res.get_json()["blocking"] == ["docker"]
+
+
+def test_write_secret_refuses_to_assemble_an_escaping_path(tmp_path):
+    """심층 방어 — 검증을 통과한 값만 온다고 가정하지 않는다(직접 호출 경로)."""
+    from app.onboarding import UnsafeSecretPath, _write_secret
+
+    base = str(tmp_path / "secrets")
+    for bad in ("../evil", "a/b", "..", ""):
+        try:
+            _write_secret(base, bad, "jira-token", "TOK")
+        except UnsafeSecretPath as exc:
+            assert bad not in str(exc) or not bad   # 값을 되비추지 않는다
+        else:
+            raise AssertionError(f"막히지 않았다: {bad!r}")
+    assert not os.path.exists(base)
+    # 정상 이름은 그대로 동작하고 참조를 돌려준다.
+    assert _write_secret(base, "alice", "jira-token", "TOK") == "alice/jira-token"
+    assert open(os.path.join(base, "alice", "jira-token"), encoding="utf-8").read() == "TOK"

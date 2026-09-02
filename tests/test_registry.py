@@ -81,3 +81,57 @@ def test_user_record_notify_user_id_mirrors_legacy_name(isolated_state):
 
     assert UserRecord(username="a", google_chat_user_id="G1").notify_user_id == "G1"
     assert UserRecord(username="a", notify_user_id="U1").google_chat_user_id == "U1"
+
+
+# --- username 이름 규칙 + 기존 레지스트리 하위호환 -----------------------------
+
+
+def test_username_rule_accepts_people_names_and_rejects_paths():
+    """규칙의 단일 원천 — 온보딩 게이트와 소비 지점이 **같은 이 함수**를 본다."""
+    from app.registry import is_valid_username
+
+    for good in ("yhchoi", "yh.choi", "u1", "a", "A_b-c", "9lives", "x" * 32):
+        assert is_valid_username(good) is True, good
+
+    for bad in (
+        "../evil", "../../etc/x", "a/b", "..", "/abs", "C:/win",
+        "a" + chr(92) + "b",        # 백슬래시
+        "has space", "", "   ",
+        ".hidden", "-flag",         # 시작 문자 규칙(docker 도 첫 글자를 영숫자로 요구한다)
+        "a.", "a-", "a_",           # 끝 문자 규칙(Windows 가 끝의 점·공백을 잘라낸다)
+        "CON", "nul", "com1", "con.txt",   # Windows 예약 장치명
+        "user" + chr(10) + "name",  # 개행
+        "중문",                 # 비ASCII
+        "x" * 33,                   # 길이 상한
+        None, 123,                  # 문자열이 아닌 값
+    ):
+        assert is_valid_username(bad) is False, repr(bad)
+
+
+def test_registry_keeps_a_legacy_username_and_never_blocks_boot(isolated_state, caplog):
+    """이름 규칙보다 먼저 등록된 이름은 **그대로 싣되 경고로 드러낸다.**
+
+    떨어뜨리면 그 사람의 티켓이 조용히 매핑되지 않고, 예외로 올리면 그 한 줄이 central
+    부팅 전체를 막는다 — 둘 다 이 시스템에서 가장 비싼 실패 모드다.
+    """
+    from app import state
+    from app.registry import Registry
+
+    state.save_registry({"users": [
+        {"username": "../legacy-escape", "jira_account_id": "acc-legacy"},
+        {"username": "normal", "jira_account_id": "acc-normal"},
+    ]})
+
+    with caplog.at_level("WARNING", logger="jad.registry"):
+        reg = Registry()
+
+    # 부팅은 막히지 않았고 두 사람 다 살아 있다.
+    assert reg.get("../legacy-escape") is not None
+    assert reg.get("normal") is not None
+    # 폴러의 담당자 매핑도 그대로 산다 — 소급 차단은 하지 않는다(등록은 이미 끝났다).
+    assert reg.find_by_account_id("acc-legacy") is not None
+
+    # 조용한 관용은 은폐다 — 경고로 드러난다(값은 repr 이라 개행이 이스케이프된다).
+    warned = " ".join(r.getMessage() for r in caplog.records)
+    assert "../legacy-escape" in warned
+    assert "normal" not in warned or "../legacy-escape" in warned

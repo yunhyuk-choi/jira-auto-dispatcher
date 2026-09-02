@@ -397,3 +397,67 @@ def test_watcher_email_is_required():
     answers["jira"].pop("watcher_email")
     result = V.validate_answers(answers)
     assert V.CODE_MISSING_REQUIRED in _codes(result, "jira.watcher_email")
+
+
+# --- 모양 제약(pattern) — 선언으로 얹고, 거부는 값을 되비추지 않는다 ---------------
+
+
+def _pattern_sections(pattern, hint="영숫자만"):
+    """모양 제약만 가진 최소 스키마(동의 게이트는 같은 자리에서 함께 선언한다)."""
+    from app import setup_schema as S
+
+    return (S.SchemaSection(
+        name="id", title="식별자", description="",
+        fields=(
+            S.SchemaField(key="name", type=S.FieldType.STRING, required=True,
+                          description="이름", pattern=pattern, pattern_hint=hint),
+            S.SchemaField(key="agree", type=S.FieldType.BOOL, required=True,
+                          description="동의", default=False),
+        ),
+    ),)
+
+
+def _validate_name(value, sections):
+    return V.validate_answers({"name": value, "agree": True}, sections=sections,
+                              consent_key="agree", closed_sections=())
+
+
+def test_pattern_is_matched_in_full_not_partially():
+    """부분 일치를 허용하면 '앞부분만 맞는' 값이 통과한다 — 그게 곧 취약점이다."""
+    sections = _pattern_sections(r"[a-z]+")
+    assert _validate_name("abc", sections).ok
+
+    bad = _validate_name("abc/../etc", sections)
+    assert not bad.ok
+    assert V.CODE_BAD_FORMAT in _codes(bad, "name")
+
+
+def test_pattern_violation_never_echoes_the_value():
+    """이 오류만은 값을 싣지 않는다 — 임의 입력이고 소비처(관리 UI)는 무인증이다."""
+    sections = _pattern_sections(r"[a-z]+", hint="소문자만 쓰세요")
+    probe = "../<script>alert(1)</script>"
+    result = _validate_name(probe, sections)
+    text = result.format_text() + json.dumps(result.to_dict(), ensure_ascii=False)
+    assert probe not in text
+    assert "script" not in text
+
+    finding = next(f for f in result.errors if f.key == "name")
+    # 조용한 거부가 아니다 — 무엇이 들어 있었는지 **분류**로 말하고 고치는 방법을 준다.
+    assert "경로 구분자" in finding.message
+    assert "길이" in finding.message
+    assert finding.hint == "소문자만 쓰세요"
+
+
+def test_format_violation_description_carries_no_value_fragment():
+    assert "길이 0자" in V.describe_format_violation("")
+    described = V.describe_format_violation("a b" + chr(10) + "é/x")
+    for part in ("공백", "제어문자", "ASCII 밖의 문자", "경로 구분자"):
+        assert part in described
+    assert "é" not in described
+
+
+def test_fields_without_a_pattern_are_unaffected():
+    """기존 스키마는 pattern 이 없다 — 선언하지 않으면 아무 것도 달라지지 않는다."""
+    result = V.validate_answers(GOOD)
+    assert result.ok
+    assert not any(f.code == V.CODE_BAD_FORMAT for f in result.findings)

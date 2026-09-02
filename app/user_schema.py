@@ -54,6 +54,7 @@ import datetime as _dt
 from typing import Any, Mapping, Optional
 
 from app import forge
+from app import registry as R
 from app import scope as scope_mod
 from app import setup_schema as S
 from app import setup_validate as V
@@ -145,6 +146,13 @@ _IDENTITY = S.SchemaSection(
                 "수 없다."
             ),
             example="yhchoi",
+            # ⚠️ 이 값은 **식별자로만 쓰이지 않는다** — 그대로 디렉토리 이름과 docker
+            # 컨테이너·볼륨 이름이 된다. 모양 제약이 없던 동안 ``../evil`` 같은 값이
+            # 통과했고, 그건 무인증 관리 UI 가 임의 경로에 파일을 쓰는 통로였다. 규칙과
+            # 그 근거의 단일 원천은 :data:`app.registry.USERNAME_PATTERN`(소비 지점도
+            # 같은 판정을 재사용한다 — 판정이 두 벌이 되면 한쪽이 낡는다).
+            pattern=R.USERNAME_PATTERN,
+            pattern_hint=R.USERNAME_HINT,
         ),
         S.SchemaField(
             key="display_name",
@@ -699,6 +707,9 @@ def build_guide(config: Any = None) -> dict:
 
     #: 필드별 **인스턴스 의존 부연**(설정에서 유도된 것만 — 문구를 복제하지 않는다).
     notes: dict = {
+        # 모양 제약은 거부 메시지에도 실리지만(그 메시지는 값을 되비추지 않는다),
+        # 규칙은 **제출 전에** 보여 주는 편이 낫다 — 규칙 원천은 registry 한 곳이다.
+        "username": R.USERNAME_HINT,
         "jira_account_id": (
             f"확인 방법 ①  아래 '내 accountId 조회' 버튼(이메일+토큰으로 "
             f"{jg['myself_path']} 를 대신 호출한다). "

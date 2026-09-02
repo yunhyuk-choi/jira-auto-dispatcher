@@ -67,6 +67,7 @@ CODE_MISSING_REQUIRED = "missing_required"        # 무조건 필수인데 비�
 CODE_MISSING_REQUIRED_IF = "missing_required_if"  # 조건부 필수 조건이 켜졌는데 비었다
 CODE_BAD_CHOICE = "bad_choice"                    # choices 밖의 값
 CODE_BAD_TYPE = "bad_type"                        # 선언 타입과 불일치
+CODE_BAD_FORMAT = "bad_format"                    # 선언 모양(pattern) 위반
 CODE_SECRET_VALUE = "secret_value"                # 참조 자리에 시크릿 "값"이 왔다
 CODE_CONSENT_REQUIRED = "consent_required"        # 풀 퍼미션 동의 미승인
 CODE_PLACEHOLDER = "placeholder_value"            # <PROJECT_KEY> 같은 예시 자리표시자
@@ -429,6 +430,35 @@ def _type_error(f: S.SchemaField, value: Any) -> Optional[str]:
     return None
 
 
+#: 형식 위반을 **값 없이** 설명할 때 이름 붙일 수 있는 위험 요소.
+#:
+#: 왜 카테고리인가: 어긋난 문자를 그대로 되비추면 (1) 관리 UI 는 무인증이고 응답을
+#: 화면에 그리며(templates/index.html), (2) 서버 로그에 개행·제어문자가 그대로 섞인다.
+#: 그래서 "무엇이 들어 있었는가"를 **분류로만** 말한다 — 고칠 수 있을 만큼은 알려 주되
+#: 공격자가 넣은 바이트를 그대로 되돌려주지 않는다.
+_FORMAT_HAZARDS = (
+    ("경로 구분자(/ 또는 \\)", lambda v: "/" in v or "\\" in v),
+    ("경로 상위 표기(..)", lambda v: ".." in v),
+    ("공백", lambda v: any(ch.isspace() for ch in v)),
+    ("제어문자", lambda v: any(ord(ch) < 32 or ord(ch) == 127 for ch in v)),
+    ("ASCII 밖의 문자", lambda v: any(ord(ch) > 127 for ch in v)),
+)
+
+
+def describe_format_violation(value: str) -> str:
+    """모양 위반을 **입력값을 싣지 않고** 설명한다(길이 + 위험 요소 분류).
+
+    ⚠️ 반환 문자열에 값의 어떤 조각도 넣지 않는다 — 호출부(관리 UI·로그)가 이것을 그대로
+    출력하기 때문이다. :func:`looks_like_secret_value` 와 같은 규율이다.
+    """
+    v = value or ""
+    hits = [name for name, hit in _FORMAT_HAZARDS if hit(v)]
+    detail = f"길이 {len(v)}자"
+    if hits:
+        detail += ", 포함: " + " · ".join(hits)
+    return detail
+
+
 def looks_like_secret_value(value: str) -> str:
     """참조 자리에 온 값이 **시크릿 값처럼** 보이면 그 이유, 아니면 "".
 
@@ -587,6 +617,7 @@ def validate_answers(
         1. 필수(``required``) 누락
         2. 조건부 필수(``required_if``) 위반
         3. ``choices`` 밖의 값
+        3.5. 선언 모양(``pattern``) 위반 — ⚠️ 오류 메시지에 **값을 싣지 않는다**
         4. 선언 타입 불일치
         5. 참조 자리에 시크릿 **값**(값이 아니라 참조 규율)
         6. 예시 자리표시자(``<PROJECT_KEY>``)가 그대로 남음
@@ -638,6 +669,24 @@ def validate_answers(
                 f"허용값이 아닙니다: {value!r}.",
                 "허용: " + " | ".join(str(c) for c in f.choices),
             ))
+
+        # --- 3.5. 모양(pattern) ---------------------------------------------
+        # 전체 일치로 본다 — 부분 일치를 허용하면 "앞부분만 맞는" 값이 통과하고, 그 값이
+        # 경로·컨테이너 이름 자리로 흘러가면 그게 취약점이다(app/user_schema.py username).
+        #
+        # ⚠️ 이 오류만은 **값을 되비추지 않는다.** choices 위반은 스키마가 정한 좁은
+        # 집합에서 벗어난 오타라 값을 보여 주는 편이 낫지만, 모양 위반은 임의 입력이고
+        # 이 시스템의 관리 UI 는 무인증이다 — 서버가 받은 바이트를 화면·로그로 그대로
+        # 되돌려주지 않는다. 대신 무엇을 고쳐야 하는지는 ``pattern_hint`` 가 말한다.
+        if f.pattern and isinstance(value, str) and not re.fullmatch(f.pattern, value):
+            findings.append(Finding(
+                LEVEL_ERROR, f.key, CODE_BAD_FORMAT,
+                "허용된 모양이 아닙니다"
+                f"({describe_format_violation(value)}). "
+                "보안상 입력한 값은 그대로 되돌려 보여 주지 않습니다.",
+                f.pattern_hint or _example_hint(f),
+            ))
+            continue  # 모양이 틀린 값에 자리표시자 검사까지 겹쳐 알릴 이유가 없다
 
         # --- 5. 시크릿 값 규율 ---------------------------------------------
         if f.secret and not allow_secret_values:

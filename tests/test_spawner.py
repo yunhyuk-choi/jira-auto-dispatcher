@@ -936,3 +936,43 @@ def test_reconcile_defers_payload_drift_while_job_active(tmp_path, isolated_stat
     assert summary["deferred"] == ["testuser"]
     assert fake.removed == []
     assert "testuser" in sp._pending_recreate
+
+
+# --- 이름 조립 심층 방어 -------------------------------------------------------
+
+
+def test_container_and_volume_names_refuse_an_unsafe_username():
+    """검증을 통과한 값만 온다고 가정하지 않는다 — 레지스트리에 이미 있던 값도 온다.
+
+    조용히 통과시키면 ``jad-worker-../x`` 같은 이름으로 docker 를 부르게 되고, 최악의
+    경우 **남의 컨테이너를 건드린다**. 그래서 조립 자체를 거부한다.
+    """
+    for bad in ("../evil", "a/b", "..", "has space", "", "-flag"):
+        for fn in (Spawner.container_name, Spawner.volume_name):
+            with pytest.raises(ValueError):
+                fn(bad)
+
+    # 메시지는 규칙만 말하고 **입력값을 되비추지 않는다**(안내 문구에 우연히 겹치지 않는
+    # 값으로 확인한다 — 규칙 설명 자체에는 ``..`` 같은 조각이 등장한다).
+    with pytest.raises(ValueError) as caught:
+        Spawner.container_name("../evil-probe")
+    assert "evil-probe" not in str(caught.value)
+
+    # 정상 이름은 그대로다(이름 규칙이 기존 동작을 바꾸지 않는다).
+    assert Spawner.container_name("testuser") == "jad-worker-testuser"
+    assert Spawner.volume_name("yh.choi") == "jad-yh.choi"
+
+
+def test_reconcile_isolates_a_legacy_username_instead_of_dying(tmp_path, isolated_state):
+    """이름 규칙 이전에 등록된 이름은 **그 사용자만** 실패하고 나머지는 계속 돈다."""
+    base = str(tmp_path / "secrets")
+    _write(base, "testuser/jira-token", "T")
+    reg = Registry()
+    ok_user = _user()
+    reg.upsert(ok_user)
+    legacy = UserRecord.from_dict({"username": "../legacy", "jira_account_id": "a"})
+
+    sp = Spawner(_cfg(base), reg, client=_client_absent())
+    summary = sp.reconcile_workers([legacy, ok_user], has_active_job=lambda name: False)
+    assert summary["errors"] == ["../legacy"]     # 격리돼 보고된다
+    assert "../legacy" not in summary["recreated"]

@@ -117,6 +117,14 @@ class SchemaField:
         secret_ref: 값이 시크릿 **파일 참조**(``secrets.base_dir`` 상대) → 기록해도 된다.
         legacy_keys: 하위호환으로 계속 **읽는** 옛 키 경로들. 신규 키가 있으면 신규 우선.
         example: 예시 값(온보딩 placeholder·example.yaml 용).
+        pattern: (문자열·ENUM 전용) 값이 만족해야 하는 정규식 **원문**. 검증기
+            (:func:`app.setup_validate.validate_answers`)가 **전체 일치**(fullmatch)로
+            본다 — 부분 일치를 허용하면 "앞부분만 맞는" 값이 통과하고, 그런 값이
+            경로·컨테이너 이름 같은 자리로 흘러가면 그게 곧 취약점이다. ``choices`` 로는
+            말할 수 없는 **모양 제약**(식별자·키 형식)을 선언하는 자리다.
+        pattern_hint: 그 모양 제약을 사람 말로 설명한 한 줄. ⚠️ 거부 메시지는 **입력값을
+            되비추지 않으므로**(:func:`app.setup_validate.describe_format_violation`)
+            무엇을 고쳐야 하는지는 오직 이 문구가 알려 준다 — 비워 두지 말 것.
     """
 
     key: str
@@ -130,6 +138,9 @@ class SchemaField:
     secret_ref: bool = False
     legacy_keys: Tuple = ()
     example: Any = None
+    #: 모양 제약 — 정규식 원문(전체 일치)과 사람 말 설명. 위 Attributes 참조.
+    pattern: str = ""
+    pattern_hint: str = ""
 
 
 @dataclass(frozen=True)
@@ -196,11 +207,18 @@ DEPLOY_PROFILES: Tuple = tuple(PROFILE_DEFAULTS.keys())
 #: 뿐이다). ``jira.custom_fields`` 는 이 논리 키로 매핑을 받는다 — 온보딩은 이 테이블로
 #: 항목별 질문을 렌더하면 된다. 값이 비면 :mod:`app.jira_client` 의 모듈 상수를 그대로
 #: 쓴다(하위호환 — 기존 배포는 아무것도 안 바꿔도 오늘과 동일하게 동작).
+#:
+#: ⚠️ ``actual_start``·``actual_end`` 의 기본값은 **빈 값(미설정)** 이다. 이 둘은 Jira
+#: 표준 필드가 아니라 조직 고유 워크플로우 필드라 "대체로 맞는 id" 가 존재하지 않는다
+#: (실측: 옛 기본값 ``customfield_10187``/``customfield_10186`` 은 다른 인스턴스에 아예
+#: 없었다). 미설정이면 완료 전이에 그 필드를 **보내지 않으며**, 워크플로우가 요구하면
+#: Jira 가 "필수입니다"라고 정확히 말해 준다 — 남의 id 를 보내 400 을 맞는 것보다 낫다.
+#: 자기 값은 ``python -m app.setup discover --only custom_fields`` 로 실측해 채운다.
 JIRA_CUSTOM_FIELD_KEYS: Tuple = (
     ("start_date", "착수 시 필수인 '시작날짜' 필드 id", "customfield_10015"),
     ("due_date", "착수 시 필수인 '마감일' 필드 id", "duedate"),
-    ("actual_start", "완료 전이 시 필수인 '실제 시작일' 필드 id", "customfield_10187"),
-    ("actual_end", "완료 전이 시 필수인 '실제 종료일' 필드 id", "customfield_10186"),
+    ("actual_start", "완료 전이 시 필수인 '실제 시작일' 필드 id(없으면 비워 둔다)", ""),
+    ("actual_end", "완료 전이 시 필수인 '실제 종료일' 필드 id(없으면 비워 둔다)", ""),
 )
 
 #: 지원 forge 종류.

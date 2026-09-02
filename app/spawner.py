@@ -74,6 +74,7 @@ from typing import Any, Callable, Optional
 
 from app import inject
 from app.config import DEFAULT_CONFIG_PATH, read_secret
+from app.registry import USERNAME_HINT, is_valid_username
 
 log = logging.getLogger("jad.spawner")
 
@@ -233,12 +234,36 @@ class Spawner:
     # -- 이름 규칙 --
 
     @staticmethod
+    def _checked_username(username: str) -> str:
+        """docker 이름 조립 전 **심층 방어** — 이름이 이름인지 다시 본다.
+
+        온보딩은 이미 같은 판정(:func:`app.registry.is_valid_username`)으로 막지만,
+        여기 오는 값은 **레지스트리에 이미 들어 있던 것**일 수도 있다(이름 규칙이 생기기
+        전에 등록된 레코드는 그대로 유지된다 — :meth:`app.registry.Registry.__init__`).
+        그런 이름으로 컨테이너·볼륨 이름을 조립하면 docker 가 거부하거나(이름 규칙 위반)
+        더 나쁘게는 **다른 사용자의 이름과 겹친다.** 그래서 조립 자체를 거부한다.
+
+        조용히 넘기지 않고 예외로 올리는 이유: 호출부(``ensure_worker``·``stop_worker``·
+        ``reconcile_workers``)는 전부 예외를 **그 사용자 단위로** 격리해 잡는다 — 한
+        사람이 뜨지 않을 뿐 central 은 계속 돈다. 반대로 조용히 통과시키면 남의 컨테이너를
+        건드리는 일이 에러 없이 일어난다.
+
+        Raises:
+            ValueError: 이름 규칙에 맞지 않을 때. ⚠️ 메시지에 값을 싣지 않는다.
+        """
+        if not is_valid_username(username):
+            raise ValueError(
+                "worker 컨테이너·볼륨 이름을 만들 수 없습니다 — 이 사용자의 username 이 "
+                f"이름 규칙에 맞지 않습니다. 규칙: {USERNAME_HINT}")
+        return username
+
+    @staticmethod
     def container_name(username: str) -> str:
-        return f"jad-worker-{username}"
+        return f"jad-worker-{Spawner._checked_username(username)}"
 
     @staticmethod
     def volume_name(username: str) -> str:
-        return f"jad-{username}"
+        return f"jad-{Spawner._checked_username(username)}"
 
     # -- 스폰 시 주입 페이로드 조립(호스트 경로 없음) --
 

@@ -43,13 +43,13 @@ from __future__ import annotations
 
 import functools
 import logging
-import os
 
 from flask import jsonify, request
 
+from app import inject
 from app import scope as scope_mod
 from app import user_schema as US
-from app.registry import UserRecord
+from app.registry import UserRecord, is_valid_username
 
 log = logging.getLogger("jad.onboarding")
 
@@ -89,26 +89,43 @@ _LEGACY_SECRET_FIELDS = {
 }
 
 
+class UnsafeSecretPath(ValueError):
+    """시크릿 참조 조립이 안전하지 않다(경로 탈출 차단).
+
+    ⚠️ 메시지에 **문제의 값을 싣지 않는다** — 이 예외는 :func:`_json_errors` 를 통해
+    무인증 관리 UI 로 그대로 흘러간다.
+    """
+
+
 def _write_secret(base_dir: str, username: str, filename: str, value: str) -> str:
     """시크릿 값을 secrets.base_dir/<user>/<filename> 에 0600으로 저장, 참조 반환.
 
+    **심층 방어** — 여기 오는 ``username`` 은 이미 스키마 검증
+    (:data:`app.user_schema.USER_SCHEMA` 의 ``username`` 모양 제약)을 통과했지만 그것을
+    전제하지 않는다. 이 함수는 무인증 관리 UI 가 **파일을 쓰는 지점**이라, 상류 게이트가
+    빠지거나 다른 호출부가 생겼을 때 조용히 경로 탈출이 되는 자리이기 때문이다. 그래서
+    이미 있는 두 판정을 **재사용**해 한 번 더 확인한다:
+
+        - :func:`app.registry.is_valid_username` — 이름이 이름인가(디렉토리·docker 공통).
+        - :func:`app.inject.is_safe_ref` — 조립된 참조가 시크릿 루트 **안쪽**인가.
+
+    쓰기 자체도 직접 하지 않고 :func:`app.inject.write_secret` 에 위임한다 — 그 함수가
+    "값은 0600, 부모 디렉토리는 0700, UTF-8(BOM 없음)·LF" 규율의 쓰기 쪽 단일 원천이고,
+    같은 ``is_safe_ref`` 를 마지막 관문으로 한 번 더 건다.
+
     Returns:
         secrets.base_dir 상대 참조 경로("<user>/<filename>").
-    """
-    user_dir = os.path.join(base_dir, username)
-    os.makedirs(user_dir, exist_ok=True)
-    path = os.path.join(user_dir, filename)
-    # 0600으로 생성(경합 최소화를 위해 opener로 mode 지정).
-    def _opener(p, flags):
-        return os.open(p, flags, 0o600)
 
-    with open(path, "w", encoding="utf-8", newline="\n", opener=_opener) as fh:
-        fh.write(value)
-    try:
-        os.chmod(path, 0o600)
-    except OSError:  # Windows chmod 미지원 — 무해
-        pass
-    return f"{username}/{filename}"
+    Raises:
+        UnsafeSecretPath: 조립된 참조가 시크릿 루트를 벗어날 때.
+    """
+    ref = f"{username}/{filename}"
+    if not is_valid_username(username) or not inject.is_safe_ref(ref):
+        # ⚠️ 값(username)을 되비추지 않는다 — 무엇이 왜 막혔는지만 말한다.
+        raise UnsafeSecretPath(
+            "시크릿 저장 경로를 만들 수 없습니다 — username 이 이름 규칙에 맞지 않습니다.")
+    inject.write_secret(base_dir, ref, value)
+    return ref
 
 
 def _json_errors(fn):
