@@ -39,10 +39,12 @@
     4. created 워터마크는 처리한 max created로, assignee 워터마크는 now로 전진 후 영속
 
 참고:
-    - **자격 생존 확인(축0)**: 인증이 깨져도 Jira Cloud 의 JQL 검색은 200 + 빈 배열을
-      돌려주므로 "매칭 티켓 없음"과 구별되지 않는다. 빈 폴에서 주기적으로
-      ``GET /myself`` 를 때려 그 위장을 벗긴다(:meth:`Poller._verify_auth_if_due`,
-      ``jira.auth_recheck_sec``). 감지되면 로그 + ``/api/doctor`` 로 드러난다.
+    - **침묵의 원인 가르기(축0)**: 인증이 깨져도, 감시 프로젝트가 사라져도 Jira Cloud 의
+      JQL 검색은 200 + 빈 배열을 돌려주므로 "매칭 티켓 없음"과 구별되지 않는다. 주기적으로
+      ``GET /myself``(자격)와 ``GET /project/{key}``(프로젝트 실재)를 때려 그 위장을
+      벗긴다(:meth:`Poller._verify_auth_if_due` → ``_verify_credentials_if_due`` ·
+      ``_verify_projects_if_due``, 둘 다 ``jira.auth_recheck_sec`` 주기). 감지되면
+      로그 + ``/api/doctor`` 로 드러난다.
     - 백그라운드 스레드로 상시 구동(main.py의 central 분기가 기동).
     - 웹훅과 동일하게 반드시 gate를 통과한 뒤 매핑/디스패치(직접 큐잉 금지).
     - 매핑 실패/미등록/비활성 사용자면 enqueue하지 않고 로그만 남긴다(가역성을
@@ -275,6 +277,14 @@ class Poller:
         self._auth_checked_ts: float = 0.0               # 마지막 확인 시각(epoch, 0=미확인)
         self._auth_broken: bool = False                  # 직전 확인이 실패였나(로그 소음 억제)
 
+        # --- 감시 프로젝트 실재 확인(축0의 두 번째 위장) ----------------------
+        # 자격이 멀쩡해도 프로젝트가 삭제·개명됐거나 감시 계정의 '찾아보기' 권한이 회수되면
+        # JQL 은 **없는 프로젝트에도 200 + 빈 목록**을 준다 — 인증 실패와 똑같이 "할 일
+        # 없음"처럼 보인다. _verify_projects_if_due 가 그 둘을 갈라 준다.
+        self._project_reporter: Optional[Callable] = None
+        self._projects_checked_ts: float = 0.0
+        self._projects_broken: bool = False              # 직전 확인에서 없는 키가 있었나
+
     # ------------------------------------------------------------------
 
     def set_auth_reporter(self, reporter: Optional[Callable]) -> None:
@@ -313,7 +323,31 @@ class Poller:
             log.warning("Jira 자격 상태 보고 실패(격리)")
 
     def _verify_auth_if_due(self, now_ts: float, *, saw_issues: bool) -> None:
+        """빈 폴이 **무엇의 위장**인지 주기적으로 가른다 — 자격인가, 프로젝트인가.
+
+        폴러가 조용한 이유는 셋 중 하나다: (1) 정말 할 일이 없다 (2) 자격이 거부된다
+        (3) 감시 대상 프로젝트가 이 사이트에 없다(삭제·개명·권한 회수). Jira Cloud 는
+        (2)·(3) 모두에 **200 + 빈 목록**을 주므로 검색 결과만으로는 셋을 구별할 수 없다.
+        그래서 주기적으로 두 개의 별도 읽기를 던져 원인을 갈라 놓는다:
+
+            :meth:`_verify_credentials_if_due`  ``GET /rest/api/3/myself``
+            :meth:`_verify_projects_if_due`     ``GET /rest/api/3/project/{key}``
+
+        **순서에 의미가 있다** — 자격이 거부되는 동안에는 프로젝트 조회도 401/403 이 되어
+        "없다"와 구별되지 않는다. 그래서 자격이 살아 있다고 볼 수 있을 때만 프로젝트를
+        확인한다(그러지 않으면 토큰 하나 만료됐을 뿐인데 "프로젝트가 없다"는 오진이 배너에
+        뜬다).
+        """
+        if self._verify_credentials_if_due(now_ts, saw_issues=saw_issues):
+            self._verify_projects_if_due(now_ts)
+
+    def _verify_credentials_if_due(self, now_ts: float, *, saw_issues: bool) -> bool:
         """빈 폴이 **인증 실패의 위장**인지 주기적으로 확인한다.
+
+        Returns:
+            자격이 살아 있다고 볼 수 있는가. 이번 턴에 확인했으면 그 결과이고, 확인할
+            때가 아니었으면 마지막으로 알던 상태다(:attr:`_auth_broken`). 프로젝트 실재
+            확인이 이 값을 게이트로 쓴다.
 
         Jira Cloud 실측:
             ``GET  /rest/api/3/myself``     → 401
@@ -334,15 +368,17 @@ class Poller:
         if saw_issues:
             self._auth_checked_ts = now_ts
             self._note_auth(True, "검색 결과로 확인(티켓 수신)")
-            return
+            return True
         interval = self._auth_recheck_sec()
         if interval <= 0:
-            return
+            return not self._auth_broken
         if self._auth_checked_ts and (now_ts - self._auth_checked_ts) < interval:
-            return
+            return not self._auth_broken
         myself = getattr(self.jira, "myself", None)
         if myself is None:
-            return                      # 이 클라이언트로는 확인할 수단이 없다(대역 등)
+            # 이 클라이언트로는 확인할 수단이 없다(대역 등). 없는 근거로 실패를 만들지
+            # 않으므로 "깨지지 않았다"로 본다 — 프로젝트 확인은 자기 수단이 있으면 돈다.
+            return not self._auth_broken
         self._auth_checked_ts = now_ts
         try:
             myself()
@@ -350,8 +386,104 @@ class Poller:
             # ⚠️ 예외 **본문**을 싣지 않는다(응답에 뭐가 섞여 올지 모른다). 상태코드만.
             code = getattr(exc, "status_code", None)
             self._note_auth(False, f"HTTP {code}" if code else type(exc).__name__)
-        else:
-            self._note_auth(True, "/myself 확인")
+            return False
+        self._note_auth(True, "/myself 확인")
+        return True
+
+    # -- 감시 프로젝트 실재 확인 -------------------------------------------
+
+    def set_project_reporter(self, reporter: Optional[Callable]) -> None:
+        """프로젝트 실재 상태를 알릴 콜백 주입 — ``reporter(missing, checked, undetermined)``.
+
+        셋 다 **프로젝트 키 목록**이다(시크릿 아님). central 조립부
+        (:func:`app.main.build_central_components`)가
+        :meth:`app.doctor_runtime.DoctorRuntime.note_jira_projects` 를 물려, 폴링 중
+        감지한 "없는 프로젝트"가 ``/api/doctor`` → 관리 UI 배너로 드러나게 한다.
+        미주입이면 로그만 남는다(폴러는 진단 모듈을 몰라도 된다 — 결합 최소화).
+        """
+        self._project_reporter = reporter
+
+    def _note_projects(self, missing: list, checked: list, undetermined: list) -> None:
+        """프로젝트 실재 확인 결과를 로그 + 진단에 반영(상태가 바뀔 때만 로그)."""
+        broken = bool(missing)
+        if not broken:
+            if self._projects_broken:
+                log.info("감시 프로젝트 실재 회복 확인(%s) — 폴링이 다시 티켓을 찾을 수 "
+                         "있습니다", ", ".join(checked) or "-")
+        elif not self._projects_broken:
+            log.error(
+                "⚠️ 감시 대상 프로젝트를 이 사이트에서 찾을 수 없습니다: %s. JQL 은 없는 "
+                "프로젝트에도 오류가 아니라 **빈 결과**를 주므로 겉으로는 '할 일 없음'처럼 "
+                "보이지만 그 프로젝트의 티켓은 하나도 오지 않습니다(삭제·키 변경, 또는 "
+                "감시 계정의 '찾아보기' 권한 회수). config.yaml 의 jira.project · "
+                "jira.projects 를 확인하세요.", ", ".join(missing),
+            )
+        self._projects_broken = broken
+        reporter = self._project_reporter
+        if reporter is None:
+            return
+        try:
+            reporter(list(missing), list(checked), list(undetermined))
+        except Exception:  # noqa: BLE001 — 보고 실패가 폴 루프를 죽이지 않게 격리
+            log.warning("감시 프로젝트 상태 보고 실패(격리)")
+
+    def _verify_projects_if_due(self, now_ts: float) -> None:
+        """감시 대상 프로젝트가 **아직 이 사이트에 있는지** 주기적으로 확인한다.
+
+        왜 부팅 진단만으로 부족한가:
+            설치 관문·부팅 자가진단이 이미 같은 확인을 한다
+            (:func:`app.setup_doctor._project_existence_failure`). 하지만 그건 **그 한
+            시점**의 사실이다. 프로젝트는 운영 중에 삭제·개명되고, 감시 계정의 '찾아보기'
+            권한도 회수된다. 그 순간부터 폴러는 다시 조용해지는데, JQL 은 없는 프로젝트에도
+            200 + 빈 목록을 주므로 **아무도 모른다** — 자격 만료와 정확히 같은 실패 모드다.
+
+        빈도·조건 판단(``jira.auth_recheck_sec`` 를 **함께** 쓴다 — 기본 30분):
+            - 새 노브를 만들지 않는다. 두 확인은 같은 질문("이 침묵이 진짜인가")에 답하고
+              같은 리듬으로 돌아야 하며, 노브가 둘이면 한쪽만 꺼 놓은 배포가 생긴다.
+              ``auth_recheck_sec: 0`` 은 "운영 중 진단 요청을 아예 보내지 마라"는 뜻으로
+              읽어 이 확인도 끈다.
+            - **빈 폴로 한정하지 않는다.** 감시 프로젝트가 여럿이면 한 프로젝트가 계속
+              티켓을 주는 동안 다른 프로젝트가 사라져도 폴이 비지 않는다 — 빈 폴에서만
+              확인하면 그 경우를 영원히 못 잡는다(부팅 진단이 표본 1건에도 프로젝트를
+              확인하는 이유와 같다). 주기 게이트가 이미 비용을 잡고 있으므로 폴이 비었는지
+              여부로 더 조일 이유가 없다.
+            - 비용: 프로젝트 1개당 30분마다 1회 = 하루 48회. 매 폴(기본 60초)마다면
+              1,440회다. 그 대가는 최악의 감지 지연 30분인데, 지금은 **영원히 감지되지
+              않는다.**
+            - 자격이 거부되는 동안에는 아예 오지 않는다(:meth:`_verify_auth_if_due` 게이트).
+
+        판정 규율은 부팅 진단과 **같다**(판정이 두 벌이 되면 갈라진다):
+            - 404 → 없다(또는 이 자격으로 볼 수 없다 — 둘 다 티켓이 오지 않는다).
+            - 그 밖의 실패(5xx·네트워크·예상 밖 예외) → **판정 보류**. 검색은 이미
+              성공했으므로 없는 근거로 실패를 만들지 않는다.
+            - 전부 보류였으면 아무 것도 보고하지 않는다(직전 관측을 흔들지 않는다).
+        """
+        interval = self._auth_recheck_sec()
+        if interval <= 0:
+            return
+        if self._projects_checked_ts and (now_ts - self._projects_checked_ts) < interval:
+            return
+        get_project = getattr(self.jira, "get_project", None)
+        if get_project is None:
+            return                      # 이 클라이언트로는 확인할 수단이 없다(대역 등)
+        projects = self._scope_union()
+        if not projects:
+            return                      # 감시 범위가 비었다 — 그건 별도 경고가 이미 낸다
+        self._projects_checked_ts = now_ts
+        missing: list = []
+        undetermined: list = []
+        for key in projects:
+            try:
+                get_project(key)
+            except Exception as exc:  # noqa: BLE001 — 진단 호출이 폴 루프를 죽이지 않게 격리
+                if getattr(exc, "status_code", None) == 404:
+                    missing.append(key)
+                else:
+                    undetermined.append(key)
+        checked = [p for p in projects if p not in missing and p not in undetermined]
+        if not missing and not checked:
+            return                      # 전부 판정 보류 — 새로 아는 사실이 없다
+        self._note_projects(missing, checked, undetermined)
 
     # ------------------------------------------------------------------
 

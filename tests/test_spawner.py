@@ -947,20 +947,37 @@ def test_container_and_volume_names_refuse_an_unsafe_username():
     조용히 통과시키면 ``jad-worker-../x`` 같은 이름으로 docker 를 부르게 되고, 최악의
     경우 **남의 컨테이너를 건드린다**. 그래서 조립 자체를 거부한다.
     """
+    sp = Spawner(_cfg("/tmp/secrets"))
     for bad in ("../evil", "a/b", "..", "has space", "", "-flag"):
-        for fn in (Spawner.container_name, Spawner.volume_name):
+        for fn in (sp.container_name, sp.volume_name):
             with pytest.raises(ValueError):
                 fn(bad)
 
     # 메시지는 규칙만 말하고 **입력값을 되비추지 않는다**(안내 문구에 우연히 겹치지 않는
     # 값으로 확인한다 — 규칙 설명 자체에는 ``..`` 같은 조각이 등장한다).
     with pytest.raises(ValueError) as caught:
-        Spawner.container_name("../evil-probe")
+        sp.container_name("../evil-probe")
     assert "evil-probe" not in str(caught.value)
 
     # 정상 이름은 그대로다(이름 규칙이 기존 동작을 바꾸지 않는다).
-    assert Spawner.container_name("testuser") == "jad-worker-testuser"
-    assert Spawner.volume_name("yh.choi") == "jad-yh.choi"
+    assert sp.container_name("testuser") == "jad-worker-testuser"
+    assert sp.volume_name("yh.choi") == "jad-yh.choi"
+
+
+def test_names_carry_the_instance_prefix_and_default_is_unchanged(tmp_path):
+    """인스턴스 이름이 컨테이너·볼륨 이름을 통째로 옮긴다 — 기본값은 예전 그대로.
+
+    한 호스트에 두 인스턴스가 뜰 때 **같은 사람이 양쪽에 등록돼도** 컨테이너·볼륨이
+    겹치지 않아야 한다(겹치면 두 번째 스폰이 Conflict 로 죽거나 남의 ~/.claude 를 쓴다).
+    """
+    cfg = _cfg(str(tmp_path))
+    # deploy 섹션이 아예 없어도(옛 config·축소 대역) 기본 인스턴스로 동작한다.
+    assert Spawner(cfg).container_name("testuser") == "jad-worker-testuser"
+
+    cfg.deploy = SimpleNamespace(instance="jad-stg")
+    sp = Spawner(cfg)
+    assert sp.container_name("testuser") == "jad-stg-worker-testuser"
+    assert sp.volume_name("testuser") == "jad-stg-testuser"
 
 
 def test_reconcile_isolates_a_legacy_username_instead_of_dying(tmp_path, isolated_state):

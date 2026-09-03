@@ -223,3 +223,48 @@ def test_a_blown_up_diagnosis_does_not_discard_the_runtime_note():
     rt.run_once()                       # 예외로 끝난다(결과 없음)
     assert rt.snapshot()["error"]
     assert rt.blocking_failures() == ["jira_auth"]
+
+
+# ---------------------------------------------------------------------------
+# 운영 중 실측 반영(폴러 → note_jira_projects)
+# ---------------------------------------------------------------------------
+
+
+def test_runtime_missing_project_overrides_a_passing_boot_check():
+    """부팅 때는 프로젝트가 있었어도, 운영 중 삭제·개명되면 그 사실이 진단에 뜬다.
+
+    JQL 은 없는 프로젝트에도 200 + 빈 결과를 주므로 이것 없이는 **영원히 초록불**이다.
+    """
+    rt = _runtime(_results(config=D.STATUS_PASS, jira_search=D.STATUS_PASS))
+    rt.run_once()
+    assert rt.blocking_failures() == []
+
+    rt.note_jira_projects(["HAN"], [], [])
+    snap = rt.snapshot()
+    search = next(c for c in snap["checks"] if c["name"] == "jira_search")
+    assert search["status"] == D.STATUS_FAIL
+    assert "HAN" in search["message"]
+    # jira_search 도 BLOCKING_CHECKS — 티켓이 하나도 오지 않는 상태에서 워커를 늘리지 않는다.
+    assert snap["onboarding_blocked"] is True
+    assert rt.blocking_failures() == ["jira_search"]
+
+
+def test_runtime_project_recovery_lifts_the_block():
+    rt = _runtime(_results(jira_search=D.STATUS_PASS))
+    rt.run_once()
+    rt.note_jira_projects(["HAN"], [], [])
+    assert rt.blocking_failures() == ["jira_search"]
+    rt.note_jira_projects([], ["HAN"], [])
+    assert rt.blocking_failures() == []
+
+
+def test_undetermined_projects_are_named_but_never_fail():
+    """확인하지 못한 키(5xx·네트워크)는 메시지에만 남는다 — 없는 근거로 막지 않는다."""
+    rt = _runtime(_results(jira_search=D.STATUS_PASS))
+    rt.run_once()
+    rt.note_jira_projects([], ["PROJ"], ["OTHER"])
+    snap = rt.snapshot()
+    search = next(c for c in snap["checks"] if c["name"] == "jira_search")
+    assert search["status"] == D.STATUS_PASS
+    assert "OTHER" in search["message"]
+    assert rt.blocking_failures() == []

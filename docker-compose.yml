@@ -5,7 +5,24 @@
 #
 # 계약 정합(반드시 유지 — spawner/config.example.yaml과 일치):
 #   image           jira-auto-dispatcher:latest   (config.spawn.image)
-#   network         jad-net                        (config.spawn.network)
+#   network         ${JAD_INSTANCE:-jad}-net       (config.spawn.network)
+#
+# --- 한 호스트에 여러 인스턴스(평가·스테이징·프로덕션) ---
+# 이름을 고정하던 자리(container_name·network name·volume name)는 전부 **인스턴스
+# 접두어**로 파생한다. `.env` 의 `JAD_INSTANCE` 하나가 그 접두어이며 **미설정이면 `jad`**
+# 이라 기존 배포는 한 글자도 달라지지 않는다. 같은 값이 central 컨테이너에 env 로도
+# 들어가(아래) config 가 network·volume·워커 컨테이너 이름을 같은 접두어로 파생한다 —
+# 그래서 compose 가 만든 이름과 central 이 부르는 이름이 어긋날 수 없다(app/naming.py).
+#
+#   # 두 번째 인스턴스: **별도 디렉토리**에 배포하고 .env 에 두 줄만 추가
+#   JAD_INSTANCE=jad-stg     # 컨테이너·네트워크·볼륨 접두어
+#   JAD_PORT=8788            # 관리 UI 포트(호스트 포트는 인스턴스마다 달라야 한다)
+#
+# ⚠️ 서비스 키(`central`·`socket-proxy`)는 **바꾸지 않는다** — compose 네트워크 DNS 가
+#    그 이름으로 돌고(DOCKER_HOST=tcp://socket-proxy:2375) 컨테이너 이름과 무관하다.
+# ⚠️ 이름 없는 볼륨(`jad-state`)은 이미 compose 프로젝트 접두어가 붙어 인스턴스별로
+#    갈린다(별도 디렉토리 = 다른 프로젝트명). 같은 디렉토리에서 두 벌을 띄우려면
+#    `COMPOSE_PROJECT_NAME` 도 함께 나눠야 한다.
 #
 # ⚠️ 보안: 관리 UI/워커는 도구권한 자율 에이전트(RCE 표면). 신뢰 네트워크 한정, 인터넷 노출 금지.
 #          docker.sock 직결은 호스트 root 동치 → 기본은 socket-proxy 경유(최소 권한). SECURITY.md.
@@ -16,13 +33,13 @@ services:
   # 접근한다. 아래 create/start/stop/inspect + 볼륨/네트워크에 필요한 범위만 노출.
   socket-proxy:
     image: tecnativa/docker-socket-proxy:latest
-    container_name: jad-socket-proxy
+    container_name: ${JAD_INSTANCE:-jad}-socket-proxy
     restart: unless-stopped
     environment:
       CONTAINERS: 1   # 컨테이너 조회/생성/기동/중지/삭제(spawner 라이프사이클)
       IMAGES: 1       # containers.run 시 이미지 inspect
-      NETWORKS: 1     # jad-net 조회/연결
-      VOLUMES: 1      # per-user 볼륨(jad-<username>) 조회/생성
+      NETWORKS: 1     # ${JAD_INSTANCE:-jad}-net 조회/연결
+      VOLUMES: 1      # per-user 볼륨(<instance>-<username>) 조회/생성
       POST: 1         # 생성/기동 등 쓰기 메서드 허용(위 리소스 한정)
       EXEC: 1         # 프랙탈 PUSH 경로: central→worker `docker exec`(per-user sub가 워커에서 claude --resume). SECURITY.md §4 참조.
       # 그 외(SERVICES/SWARM/SECRETS/INFO 등)는 기본 0(비노출). EXEC은 위와 같이 프랙탈 푸시용으로 명시 허용.
@@ -34,7 +51,7 @@ services:
   central:
     build: .
     image: jira-auto-dispatcher:latest   # spawner가 worker를 이 이미지로 띄운다
-    container_name: jad-central
+    container_name: ${JAD_INSTANCE:-jad}-central
     restart: unless-stopped
     # ⚠️ 좀비 프로세스 방지: central 의 PID 1 도 `python -m app.main`(ENTRYPOINT)이다.
     #    central 은 레포-리졸버 등에서 claude 를 spawn할 수 있어 워커와 동일한 고아
@@ -61,9 +78,15 @@ services:
       # ⚠️ 정합 필수: config.yaml 의 deploy.docker_host 와 동일 값이어야 한다
       #    (기본값은 deploy.profile 에서 파생되며 세 프로파일 모두 이 값이다).
       DOCKER_HOST: tcp://socket-proxy:2375
+      # 인스턴스 이름 — compose 가 위에서 컨테이너·네트워크·볼륨 이름을 지을 때 쓴 것과
+      # **같은 값**을 central 에도 넣는다. config 가 이걸로 network·workspace 볼륨·워커
+      # 컨테이너 이름을 파생하므로(deploy.instance 를 이긴다 — app/config.py), compose 가
+      # 실제로 만든 이름과 central 이 부르는 이름이 어긋날 수 없다.
+      JAD_INSTANCE: ${JAD_INSTANCE:-jad}
     ports:
-      - "8787:8787"                          # 관리 UI — ⚠️ 인터넷 노출 금지.
-      #                                        공개 호스트면 "127.0.0.1:8787:8787" 로 바꾸고 SSH 터널로 접근하라(INSTALL.md §4).
+      - "${JAD_PORT:-8787}:8787"              # 관리 UI — ⚠️ 인터넷 노출 금지.
+      #                                        공개 호스트면 "127.0.0.1:${JAD_PORT:-8787}:8787" 로 바꾸고 SSH 터널로 접근하라(INSTALL.md §4).
+      #                                        한 호스트에 여러 인스턴스면 .env 의 JAD_PORT 를 인스턴스마다 다르게 준다(컨테이너 쪽 8787 은 고정).
     networks:
       - jad-net
     volumes:
@@ -87,23 +110,31 @@ services:
 
   # --- worker(사용자별)는 compose에 없음 ---
   # central이 온보딩/관리 UI에서 Docker SDK로 동적 spawn 한다:
-  #   같은 image(jira-auto-dispatcher:latest) · 같은 network(jad-net) ·
-  #   ROLE=worker DISPATCH_USER=<user> · per-user 볼륨 jad-<username>(:/home/app/.claude) ·
+  #   같은 image(jira-auto-dispatcher:latest) · 같은 network(<instance>-net) ·
+  #   ROLE=worker DISPATCH_USER=<user> · per-user 볼륨 <instance>-<username>(:/home/app/.claude) ·
   #   비-root(config.spawn.run_as, 기본 1000:1000). 상세는 app/spawner.py.
-  #   워커 마운트는 **named 볼륨 2개뿐**(jad-<user> · jad-workspace)이고 bind 는 없다.
+  #   컨테이너 이름은 <instance>-worker-<username>(app/naming.py 단일 원천).
+  #   워커 마운트는 **named 볼륨 2개뿐**(<instance>-<user> · <instance>-workspace)이고 bind 는 없다.
   #   config·per-user 시크릿·알림 웹훅은 스폰 시 주입되어 워커의 tmpfs(/run/secrets)와
   #   /app/config 에 워커가 직접 기록한다.
 
 networks:
-  jad-net:
-    name: jad-net        # central·socket-proxy·동적 worker가 공유하는 사설망(spawn.network)
+  jad-net:                          # compose 키(서비스가 참조하는 이름) — 고정.
+    name: ${JAD_INSTANCE:-jad}-net  # 실제 네트워크 이름 — central·socket-proxy·동적 worker가
+    #                                 공유하는 사설망. spawner 는 config.spawn.network 의
+    #                                 **이름**으로 워커를 여기 붙인다(계약 — 같은 접두어에서 파생).
 
 volumes:
   jad-state:             # central 영속 상태
-  jad-workspace:         # 오케스트레이터 작업 공간(공유 워크스페이스 — 단일 클론)
-    name: jad-workspace  # ⚠️ 명시 이름 필수: spawner가 워커에 **같은 named 볼륨**을
+  jad-workspace:                          # 오케스트레이터 작업 공간(공유 워크스페이스 — 단일 클론)
+    name: ${JAD_INSTANCE:-jad}-workspace  # ⚠️ 명시 이름 필수: spawner가 워커에 **같은 named 볼륨**을
     #                      이 이름으로 마운트한다(config.spawn.workspace_volume, 기본
     #                      jad-workspace) → central·모든 워커가 레포 한 벌 공유(설계 §4).
     #                      compose 프로젝트 프리픽스가 붙으면 워커 마운트명과 어긋나므로
-    #                      name을 고정한다(jad-net과 동일 패턴).
-  # 참고: worker per-user 볼륨(jad-<username>)은 spawner가 런타임에 생성한다(여기 선언 안 함).
+    #                      name을 고정한다(jad-net과 동일 패턴). 인스턴스 접두어는 그 고정을
+    #                      풀지 않고 **통째로 옮긴다** — 두 인스턴스가 워크스페이스를 공유하면
+    #                      서로의 레포 클론·레포락 장부를 밟는다.
+  # 참고: worker per-user 볼륨(<instance>-<username>)은 spawner가 런타임에 생성한다(여기 선언 안 함).
+  # 참고: jad-state 는 name 을 고정하지 않는다 — compose 프로젝트 접두어가 붙어
+  #       인스턴스별로 이미 갈린다(별도 디렉토리 = 다른 프로젝트명). 이름을 박으면
+  #       기존 배포의 상태 볼륨이 바뀌므로 그대로 둔다.

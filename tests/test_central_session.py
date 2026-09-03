@@ -529,6 +529,25 @@ def test_build_worker_exec_command_subsequent_uses_resume_same_sid(tmp_path):
     assert later[-1] == "HAN-1"
 
 
+def test_build_worker_exec_command_follows_the_instance_prefix(tmp_path):
+    """docker exec 가 때리는 이름은 **spawner 가 실제로 지은 이름**이어야 한다.
+
+    접두어가 갈라지면 프랙탈 PUSH 는 없는 컨테이너를 때린다 — 한 호스트 다중 인스턴스에서
+    가장 조용한 실패다. 그래서 조립 단일 원천(app/naming.py)에서 파생한다.
+    """
+    cfg = _cfg(tmp_path)
+    # deploy 섹션이 없으면 기본 인스턴스 — 예전 이름 그대로.
+    assert cs.build_worker_exec_command("yhchoi", "HAN-1", first=True, config=cfg)[2]         == "jad-worker-yhchoi"
+
+    cfg.deploy = SimpleNamespace(instance="jad-stg")
+    assert cs.build_worker_exec_command("yhchoi", "HAN-1", first=True, config=cfg)[2]         == "jad-stg-worker-yhchoi"
+
+    # 명시 접두어는 존중한다(호출부가 이미 이름을 아는 경우).
+    cmd = cs.build_worker_exec_command("yhchoi", "HAN-1", first=True, config=cfg,
+                                       container_prefix="custom-")
+    assert cmd[2] == "custom-yhchoi"
+
+
 def test_build_worker_exec_command_uses_instruction_when_given(tmp_path):
     cfg = _cfg(tmp_path)
     cmd = cs.build_worker_exec_command(

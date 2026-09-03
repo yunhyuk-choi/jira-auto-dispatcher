@@ -585,3 +585,72 @@ secrets: { base_dir: "${SECRETS_DIR}" }
 """))
     assert cfg.jira.project == "PROJ"
     assert cfg.jira.projects == ["TEAM"]
+
+
+# ---------------------------------------------------------------------------
+# 인스턴스 이름(deploy.instance / env JAD_INSTANCE) — 한 호스트 다중 인스턴스
+# ---------------------------------------------------------------------------
+
+_MINIMAL = """
+role: central
+jira: { base_url: https://x, project: PROJ, watcher_token_file: t }
+secrets: { base_dir: "${SECRETS_DIR}" }
+"""
+
+
+def test_default_instance_leaves_every_name_exactly_as_before(tmp_path, monkeypatch):
+    """기본값은 **한 글자도 달라지지 않는다** — 기존 배포 무변경이 이 기능의 전제다."""
+    monkeypatch.setenv("SECRETS_DIR", "/run/secrets")
+    monkeypatch.delenv("JAD_INSTANCE", raising=False)
+    cfg = C.load_config(_write(tmp_path, _MINIMAL))
+    assert cfg.deploy.instance == "jad"
+    assert cfg.spawn.network == "jad-net"
+    assert cfg.spawn.workspace_volume == "jad-workspace"
+    assert cfg.deploy.workspace_volume == "jad-workspace"
+
+
+def test_instance_name_moves_the_derived_names(tmp_path, monkeypatch):
+    """인스턴스 이름 하나가 네트워크·공유 볼륨 이름을 통째로 옮긴다."""
+    monkeypatch.setenv("SECRETS_DIR", "/run/secrets")
+    monkeypatch.delenv("JAD_INSTANCE", raising=False)
+    cfg = C.load_config(_write(tmp_path, _MINIMAL + "deploy: { instance: jad-stg }\n"))
+    assert cfg.spawn.network == "jad-stg-net"
+    assert cfg.spawn.workspace_volume == "jad-stg-workspace"
+
+
+def test_explicit_names_beat_the_instance_derivation(tmp_path, monkeypatch):
+    """이름을 직접 적어 둔 배포는 인스턴스가 바뀌어도 흔들리지 않는다(명시 = 의사표시)."""
+    monkeypatch.setenv("SECRETS_DIR", "/run/secrets")
+    monkeypatch.setenv("JAD_INSTANCE", "jad-stg")
+    cfg = C.load_config(_write(tmp_path, _MINIMAL + """
+deploy: { instance: jad-stg, workspace_volume: shared-ws }
+spawn: { network: legacy-net }
+"""))
+    assert cfg.spawn.network == "legacy-net"
+    assert cfg.spawn.workspace_volume == "shared-ws"
+
+
+def test_env_instance_wins_over_config_and_says_so(tmp_path, monkeypatch, caplog):
+    """env 는 **compose 가 실제로 만든 이름**이다 — config.yaml 과 어긋나면 env 를 따른다.
+
+    조용히 한쪽을 버리지는 않는다(왜 이름이 다른지 추적 불가능해진다).
+    """
+    monkeypatch.setenv("SECRETS_DIR", "/run/secrets")
+    monkeypatch.setenv("JAD_INSTANCE", "jad-prod")
+    with caplog.at_level("ERROR", logger="jad.config"):
+        cfg = C.load_config(_write(tmp_path, _MINIMAL + "deploy: { instance: jad-stg }\n"))
+    assert cfg.deploy.instance == "jad-prod"
+    assert cfg.spawn.network == "jad-prod-net"
+    assert cfg.spawn.workspace_volume == "jad-prod-workspace"
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert "jad-prod" in logged and "jad-stg" in logged
+
+
+def test_env_instance_alone_is_enough(tmp_path, monkeypatch):
+    """config.yaml 을 손대지 않아도 ``.env`` 한 줄로 인스턴스가 갈린다(권장 경로)."""
+    monkeypatch.setenv("SECRETS_DIR", "/run/secrets")
+    monkeypatch.setenv("JAD_INSTANCE", "jad-stg")
+    cfg = C.load_config(_write(tmp_path, _MINIMAL))
+    assert cfg.deploy.instance == "jad-stg"
+    assert cfg.spawn.network == "jad-stg-net"
+    assert cfg.spawn.workspace_volume == "jad-stg-workspace"

@@ -40,6 +40,14 @@ consent:
 # 없다. 기존 config.yaml 에 그 키가 남아 있어도 무시된다(무해).
 deploy:
   profile: cloud_vm
+  # 인스턴스 이름 — 이 배포가 만드는 docker 리소스 이름의 접두어(기본 jad).
+  # 한 호스트에 여러 벌(평가·스테이징·프로덕션)을 띄울 때만 바꾼다. 여기서 네트워크
+  # (<instance>-net)·공유 볼륨(<instance>-workspace)·워커 컨테이너(<instance>-worker-<user>)·
+  # per-user 볼륨(<instance>-<user>)이 파생된다.
+  # ⚠️ compose 도 같은 값을 봐야 한다 — 정본은 .env 의 JAD_INSTANCE 이고(compose 가 그 값으로
+  #    실제 리소스를 만든 뒤 central 에 env 로 넘긴다) env 가 이 키를 **이긴다**. 어긋나면
+  #    부팅 로그에 ERROR 가 뜬다. 한 벌만 띄운다면 이 줄은 없어도 된다.
+  # instance: jad
   docker_host: tcp://socket-proxy:2375     # 전 프로파일 공통 기본. 직결 대안:
                                            # unix:///var/run/docker.sock (호스트 root 동치)
   # 시크릿 파일들의 루트(값 아님, 경로). 호스트 OS 무관 — 로컬 개발이면 임의의 로컬
