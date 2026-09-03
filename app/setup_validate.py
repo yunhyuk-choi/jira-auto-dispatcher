@@ -70,6 +70,8 @@ CODE_BAD_TYPE = "bad_type"                        # 선언 타입과 불일치
 CODE_BAD_FORMAT = "bad_format"                    # 선언 모양(pattern) 위반
 CODE_SECRET_VALUE = "secret_value"                # 참조 자리에 시크릿 "값"이 왔다
 CODE_CONSENT_REQUIRED = "consent_required"        # 풀 퍼미션 동의 미승인
+CODE_CONSENT_UNATTESTED = "consent_unattested"    # 동의는 true 인데 **출처 증서**가 없다
+CODE_CONSENT_RELAYED = "consent_relayed"          # (경고) 사람이 아니라 상위가 중계한 동의
 CODE_PLACEHOLDER = "placeholder_value"            # <PROJECT_KEY> 같은 예시 자리표시자
 CODE_LEGACY_KEY = "legacy_key"                    # (경고) 옛 키로 줬다 — 읽히긴 한다
 CODE_UNKNOWN_KEY = "unknown_key"                  # (경고) 스키마에 없는 키
@@ -595,6 +597,32 @@ def _check_consent(values: Mapping, key: str, hint: str) -> list:
     )]
 
 
+def _check_attestation(values: Mapping, key: str, record: Any) -> list:
+    """동의의 **출처**를 검사한다 — "누가 동의했는가"에 답이 있는가.
+
+    :func:`_check_consent` 가 "동의했다고 적혀 있는가"를 본다면, 여기는 **그 적힘이
+    사람에게서 왔는가**를 본다. 3차 리허설에서 온보딩 서브 에이전트가 답변 파일에
+    ``consent.full_permissions: true`` 를 스스로 적어 통과시킨 실측 결함이 이 검사의
+    존재 이유다 — 답변 파일은 에이전트가 자유롭게 쓰는 작업 파일이므로, 그 안의 불리언
+    하나는 사람의 동의가 될 수 없다.
+
+    판정 논리는 :func:`app.setup_consent.attestation_problem` (순수 술어)이 소유하고,
+    여기서는 :class:`Finding` 으로 감싸기만 한다 — 게이트가 두 벌이 되면 갈라진다.
+    """
+    from app import setup_consent as C  # 지연 import(순환 방지 · 이 경로에서만 필요)
+
+    problem = C.attestation_problem(values.get(key), record)
+    if problem is not None:
+        return [Finding(LEVEL_ERROR, key, CODE_CONSENT_UNATTESTED,
+                        problem.message, problem.hint)]
+    if record is not None and record.full_permissions and record.relayed:
+        # 중계는 **정당한 경로**이지만 사람이 직접 누른 것과 같지 않다. 막지는 않되
+        # 매번 드러낸다(조용한 실패 금지 — 이 리포의 반복 주제).
+        return [Finding(LEVEL_WARNING, key, CODE_CONSENT_RELAYED,
+                        f"동의 출처: {record.describe()}.", C.RELAY_CAVEAT)]
+    return []
+
+
 #: 설치자용 동의 힌트(기본값). per-user 소비처는 자기 문구를 주입한다.
 CONSENT_HINT_SETUP = (
     "이 시스템은 사람 승인 없이 셸·파일 쓰기·git push 를 하는 에이전트를 헤드리스로 "
@@ -640,6 +668,8 @@ def validate_answers(
     accepted_at_key: str = "consent.accepted_at",
     allow_secret_values: bool = False,
     closed_sections: Optional[tuple] = None,
+    attestation: Any = None,
+    require_attestation: bool = False,
 ) -> ValidationResult:
     """수집된 답변을 스키마 선언에 대고 검증한다(**공개 진입점**).
 
@@ -658,6 +688,13 @@ def validate_answers(
             True 로 부른다(그 규율은 :func:`app.onboarding._write_secret` 이 지킨다).
         closed_sections: 모르는 키를 경고할 섹션 목록. 생략하면 :data:`CLOSED_SECTIONS`.
             빈 튜플을 주면 모르는 키를 경고하지 않는다.
+        attestation: 동의 증서(:class:`app.setup_consent.ConsentRecord`) 또는 ``None``.
+            :func:`app.setup_consent.load_record` 가 만든다.
+        require_attestation: 동의의 **출처**까지 강제할 것인가. 기본 False —
+            per-user 온보딩처럼 동의 주체가 다른 소비처와, 증서 개념이 없는 라이브러리
+            호출을 깨지 않기 위해서다. **설치 관문 CLI(``python -m app.setup
+            validate``·``render``·``wizard``)는 True 로 부른다** — 이 리포의 규율대로
+            강제성의 원천은 지시가 아니라 종료코드다.
 
     Returns:
         :class:`ValidationResult`. ``result.ok`` 가 False 면 호출부는 **반드시** 실패로
@@ -672,7 +709,9 @@ def validate_answers(
         5. 참조 자리에 시크릿 **값**(값이 아니라 참조 규율)
         6. 예시 자리표시자(``<PROJECT_KEY>``)가 그대로 남음
         7. 풀 퍼미션 동의 미승인
-        8. (경고) 레거시 키 사용 · 모르는 키 · 미치환 ``${VAR}`` · 동의 시각 형식
+        7.5. (``require_attestation``) 동의의 **출처** — 사람에게서 온 증서가 있는가
+        8. (경고) 레거시 키 사용 · 모르는 키 · 미치환 ``${VAR}`` · 동의 시각 형식 ·
+           중계 동의
     """
     sections = _sections(sections)
     closed = CLOSED_SECTIONS if closed_sections is None else tuple(closed_sections)
@@ -781,6 +820,10 @@ def validate_answers(
     # --- 7. 동의 게이트 ------------------------------------------------------
     findings.extend(_check_consent(values, consent_key,
                                    consent_hint or CONSENT_HINT_SETUP))
+
+    # --- 7.5. 동의의 **출처** 게이트(설치 관문에서만) --------------------------
+    if require_attestation:
+        findings.extend(_check_attestation(values, consent_key, attestation))
 
     # --- 8. 경고: 동의 시각 형식 ---------------------------------------------
     accepted = values.get(accepted_at_key)

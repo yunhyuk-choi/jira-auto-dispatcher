@@ -175,6 +175,9 @@ _KEY_TO_ATTR = {
     "spawn.network": "spawn.network",
     "consent.full_permissions": "consent.full_permissions",
     "consent.accepted_at": "consent.accepted_at",
+    "consent.channel": "consent.channel",
+    "consent.granted_by": "consent.granted_by",
+    "consent.relayed_by": "consent.relayed_by",
 }
 
 

@@ -165,6 +165,20 @@ class ConsentConfig:
     full_permissions: bool = False
     accepted_at: str = ""   # ISO-8601 동의 시각(감사 흔적)
 
+    # --- 동의의 **출처**(설치 관문이 동의 증서에서 옮겨 적는다) -----------------
+    # 3차 리허설에서 온보딩 **서브 에이전트가 동의를 자기 승인**했다. 그래서 동의는
+    # 이제 "누가·어느 채널로" 를 함께 기록한다(app/setup_consent.py 가 정본이고
+    # setup_render 가 여기로 옮겨 적는다). 런타임은 이 값을 **강제하지 않는다** —
+    # 출처 키가 없던 기존 배포를 깨지 않기 위해 경고만 남긴다(:func:`_validate`).
+    channel: str = ""       # human_interactive | orchestrator_relay | "" (출처 불명)
+    granted_by: str = ""    # 동의한 사람의 식별자
+    relayed_by: str = ""    # 중계한 오케스트레이터(channel 이 orchestrator_relay 일 때)
+
+    @property
+    def relayed(self) -> bool:
+        """사람이 직접 입력한 것이 아니라 상위가 중계한 동의인가."""
+        return self.channel == "orchestrator_relay"
+
 
 @dataclass
 class JiraConfig:
@@ -976,6 +990,9 @@ def _build_config(raw: dict, *, validate: bool = True) -> AppConfig:
         consent=ConsentConfig(
             full_permissions=bool(consent.get("full_permissions", False)),
             accepted_at=str(consent.get("accepted_at", "") or ""),
+            channel=str(consent.get("channel", "") or "").strip(),
+            granted_by=str(consent.get("granted_by", "") or ""),
+            relayed_by=str(consent.get("relayed_by", "") or ""),
         ),
     )
 
@@ -1282,6 +1299,21 @@ def _validate(cfg: AppConfig) -> None:
             "consent.full_permissions 가 설정되지 않았습니다 — 이 시스템은 사람 승인 없이 "
             "도구 권한을 가진 에이전트를 헤드리스로 실행합니다. config.yaml 의 consent 섹션에 "
             "명시 동의를 남기세요(기존 배포 호환을 위해 지금은 경고만 합니다)."
+        )
+    elif cfg.role == "central" and not cfg.consent.channel:
+        # 동의는 있는데 **출처가 없다**. 출처 키가 없던 시절의 설정일 수도 있고, 누군가
+        # config.yaml 에 true 만 적은 것일 수도 있다 — 둘을 구별할 방법이 없으므로
+        # 부팅을 막지는 않되(하위호환) 조용히 넘어가지도 않는다.
+        log.warning(
+            "consent.full_permissions 는 true 인데 consent.channel 이 비어 있습니다 — "
+            "이 동의가 **누구에게서 왔는지 알 수 없습니다**. `python -m app.setup consent` "
+            "로 사람 동의를 기록하고 render 로 다시 생성하면 출처가 남습니다."
+        )
+    elif cfg.role == "central" and cfg.consent.relayed:
+        log.warning(
+            "풀 퍼미션 동의가 **중계**로 기록돼 있습니다: %s 의 동의를 %s 가 전달 — "
+            "사람이 직접 입력한 것이 아닙니다.",
+            cfg.consent.granted_by or "?", cfg.consent.relayed_by or "?",
         )
 
 

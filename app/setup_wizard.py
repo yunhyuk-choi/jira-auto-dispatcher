@@ -46,8 +46,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
-from app import (inject, setup_autofill, setup_discover, setup_doctor,
-                 setup_render, setup_schema as S, setup_skill, setup_validate)
+from app import (inject, setup_autofill, setup_consent, setup_discover,
+                 setup_doctor, setup_render, setup_schema as S, setup_skill,
+                 setup_validate)
 
 #: 종료코드 — :mod:`app.setup` 과 **같은 계약**(테스트가 드리프트를 잡는다).
 EXIT_OK = 0
@@ -281,6 +282,9 @@ class _Session:
     now: Callable = None            # -> ISO-8601 문자열
     token: Callable = None          # -> 고엔트로피 문자열
     notes: list = field(default_factory=list)
+    #: 이 세션에서 만들어졌거나 이미 있던 **동의 증서**(app.setup_consent.ConsentRecord).
+    #: 마법사는 정의상 *사람 채널* 이므로 여기서 human_interactive 증서를 만든다.
+    consent: Any = None
 
     def set(self, key: str, value: Any) -> None:
         """답변 하나를 기록하고 **즉시 파일에 저장**한다(중단 대비)."""
@@ -586,10 +590,53 @@ def _step_consent(s: _Session) -> None:
     s.io.say("이 시스템은 사람의 매 단계 승인 없이 파일 쓰기·셸 실행·git push 권한을 가진")
     s.io.say("코딩 에이전트를 헤드리스로 실행합니다. 관리 UI(8787)와 worker 는 그 자체로")
     s.io.say("원격 코드 실행 표면이라 인터넷에 노출하면 안 됩니다(정본: SECURITY.md).")
+    existing = _load_consent_record(s)
+    if existing is not None and existing.full_permissions:
+        s.io.say("")
+        s.io.say(f"  이미 기록된 동의가 있습니다 — {existing.describe()}")
+        s.consent = existing
+        _apply_consent(s, existing)
+        return
     agreed = ask_field(s, CONSENT_KEY, default=bool(s.get(CONSENT_KEY, False)),
                        prompt=CONSENT_PROMPT)
-    if agreed and not s.get("consent.accepted_at"):
-        s.set("consent.accepted_at", s.now())
+    if not agreed:
+        return
+    # ⚠️ 동의는 답변 파일의 불리언 하나로 끝나지 않는다 — **누가 동의했는지**를 증서로
+    # 남긴다(app/setup_consent.py). 마법사는 터미널 앞의 사람이 쓰는 경로이므로 여기서
+    # human_interactive 증서를 만든다. 서브 에이전트는 이 경로를 쓸 수 없다
+    # (run_wizard 진입에서 막힌다).
+    who = s.get("consent.granted_by") or s.io.ask(
+        "  동의하는 사람(이름 또는 이메일)", default="")
+    record = setup_consent.ConsentRecord(
+        full_permissions=True,
+        accepted_at=s.get("consent.accepted_at") or s.now(),
+        channel=setup_consent.CHANNEL_HUMAN,
+        granted_by=str(who or "").strip() or "(미기재)",
+    )
+    try:
+        path = setup_consent.save_record(record, project_dir=s.options.project_dir)
+        s.io.say(f"  동의 증서를 기록했습니다: {path}")
+    except OSError as exc:
+        # 증서를 못 쓰면 검증이 막는다 — 조용히 넘어가지 않고 지금 말한다.
+        s.io.say(f"  ⚠️ 동의 증서를 저장하지 못했습니다: {exc}")
+        s.io.say("     이 상태로는 검증이 consent_unattested 로 막습니다.")
+    s.consent = record
+    _apply_consent(s, record)
+
+
+def _load_consent_record(s: _Session):
+    """이미 있는 동의 증서를 읽는다(없거나 깨졌으면 None + 안내)."""
+    try:
+        return setup_consent.load_record(project_dir=s.options.project_dir)
+    except setup_consent.ConsentError as exc:
+        s.io.say(f"  ⚠️ 기존 동의 증서를 쓸 수 없습니다: {exc}")
+        return None
+
+
+def _apply_consent(s: _Session, record) -> None:
+    """증서의 내용을 답변에 반영한다(증서가 정본 — 답변은 그 사본)."""
+    for key, value in record.config_values().items():
+        s.set(key, value)
 
 
 def _step_jira(s: _Session) -> None:
@@ -895,7 +942,8 @@ def _step_validate(s: _Session):
     s.io.heading("9. 검증 (python -m app.setup validate 와 같은 게이트)")
     while True:
         report = _autofill(s)
-        result = setup_validate.validate_answers(report.answers)
+        result = setup_validate.validate_answers(
+            report.answers, attestation=s.consent, require_attestation=True)
         s.io.say(result.format_text())
         if result.ok:
             return result
@@ -1041,6 +1089,16 @@ def run_wizard(io: WizardIO, options: WizardOptions, *,
     중단(Ctrl-C·Ctrl-D)은 실패가 아니다 — 여태 모은 답을 저장하고 이어서 할 방법을
     알린 뒤 non-zero 로 끝낸다(설치가 **완료되지 않았음**은 종료코드로 남긴다).
     """
+    # ⚠️ 마법사는 **사람 채널**이다 — 여기서 동의 증서(human_interactive)가 만들어진다.
+    #    서브 에이전트가 이 경로로 들어오면 그 자체가 자기 승인이 되므로 막는다(룰북도
+    #    "wizard 를 쓰지 마라"라고 말하지만, 지시가 아니라 종료코드가 강제해야 한다).
+    if setup_consent.is_subagent():
+        io.say(f"{setup_consent.ACTOR_ENV}={setup_consent.actor()} — 서브 에이전트는 "
+               f"wizard 를 쓸 수 없습니다(대화형 stdin · 사람 동의 채널).")
+        io.say("비대화형 CLI(discover → validate → render → doctor)를 쓰고, 동의는 "
+               "`python -m app.setup consent --request` 로 상위에 요청하세요.")
+        return EXIT_GATE_FAILED
+
     session = _Session(
         io=io, options=options,
         answers=read_answers(options.answers_path),

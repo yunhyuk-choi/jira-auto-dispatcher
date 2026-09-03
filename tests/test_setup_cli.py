@@ -36,12 +36,37 @@ NO_CONSENT = {**GOOD_ANSWERS, "consent": {"full_permissions": False}}
 @pytest.fixture(autouse=True)
 def _no_ambient_env(monkeypatch):
     for name in ("HOST_DEPLOY_DIR", "SECRETS_DIR", "JIRA_WATCHER_EMAIL",
-                 "DLC_META_DIR"):
+                 "DLC_META_DIR", "JAD_SETUP_ACTOR"):
         monkeypatch.delenv(name, raising=False)
 
 
+def _grant_consent(tmp_path, **kwargs) -> str:
+    """사람 동의 **증서**를 tmp 에 만든다 → 그 경로.
+
+    3차 리허설 이후 답변 파일의 ``consent.full_permissions: true`` 만으로는 통과하지
+    않는다 — 동의가 **어디서 왔는지**를 증명하는 증서가 있어야 한다
+    (:mod:`app.setup_consent`). 정상 경로 테스트는 사람이 동의한 상태를 재현한다.
+    """
+    from app import setup_consent as C
+
+    record = C.ConsentRecord(
+        full_permissions=kwargs.get("full_permissions", True),
+        accepted_at="2026-08-25T09:00:00+09:00",
+        channel=kwargs.get("channel", C.CHANNEL_HUMAN),
+        granted_by=kwargs.get("granted_by", "installer@acme.example"),
+        relayed_by=kwargs.get("relayed_by", ""),
+        statement=kwargs.get("statement", ""),
+    )
+    return C.save_record(record, project_dir=str(tmp_path))
+
+
 def _render_args(tmp_path) -> list:
-    """render 의 부수효과(dlc-meta 자동 탐색 기준점)를 tmp 안에 가둔다."""
+    """render 의 부수효과(dlc-meta 자동 탐색 기준점)를 tmp 안에 가둔다.
+
+    ⚠️ 여기서 동의 증서도 함께 만든다 — ``--project-dir`` 가 증서를 찾는 기준점이기도
+    하다. 증서 없는 경로는 아래 전용 테스트가 따로 본다.
+    """
+    _grant_consent(tmp_path)
     return ["--project-dir", str(tmp_path)]
 
 
@@ -55,7 +80,8 @@ def _write_json(tmp_path, name, payload) -> str:
 
 
 def test_validate_passes_with_exit_zero(tmp_path, capsys):
-    assert CLI.main(["validate", _write_json(tmp_path, "a.json", GOOD_ANSWERS)]) == 0
+    assert CLI.main(["validate", _write_json(tmp_path, "a.json", GOOD_ANSWERS)]
+                    + _render_args(tmp_path)) == 0
     assert "검증 통과" in capsys.readouterr().out
 
 
@@ -73,11 +99,11 @@ def test_validate_json_output_is_machine_readable(tmp_path, capsys):
     assert {"level", "key", "code", "message", "hint"} == set(payload["findings"][0])
 
 
-def test_validate_reads_stdin(monkeypatch, capsys):
+def test_validate_reads_stdin(monkeypatch, capsys, tmp_path):
     import io
 
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(GOOD_ANSWERS)))
-    assert CLI.main(["validate"]) == 0
+    assert CLI.main(["validate", "--consent-record", _grant_consent(tmp_path)]) == 0
     assert "검증 통과" in capsys.readouterr().out
 
 
@@ -163,9 +189,11 @@ def test_render_keeps_an_explicit_docker_host_over_the_profile(tmp_path, capsys)
 
 
 def test_render_refuses_when_validation_fails(tmp_path, capsys):
+    # ⚠️ 여기서는 동의 증서를 만들지 **않는다** — 증서가 있으면 그것이 정본이라 답변의
+    #    false 를 덮어쓴다(증서가 이긴다). 검증 실패를 보려면 동의 자체가 없어야 한다.
     out = str(tmp_path / "config.yaml")
-    code = CLI.main(["render", _write_json(tmp_path, "a.json", NO_CONSENT), "-o", out]
-                    + _render_args(tmp_path))
+    code = CLI.main(["render", _write_json(tmp_path, "a.json", NO_CONSENT), "-o", out,
+                     "--project-dir", str(tmp_path)])
     assert code == CLI.EXIT_GATE_FAILED
     assert not os.path.exists(out)          # 검증 못 넘으면 산출물이 없다
     assert "생성하지 않았습니다" in capsys.readouterr().err
@@ -557,3 +585,100 @@ def test_retired_env_secret_flags_are_gone(tmp_path):
         with pytest.raises(SystemExit) as exc:
             CLI.main(["render", answers, "-o", out] + flag + _render_args(tmp_path))
         assert exc.value.code == 2                          # argparse: 모르는 인자
+
+
+# --- consent — 동의는 사람에게서만 온다(3차 리허설 C1) --------------------------
+#
+# 온보딩 **서브 에이전트가 동의를 자기 승인**한 실측 결함을 닫은 자리다. 여기서는 CLI
+# 계약만 본다(판정 로직은 tests/test_setup_consent.py).
+
+
+def test_a_subagent_can_only_return_a_consent_request(tmp_path, monkeypatch, capsys):
+    """서브 경로에서 할 수 있는 유일한 동작 — 요청서 반환. 파일은 만들어지지 않는다."""
+    monkeypatch.setenv("JAD_SETUP_ACTOR", "subagent")
+    assert CLI.main(["consent", "--request", "--json",
+                     "--project-dir", str(tmp_path)]) == CLI.EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["kind"] == "consent_request"
+    assert "--relay" in payload["relay_command"]
+    assert not (tmp_path / "setup-consent.json").exists()
+
+
+def test_a_subagent_cannot_relay_consent_to_itself(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("JAD_SETUP_ACTOR", "subagent")
+    code = CLI.main(["consent", "--relay", "--granted-by", "사용자",
+                     "--statement", "풀 퍼미션으로 돌려도 좋습니다",
+                     "--relayed-by", "onboarding-sub",
+                     "--project-dir", str(tmp_path)])
+    assert code == CLI.EXIT_GATE_FAILED
+    assert "서브 에이전트는 동의를 만들 수 없습니다" in capsys.readouterr().err
+    assert not (tmp_path / "setup-consent.json").exists()
+
+
+def test_a_headless_session_cannot_press_the_human_button(tmp_path, capsys):
+    """pytest 의 stdin 은 TTY 가 아니다 — 헤드리스 세션이 정확히 이 모양이다."""
+    assert CLI.main(["consent", "--project-dir", str(tmp_path)]) == CLI.EXIT_GATE_FAILED
+    assert "이 채널에는 사람이 없습니다" in capsys.readouterr().err
+    assert not (tmp_path / "setup-consent.json").exists()
+
+
+def test_the_orchestrator_can_relay_and_show_a_human_consent(tmp_path, capsys):
+    assert CLI.main(["consent", "--relay", "--granted-by", "yh.choi@acme.example",
+                     "--statement", "풀 퍼미션으로 돌려도 좋습니다. 위험은 이해했습니다.",
+                     "--relayed-by", "orchestrator",
+                     "--project-dir", str(tmp_path)]) == CLI.EXIT_OK
+    capsys.readouterr()
+    assert CLI.main(["consent", "--show", "--json",
+                     "--project-dir", str(tmp_path)]) == CLI.EXIT_OK
+    record = json.loads(capsys.readouterr().out)["record"]
+    assert record["channel"] == "orchestrator_relay"
+    assert record["granted_by"] == "yh.choi@acme.example"
+
+
+def test_show_without_a_record_is_a_gate_failure(tmp_path):
+    assert CLI.main(["consent", "--show",
+                     "--project-dir", str(tmp_path)]) == CLI.EXIT_GATE_FAILED
+
+
+def test_validate_blocks_an_answer_file_that_consented_to_itself(tmp_path, capsys):
+    """C1 실증 — 답변에 true 만 있고 증서가 없으면 **그 자리에서 시끄럽게** 멈춘다."""
+    code = CLI.main(["validate", _write_json(tmp_path, "a.json", GOOD_ANSWERS),
+                     "--json", "--project-dir", str(tmp_path)])
+    assert code == CLI.EXIT_GATE_FAILED
+    payload = json.loads(capsys.readouterr().out)
+    assert any(f["code"] == "consent_unattested" for f in payload["findings"])
+
+
+def test_render_copies_the_consent_provenance_into_the_config(tmp_path):
+    """동의의 출처는 증서가 정본 — config.yaml 은 그 사본이다."""
+    _grant_consent(tmp_path, channel="orchestrator_relay", granted_by="사용자",
+                   relayed_by="orchestrator", statement="풀 퍼미션으로 돌려도 좋습니다")
+    out = str(tmp_path / "config.yaml")
+    assert CLI.main(["render", _write_json(tmp_path, "a.json", GOOD_ANSWERS),
+                     "-o", out, "--project-dir", str(tmp_path)]) == CLI.EXIT_OK
+    import yaml
+
+    consent = yaml.safe_load(open(out, encoding="utf-8"))["consent"]
+    assert consent["full_permissions"] is True
+    assert consent["channel"] == "orchestrator_relay"
+    assert consent["granted_by"] == "사용자"
+    assert consent["relayed_by"] == "orchestrator"
+    # ⚠️ 사람의 원문은 설정 파일로 가지 않는다(설정은 컨테이너로 마운트된다).
+    assert "돌려도 좋습니다" not in open(out, encoding="utf-8").read()
+
+
+def test_the_answer_file_does_not_need_to_mention_consent_at_all(tmp_path, capsys):
+    """증서가 정본이므로 온보딩 에이전트는 동의를 **적을 이유가 없다**(적어도 무의미)."""
+    answers = {k: v for k, v in GOOD_ANSWERS.items() if k != "consent"}
+    assert CLI.main(["validate", _write_json(tmp_path, "a.json", answers)]
+                    + _render_args(tmp_path)) == CLI.EXIT_OK
+
+
+def test_a_record_that_denies_consent_beats_an_answer_that_grants_it(tmp_path, capsys):
+    """거부 증서는 답변의 true 를 덮어쓰지 않는다 — 그 모순 자체가 오류여야 한다."""
+    _grant_consent(tmp_path, full_permissions=False)
+    code = CLI.main(["validate", _write_json(tmp_path, "a.json", GOOD_ANSWERS),
+                     "--json", "--project-dir", str(tmp_path)])
+    assert code == CLI.EXIT_GATE_FAILED
+    payload = json.loads(capsys.readouterr().out)
+    assert any(f["code"] == "consent_unattested" for f in payload["findings"])

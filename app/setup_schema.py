@@ -227,6 +227,19 @@ FORGE_KINDS: Tuple = ("gitlab", "github")
 #: 지원 알림 채널. ``none`` 이 기본 — 알림 없이도 시스템은 완전히 동작한다.
 NOTIFIER_PROVIDERS: Tuple = ("none", "google_chat", "slack", "generic_webhook")
 
+#: 풀 퍼미션 동의가 올 수 있는 **채널**(정본 구현은 :mod:`app.setup_consent`).
+#: 여기에 문자열을 다시 적는 이유는 스키마가 :mod:`app.setup_consent` 를 import 하면
+#: 순환이 생기기 때문이다(consent → schema 방향은 없지만 validate·render 가 둘 다
+#: 읽는다). 두 곳이 갈라지지 않도록 ``tests/test_setup_schema.py`` 가 동일성을 강제한다.
+CONSENT_CHANNEL_HUMAN = "human_interactive"
+CONSENT_CHANNEL_RELAY = "orchestrator_relay"
+CONSENT_CHANNELS: Tuple = (CONSENT_CHANNEL_HUMAN, CONSENT_CHANNEL_RELAY)
+
+#: ``consent.channel`` 필드가 허용하는 값 — 위 둘 **+ 빈 값**. 빈 값은 "출처 불명"이며
+#: 출처 키가 없던 시절의 기존 배포가 그 상태다(하위호환). 빈 값이 통과한다고 해서 동의
+#: 자체가 통과하는 것은 아니다 — 그 게이트는 **동의 증서**가 따로 본다.
+CONSENT_CHANNEL_CHOICES: Tuple = ("",) + CONSENT_CHANNELS
+
 
 # ---------------------------------------------------------------------------
 # 스키마 선언
@@ -737,6 +750,45 @@ _CONSENT = SchemaSection(
             default="",
             description="동의 시각(ISO-8601, 예: 2026-08-25T09:00:00+09:00). 감사 흔적.",
             example="2026-08-25T09:00:00+09:00",
+        ),
+        # --- 동의의 **출처**(누가·어느 채널로) ---------------------------------
+        # ⚠️ 아래 세 항목은 **묻는 항목이 아니다.** `python -m app.setup consent` 가 만든
+        #    동의 증서(setup-consent.json)에서 render 가 그대로 옮겨 적는다. 그래서
+        #    required 로 선언하지 않는다 — 게이트는 "답변에 이 키가 있는가"가 아니라
+        #    **증서가 실재하는가**이고(consent_unattested), 게이트가 두 벌이면 반드시
+        #    갈라진다. 답변 파일에 손으로 적어도 증서가 없으면 통과하지 못한다. 3차
+        #    리허설에서 온보딩 서브가 동의를 **자기 승인**한 실측 결함을 닫은 자리다.
+        SchemaField(
+            key="consent.channel",
+            type=FieldType.ENUM,
+            choices=CONSENT_CHANNEL_CHOICES,
+            default="",
+            description=(
+                "동의가 온 채널. ``human_interactive`` = 터미널 앞의 사람이 직접 입력 / "
+                "``orchestrator_relay`` = 사용자 채널을 가진 상위가 사람에게서 받아 중계. "
+                "**서브 에이전트는 어느 쪽도 만들 수 없다**(app/setup_consent.py)."
+            ),
+            example="human_interactive",
+        ),
+        SchemaField(
+            key="consent.granted_by",
+            type=FieldType.STRING,
+            default="",
+            description="동의한 **사람**의 식별자(이름 또는 이메일). 감사 흔적.",
+            example="installer@your-org.example",
+        ),
+        SchemaField(
+            key="consent.relayed_by",
+            type=FieldType.STRING,
+            required_if=RequiredIf("consent.channel",
+                                   equals=(CONSENT_CHANNEL_RELAY,)),
+            default="",
+            description=(
+                "중계한 오케스트레이터 식별자(``consent.channel`` 이 "
+                "``orchestrator_relay`` 일 때만). 사람이 직접 입력한 동의가 아님을 "
+                "설정 파일에서도 드러내기 위한 항목이다."
+            ),
+            example="orchestrator",
         ),
     ),
 )

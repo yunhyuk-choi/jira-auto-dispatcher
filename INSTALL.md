@@ -80,11 +80,28 @@ cp config/config.example.yaml config/config.yaml
 
 ### 2.1 반드시 손대는 것
 
-```yaml
-consent:
-  full_permissions: true          # ← §0 경고를 읽고 이해했다는 명시 동의(기본 false)
-  accepted_at: "2026-01-01T09:00:00+09:00"
+⚠️ **`consent:` 는 손으로 적는 값이 아니다.** 이 시스템은 "사람이 위험을 알고 풀 퍼미션을
+준다"를 전제로 돌기 때문에, 그 동의는 **사람에게서만** 와야 한다. 그래서 동의는 설정 파일의
+불리언이 아니라 **별도 증서**(`setup-consent.json`, gitignore)로 성립하고, 아래 명령이
+그 증서를 만든다. `render` 가 증서의 내용을 `config.yaml` 의 `consent:` 로 옮겨 적는다.
 
+```bash
+python -m app.setup consent      # 고지를 읽고 확인 문구를 직접 입력한다(TTY 필요)
+```
+
+증서 없이 답변 파일이나 `config.yaml` 에 `full_permissions: true` 만 적으면
+`python -m app.setup validate` 가 `consent_unattested` 로 막는다. 온보딩을 에이전트에
+맡겼다면 그 에이전트는 동의를 만들 수 없고(설계상), `python -m app.setup consent --request`
+로 **동의 요청서**를 만들어 사용자에게 올린다 — 사용자 채널을 가진 상위가 받아 전달한다:
+
+```bash
+python -m app.setup consent --relay     --granted-by "yh.choi@your-org.example"     --statement  "풀 퍼미션으로 돌려도 좋습니다. 위험은 이해했습니다."     --relayed-by "orchestrator"
+```
+
+중계로 만든 동의는 검증·진단·`config.yaml` 어디서나 **"중계된 동의"로 표시**된다 —
+사람이 직접 누른 것과 조용히 같아지지 않는다.
+
+```yaml
 deploy:
   profile: local | cloud_vm | onprem_server    # ← §2.2 표
 
@@ -275,9 +292,11 @@ python -c "import getpass,os,pathlib,secrets; d=pathlib.Path('secrets/service');
 | `skill` | (선택 · 게이트 아님) 리포가 추적하는 스킬 템플릿을 **내 로컬** `.claude/skills/` 로 펼친다 — `claude` 를 쓸 때만 의미 있다([§2.7](#27-선택-프로젝트-스킬--python--m-appsetup-skill)) | `skill-templates/` → `.claude/skills/<이름>/SKILL.md`(멱등, 덮어쓰기는 `--force`) |
 
 ```bash
+# 0) 동의부터 — 답변 파일에 적는 값이 아니다(§2.1). 증서가 없으면 validate 가 막는다.
+python -m app.setup consent
+
 cat > answers.json <<'JSON'
 {
-  "consent": {"full_permissions": true, "accepted_at": "2026-01-01T09:00:00+09:00"},
   "deploy":  {"profile": "cloud_vm",
               "secrets_base_dir": "/run/secrets"},
   "forge":   {"kind": "gitlab", "token_ref": "service/forge-token"},
@@ -612,7 +631,9 @@ docker inspect jad-central --format '{{json .Mounts}}'
 `jad-socket-proxy`)이 Up. worker 는 아직 없다 — 온보딩 후에 생긴다.
 
 **부팅 로그에 `consent.full_permissions 가 설정되지 않았습니다` 경고가 보이면**
-§2.1 의 동의 값을 아직 안 켠 것이다. 부팅은 되지만 그대로 운영하지 말라
+§2.1 의 동의를 아직 안 받은 것이다(`python -m app.setup consent`).
+`consent.channel 이 비어 있습니다` 경고라면 동의는 있는데 **출처가 없는** 것이다 —
+출처 키가 없던 시절의 설정이거나 누군가 `config.yaml` 에 직접 적은 것이다. 부팅은 되지만 그대로 운영하지 말라
 (`python -m app.setup doctor --only config` 가 같은 것을 실패로 잡는다).
 
 ### 6.0 기동 후 진단은 **central 이 스스로 돌린다**

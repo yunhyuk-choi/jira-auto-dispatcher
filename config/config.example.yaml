@@ -17,9 +17,18 @@ server: { host: 0.0.0.0, port: 8787 }
 # (파일 쓰기·셸·git push)을 가진 코딩 에이전트를 헤드리스로 실행한다. 그 위험을 이해하고
 # 감수한다는 설치자의 명시 동의를 남긴다. 기본은 false(동의 안 함)이며 사람이 직접 켜야
 # 한다. (기존 배포 호환을 위해 지금은 미동의여도 부팅은 되고 경고만 남는다.)
+# ⚠️ **동의는 이 파일을 손으로 고쳐 만드는 것이 아니다.** 아래 값들은
+# `python -m app.setup consent` 가 만든 동의 증서(setup-consent.json)에서 render 가
+# 옮겨 적는다. 증서 없이 여기에 true 만 적으면 설치 관문 validate 가 막는다
+# (consent_unattested) — 온보딩 에이전트가 동의를 자기 승인한 실측 결함을 닫은 자리다.
 consent:
   full_permissions: false
   accepted_at: ""            # 동의 시각(ISO-8601, 예: 2026-08-25T09:00:00+09:00) — 감사 흔적
+  # 동의의 출처. human_interactive = 터미널 앞의 사람이 직접 입력 /
+  #             orchestrator_relay = 사용자 채널을 가진 상위가 사람에게서 받아 중계
+  channel: ""
+  granted_by: ""             # 동의한 사람(이름 또는 이메일)
+  relayed_by: ""             # 중계한 오케스트레이터(channel 이 orchestrator_relay 일 때만)
 
 # 어디에 세우는가. profile 하나만 고르면 나머지가 파생된다(app/setup_schema.PROFILE_DEFAULTS):
 #   local         개발자 노트북 — 시크릿은 로컬 디렉토리(env SECRETS_DIR)
