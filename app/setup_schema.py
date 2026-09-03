@@ -214,12 +214,24 @@ DEPLOY_PROFILES: Tuple = tuple(PROFILE_DEFAULTS.keys())
 #: 없었다). 미설정이면 완료 전이에 그 필드를 **보내지 않으며**, 워크플로우가 요구하면
 #: Jira 가 "필수입니다"라고 정확히 말해 준다 — 남의 id 를 보내 400 을 맞는 것보다 낫다.
 #: 자기 값은 ``python -m app.setup discover --only custom_fields`` 로 실측해 채운다.
+#:
+#: ⚠️ 네 번째 원소 ``required`` 는 **설치를 멈출 자격이 있는가**를 말한다. 리허설 실측:
+#: 룰북의 "후보가 여럿이면 멈추고 물어라"가 ``actual_start``·``actual_end`` 처럼
+#: **미설정이 정상**인 필드에도 걸려, 안 써도 되는 값 때문에 설치 전체가 멈추게 돼 있었다.
+#: 필수/선택을 사람의 판단이 아니라 **선언**으로 가른다 — 판단에 맡기면 갈라진다.
+#: (필수 항목의 정지 규칙은 그대로다. 잘못 고른 id 는 검증도 진단도 통과한 뒤 운영에서
+#: 터지므로, 되돌리는 비용이 기다리는 비용보다 훨씬 크다.)
 JIRA_CUSTOM_FIELD_KEYS: Tuple = (
-    ("start_date", "착수 시 필수인 '시작날짜' 필드 id", "customfield_10015"),
-    ("due_date", "착수 시 필수인 '마감일' 필드 id", "duedate"),
-    ("actual_start", "완료 전이 시 필수인 '실제 시작일' 필드 id(없으면 비워 둔다)", ""),
-    ("actual_end", "완료 전이 시 필수인 '실제 종료일' 필드 id(없으면 비워 둔다)", ""),
+    ("start_date", "착수 시 필수인 '시작날짜' 필드 id", "customfield_10015", True),
+    ("due_date", "착수 시 필수인 '마감일' 필드 id", "duedate", True),
+    ("actual_start", "완료 전이 시 필수인 '실제 시작일' 필드 id(없으면 비워 둔다)", "", False),
+    ("actual_end", "완료 전이 시 필수인 '실제 종료일' 필드 id(없으면 비워 둔다)", "", False),
 )
+
+#: 논리 키 → 필수 여부(위 선언에서 파생 — 소비처가 인덱스를 세지 않게 한다).
+JIRA_CUSTOM_FIELD_REQUIRED: dict = {
+    key: required for key, _desc, _default, required in JIRA_CUSTOM_FIELD_KEYS
+}
 
 #: 지원 forge 종류. ``none`` 은 **forge 없음** — 순수 git 원격(사내 git 서버·베어
 #: 리포·``file://``)에 push 만 하는 배포다. 이 값이 없던 시절에는 "forge 없음"을 표현할

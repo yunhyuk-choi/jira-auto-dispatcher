@@ -180,12 +180,59 @@ class DiscoveryResult:
                     {"id": done["id"], "name": done["name"]}]
         return out
 
+    def blocking_choices(self) -> list:
+        """**사람이 골라야만 진행할 수 있는** 미결 항목만(선택 항목은 뺀다).
+
+        왜 이 목록이 따로 필요한가(리허설 실측): 룰북의 "후보가 여럿이면 멈추고 물어라"가
+        ``actual_start``·``actual_end`` 처럼 **미설정이 정상**인 필드에도 걸려, 안 써도
+        되는 값 때문에 설치 전체가 멈추게 돼 있었다. 필수/선택을 온보딩 에이전트의
+        판단에 맡기면 갈라지므로, **선언(:data:`app.setup_schema.JIRA_CUSTOM_FIELD_KEYS`)
+        에서 기계적으로** 뽑아 여기에 싣는다. 이 목록이 비면 후보가 아무리 많아도 멈출
+        이유가 없다.
+
+        Returns:
+            ``[{key, logical_key, description, reason, candidates}]`` — 각 원소가
+            "이건 사람이 골라야 한다"는 뜻이다.
+        """
+        out: list = []
+        section = self.get("custom_fields")
+        if section is None or section.status != STATUS_OK:
+            return out
+        for key, info in (section.data.get("logical_keys") or {}).items():
+            if not info.get("required"):
+                continue                      # 선택 항목은 미설정으로 진행하고 보고한다
+            if info.get("selected"):
+                continue                      # 확정됐다
+            if not info.get("candidates"):
+                continue                      # 후보 자체가 없다 — 고를 것이 없다
+            out.append({
+                "key": f"jira.custom_fields.{key}",
+                "logical_key": key,
+                "description": info.get("description", ""),
+                "reason": info.get("reason", ""),
+                "candidates": info.get("candidates", []),
+            })
+        return out
+
+    def optional_unresolved(self) -> list:
+        """확정하지 못했지만 **미설정으로 진행해도 되는** 항목(보고용 논리 키)."""
+        section = self.get("custom_fields")
+        if section is None or section.status != STATUS_OK:
+            return []
+        return [key for key, info in (section.data.get("logical_keys") or {}).items()
+                if not info.get("required") and not info.get("selected")]
+
     def to_dict(self) -> dict:
         """기계가 읽는 출력(``--json``) — 후속 대화형 온보딩·웹 UI 의 입력."""
         return {
             "ok": self.ok,
             "sections": [s.to_dict() for s in self.sections],
             "suggested_answers": self.suggested_answers(),
+            # ⚠️ 온보딩 에이전트는 **이 두 목록으로 갈린다**(스스로 판단하지 않는다):
+            #    blocking_choices 가 비어 있지 않으면 멈추고 사람에게 고르게 하고,
+            #    비어 있으면 optional_unresolved 를 보고하며 그대로 진행한다.
+            "blocking_choices": self.blocking_choices(),
+            "optional_unresolved": self.optional_unresolved(),
         }
 
     def format_text(self) -> str:
@@ -207,6 +254,19 @@ class DiscoveryResult:
         else:
             out.append("  없음 — 확정할 수 있는 값이 없었습니다. 위 후보를 보고 "
                        "직접 고르세요.")
+        blocking = self.blocking_choices()
+        optional = self.optional_unresolved()
+        out.append("")
+        if blocking:
+            out.append("[사람이 골라야 진행할 수 있는 항목 — 여기서 멈추세요]")
+            out.extend(f"  {b['key']} — {b['description']} "
+                       f"(후보 {len(b['candidates'])}개)" for b in blocking)
+        else:
+            out.append("[사람이 골라야 진행할 수 있는 항목 — 없음]")
+        if optional:
+            out.append("  ※ 확정하지 못했지만 **선택 항목이라 진행해도 되는 것**: "
+                       + ", ".join(optional)
+                       + " (미설정이면 그 필드를 전송하지 않을 뿐입니다)")
         if not self.ok:
             out.append("")
             out.append("실패한 조회가 있습니다 — 그대로 두면 설정을 실측 없이 "
@@ -304,7 +364,8 @@ def _configured_field_id(cfg: Any, logical_key: str) -> tuple:
     configured = getattr(getattr(cfg, "jira", None), "custom_fields", None) or {}
     if logical_key in configured:
         return str(configured.get(logical_key) or "").strip(), "config"
-    default = next((d for k, _desc, d in S.JIRA_CUSTOM_FIELD_KEYS if k == logical_key), "")
+    default = next((d for k, _desc, d, _req in S.JIRA_CUSTOM_FIELD_KEYS
+                    if k == logical_key), "")
     return str(default or ""), "default"
 
 
@@ -375,12 +436,15 @@ def discover_custom_fields(client: Any, cfg: Any, base_url: str = "") -> Section
     logical: dict = {}
     problems: list = []
     lines: list = []
-    for key, desc, _default in S.JIRA_CUSTOM_FIELD_KEYS:
+    for key, desc, _default, required in S.JIRA_CUSTOM_FIELD_KEYS:
         match = match_custom_field(fields, key)
         configured_id, source = _configured_field_id(cfg, key)
         exists = bool(configured_id) and configured_id in by_id
         logical[key] = {
             "description": desc,
+            # ⚠️ 설치를 **멈출 자격이 있는가**. 선택 항목(미설정이 정상)의 후보 모호성
+            #    때문에 설치 전체가 멈추던 리허설 결함을 닫는다(정본: setup_schema).
+            "required": required,
             "configured": {
                 "id": configured_id,
                 "source": source,
@@ -399,7 +463,14 @@ def discover_custom_fields(client: Any, cfg: Any, base_url: str = "") -> Section
         elif match["candidates"]:
             why = ("같은 이름의 필드가 여럿이라" if match["reason"] == "ambiguous"
                    else "이름이 정확히 일치하는 필드가 없어")
-            lines.append(f"  → 자동 선택 안 함({why}) — 아래 후보 중에서 고르세요:")
+            if required:
+                lines.append(f"  → 자동 선택 안 함({why}) — 아래 후보 중에서 고르세요"
+                             f" **(필수 · 고르기 전에는 진행하지 마세요)**:")
+            else:
+                lines.append(f"  → 자동 선택 안 함({why}) — **선택 항목이라 미설정으로 "
+                             f"진행해도 됩니다**(그 필드를 전송하지 않을 뿐이고, "
+                             f"워크플로우가 요구하면 Jira 가 정확히 말해 줍니다). "
+                             f"고르고 싶다면 아래 후보 중에서:")
             for c in match["candidates"][:8]:
                 tag = "정확일치" if c["tier"] == TIER_EXACT else "부분일치"
                 lines.append(f"     {c['id']:<22} {c['name']}  [{tag}"

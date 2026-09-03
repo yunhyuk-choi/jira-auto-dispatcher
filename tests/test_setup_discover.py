@@ -449,3 +449,75 @@ def test_no_token_ever_appears_in_the_output(tmp_path):
     result = D.discover(cfg, client=FakeJira())
     blob = result.format_text() + json.dumps(result.to_dict(), ensure_ascii=False)
     assert token not in blob
+
+
+# ---------------------------------------------------------------------------
+# 정지/진행 판정 — **선택 필드 때문에 설치가 멈추면 안 된다**(3차 리허설 C4)
+# ---------------------------------------------------------------------------
+#
+# 리허설 실측: 룰북의 "candidates 가 여럿이면 멈추고 물어라"가 `actual_start`·
+# `actual_end` 처럼 **미설정이 정상**인 필드에도 걸려, 안 써도 되는 값 때문에 설치
+# 전체가 멈추게 돼 있었다. 필수/선택은 온보딩 에이전트의 판단이 아니라 **선언**에서
+# 기계적으로 갈린다(app/setup_schema.JIRA_CUSTOM_FIELD_KEYS 의 네 번째 원소).
+
+#: '실제 시작일' 후보를 **일부러 모호하게** 만든 필드 목록(같은 이름 둘).
+#: 이건 선택 항목이므로 모호해도 설치를 멈출 이유가 없다.
+AMBIGUOUS_OPTIONAL = FIELDS + [
+    {"id": "customfield_30001", "name": "실제 시작일", "custom": True,
+     "schema": {"type": "date"}},
+]
+
+#: 필수 항목('시작날짜')을 모호하게 만든 목록 — 이건 **멈춰야 한다**.
+AMBIGUOUS_REQUIRED = FIELDS + [
+    {"id": "customfield_30002", "name": "시작날짜", "custom": True,
+     "schema": {"type": "date"}},
+]
+
+
+def test_the_schema_declares_which_custom_fields_may_halt_an_install():
+    from app import setup_schema as S
+
+    assert S.JIRA_CUSTOM_FIELD_REQUIRED == {
+        "start_date": True, "due_date": True,
+        "actual_start": False, "actual_end": False,
+    }
+
+
+def test_an_ambiguous_optional_field_does_not_block_the_install():
+    result = D.discover(make_cfg(), client=FakeJira(fields=AMBIGUOUS_OPTIONAL))
+    assert result.blocking_choices() == []          # 멈출 이유가 없다
+    assert "actual_start" in result.optional_unresolved()
+    text = result.format_text()
+    assert "[사람이 골라야 진행할 수 있는 항목 — 없음]" in text
+    assert "선택 항목이라 진행해도 되는 것" in text
+
+
+def test_an_ambiguous_required_field_still_blocks():
+    """⚠️ 필수 항목의 정지 규칙은 **약화되지 않았다** — C1 과 같은 계열의 안전장치다."""
+    result = D.discover(make_cfg(), client=FakeJira(fields=AMBIGUOUS_REQUIRED))
+    blocking = result.blocking_choices()
+    assert [b["logical_key"] for b in blocking] == ["start_date"]
+    assert len(blocking[0]["candidates"]) >= 2
+    assert "여기서 멈추세요" in result.format_text()
+
+
+def test_the_two_lists_are_in_the_machine_readable_output():
+    """온보딩 에이전트는 스스로 판단하지 않고 이 두 목록으로 갈린다."""
+    payload = D.discover(make_cfg(), client=FakeJira(fields=AMBIGUOUS_OPTIONAL)).to_dict()
+    assert payload["blocking_choices"] == []
+    assert "actual_start" in payload["optional_unresolved"]
+
+
+def test_optional_fields_are_marked_in_the_section_data():
+    section = D.discover_custom_fields(FakeJira(), make_cfg())
+    logical = section.data["logical_keys"]
+    assert logical["start_date"]["required"] is True
+    assert logical["actual_start"]["required"] is False
+
+
+def test_an_optional_field_says_it_is_safe_to_leave_unset():
+    """사람이 읽는 출력도 같은 말을 해야 한다(둘이 갈리면 한쪽만 거짓말한다)."""
+    section = D.discover_custom_fields(FakeJira(fields=AMBIGUOUS_OPTIONAL), make_cfg())
+    text = "\n".join(section.lines)
+    assert "선택 항목이라 미설정으로" in text
+    assert "필수 · 고르기 전에는 진행하지 마세요" not in text

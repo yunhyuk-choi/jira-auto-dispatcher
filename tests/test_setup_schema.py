@@ -124,7 +124,7 @@ def test_jira_custom_field_keys_match_todays_constants():
     """논리 키의 '오늘의 기본값'이 jira_client 모듈 상수와 일치해야 한다(드리프트 방지)."""
     from app import jira_client as J
 
-    defaults = {k: v for k, _desc, v in S.JIRA_CUSTOM_FIELD_KEYS}
+    defaults = {k: v for k, _desc, v, _req in S.JIRA_CUSTOM_FIELD_KEYS}
     assert defaults["start_date"] == J.FIELD_START_DATE
     assert defaults["due_date"] == J.FIELD_DUE_DATE
     assert defaults["actual_start"] == J.FIELD_ACTUAL_START

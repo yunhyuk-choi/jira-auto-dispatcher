@@ -366,7 +366,10 @@ def test_discover_json_output_is_machine_readable(tmp_path, capsys):
               "--only", "labels", "--json"])
     payload = json.loads(capsys.readouterr().out)
     assert [s["name"] for s in payload["sections"]] == ["labels"]
-    assert set(payload) == {"ok", "sections", "suggested_answers"}
+    # ⚠️ 정지/진행 판정을 **온보딩 에이전트가 하지 않도록** 두 목록을 함께 싣는다
+    #    (선택 필드의 후보 모호성 때문에 설치가 멈추던 리허설 결함 — C4).
+    assert set(payload) == {"ok", "sections", "suggested_answers",
+                            "blocking_choices", "optional_unresolved"}
 
 
 def test_discover_unknown_section_is_usage_error(tmp_path, capsys):

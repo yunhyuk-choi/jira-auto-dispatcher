@@ -897,7 +897,7 @@ def _pick_custom_fields(s: _Session, result) -> None:
     s.io.say("")
     s.io.say("  Jira 커스텀필드 id 는 인스턴스마다 다릅니다 — 조회 결과로 채웁니다.")
     chosen = dict(s.get("jira.custom_fields") or {})
-    for key, desc, fallback in S.JIRA_CUSTOM_FIELD_KEYS:
+    for key, desc, fallback, _required in S.JIRA_CUSTOM_FIELD_KEYS:
         entry = logical.get(key) or {}
         selected = str(entry.get("selected", "") or "")
         candidates = entry.get("candidates") or []
