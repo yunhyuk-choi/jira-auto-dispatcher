@@ -221,8 +221,19 @@ JIRA_CUSTOM_FIELD_KEYS: Tuple = (
     ("actual_end", "완료 전이 시 필수인 '실제 종료일' 필드 id(없으면 비워 둔다)", ""),
 )
 
-#: 지원 forge 종류.
-FORGE_KINDS: Tuple = ("gitlab", "github")
+#: 지원 forge 종류. ``none`` 은 **forge 없음** — 순수 git 원격(사내 git 서버·베어
+#: 리포·``file://``)에 push 만 하는 배포다. 이 값이 없던 시절에는 "forge 없음"을 표현할
+#: 방법이 없어서, 리허설 설치자가 ``gitlab`` 을 의미 없이 채우고 **더미 토큰 파일**을
+#: 만들었다(거짓 설정이 config 에 남았다). 스키마가 거짓말을 강요하면 그건 스키마의 결함이다.
+#: 없을 때 무엇이 꺼지는지는 :data:`app.forge.DEGRADED_WITHOUT_FORGE`.
+FORGE_KINDS: Tuple = ("gitlab", "github", "none")
+
+#: 변경요청(MR/PR) API 가 있는 forge 종류 — ``forge.token_ref`` 가 **필요한** 경우다.
+FORGE_KINDS_WITH_API: Tuple = ("gitlab", "github")
+
+#: "forge 없음" 식별자(정본 구현은 :data:`app.forge.KIND_NONE` — 순환 import 회피용 재선언.
+#: 두 곳이 갈라지지 않도록 ``tests/test_setup_schema.py`` 가 동일성을 강제한다).
+FORGE_KIND_NONE = "none"
 
 #: 지원 알림 채널. ``none`` 이 기본 — 알림 없이도 시스템은 완전히 동작한다.
 NOTIFIER_PROVIDERS: Tuple = ("none", "google_chat", "slack", "generic_webhook")
@@ -261,7 +272,11 @@ _FORGE = SchemaSection(
             choices=FORGE_KINDS,
             required=True,
             default="gitlab",
-            description="코드 호스팅 종류. 브랜치/MR·PR API 어댑터 선택에 쓰인다.",
+            description=(
+                "코드 호스팅 종류. 브랜치/MR·PR API 어댑터 선택에 쓰인다. "
+                "``none`` = forge 없음(순수 git 원격에 push 만 한다) — 그 경우 "
+                "``forge.token_ref`` 는 필요 없고 변경요청 자동 생성이 꺼진다."
+            ),
             example="gitlab",
         ),
         SchemaField(
@@ -278,7 +293,11 @@ _FORGE = SchemaSection(
             key="forge.token_ref",
             type=FieldType.STRING,
             secret_ref=True,
-            required_if=RequiredIf("forge.kind", truthy=True),
+            # ⚠️ 예전에는 ``RequiredIf("forge.kind", truthy=True)`` 였다. kind 는 required
+            #    이고 기본값이 있어 **항상 truthy** 라, 결과적으로 토큰 참조가 무조건
+            #    필수였다 — forge 가 없는 배포는 doctor 가 exit 0 에 도달할 수 없었다.
+            #    이제 **API 가 있는 forge 일 때만** 필수다.
+            required_if=RequiredIf("forge.kind", equals=FORGE_KINDS_WITH_API),
             default="",
             legacy_keys=("run.repo_resolver_gitlab_token_ref",),
             description=(

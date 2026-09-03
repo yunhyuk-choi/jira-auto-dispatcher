@@ -156,8 +156,8 @@ python -m app.setup consent --request --json
 | ~~`consent.*`~~ | **묻지 마라.** 1 항의 증서(`setup-consent.json`)가 정본이고, 관문이 답변에 자동으로 합친다. 답변 파일에 적어도 무의미하다(증서가 이긴다) |
 | `jira.base_url` · `jira.project` · `jira.watcher_email` | Jira Cloud 전용 |
 | `jira.watcher_token_file` | 참조. 기본 `service/jira-token` |
-| `forge.kind` | dlc-meta URL 에서 자동 판정되면 **확인만** 받아라 |
-| `forge.token_ref` | 참조. 기본 `service/forge-token` |
+| `forge.kind` | `gitlab` / `github` / **`none`**. dlc-meta URL 에서 자동 판정되면 **확인만** 받아라. ⚠️ 원격이 순수 git(사내 git 서버·베어 리포·`file://`)이면 **`none` 이 정답이다** — 아무 forge 나 골라 더미 토큰을 만들지 마라(리허설에서 실제로 그랬고, 거짓 설정이 config 에 남았다) |
+| `forge.token_ref` | 참조. 기본 `service/forge-token`. **`forge.kind: none` 이면 필요 없다**(묻지 마라) |
 | `webhook.enabled` / `webhook.secret_ref` | 참조. 기본 `service/jira-webhook` |
 | `notifier.provider` | 기본 `none` — 알림 없이도 완전히 동작한다 |
 | `deploy.profile` | `local` / `cloud_vm` / `onprem_server` |
@@ -369,7 +369,8 @@ bash scripts/smoke-deployed.sh http://127.0.0.1:8787        # (선택) 엔드포
 | `render` 가 `이미 파일이 있습니다` 로 exit 2 | 재렌더는 `--force`(먼저 `.bak-*` 백업). `config.yaml` 을 손으로 고치지 말고 답변 파일을 고쳐 다시 렌더한다 |
 | `discover` 가 `조회에 쓸 입력이 없습니다` 로 exit 2 | 아직 답변 파일이 없다. 2 항의 세 값(`jira.base_url`·`watcher_email`·`watcher_token_file`)만 담아 `setup-answers.json` 을 먼저 만든다 — **`render` 를 먼저 돌리는 게 아니다** |
 | 두 번째 인스턴스를 띄웠더니 첫 인스턴스가 이상해짐 | `.env` 의 세 줄(특히 `COMPOSE_PROJECT_NAME`)을 넣었는가. 이미지·네트워크·볼륨은 `JAD_INSTANCE` 에서 파생되므로 그 한 줄이 빠지면 전부 공유된다 |
-| `doctor` 의 `forge_token` 이 SKIP | `forge.base_url` 이 비어 있다(사내 PAT 를 외부로 안 보내려는 의도적 SKIP) |
+| `doctor` 의 `forge_token` 이 SKIP | 세 가지 중 하나다 — ① `forge.kind: none`(이 배포는 forge 를 안 쓴다. **정상**이며 무엇이 꺼지는지는 SKIP 메시지가 말해 준다) ② `forge.token_ref` 가 비었다 ③ base URL 을 **확정하지 못했다**. ⚠️ `forge.base_url` 이 비었다고 무조건 SKIP 이 아니다 — 설정된 레포 URL(`run.dlc_meta_repo_url` 등)에서 **유도되면 실제로 프로브한다.** 유도조차 못 할 때만 "사내 PAT 를 외부로 안 보내려는 의도적 SKIP" 이다 |
+| `doctor` 의 `forge_token` 이 FAIL 인데 `forge.base_url` 은 비어 있다 | 위와 같은 이유다. base URL 이 dlc-meta URL 에서 **유도돼** 그 호스트로 실제 요청이 나갔고 거절당한 것이다. 사내 forge 면 `forge.base_url` 을 명시하고, forge 를 아예 안 쓰는 배포면 `forge.kind: none` 으로 두어라(더미 토큰 파일을 만들지 마라) |
 | 폴러가 에러 없이 아무 티켓도 못 찾음 | `jira.trigger_statuses` 이름이 인스턴스와 어긋난 것 — `discover` 로 확인 |
 | `POST /onboard` 가 409 | 기동 시 doctor 게이트가 막은 것. `/api/doctor` 의 FAIL 을 먼저 고쳐라 |
 

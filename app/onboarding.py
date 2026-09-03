@@ -246,7 +246,9 @@ def register_onboarding_api(app, comps: dict) -> None:
         # 흔적으로 쓸 수는 없다. 동의하지 않았으면 시각도 남기지 않는다.
         answers[US.CONSENT_AT_KEY] = (
             US.now_iso() if answers.get(US.CONSENT_KEY) is True else "")
-        result = US.validate_user_answers(answers)
+        # ⚠️ config 를 넘긴다 — forge 가 없는 배포(forge.kind: none)에서는 발급할 수
+        #    없는 개인 PAT 를 요구하지 않기 위해서다(app.user_schema.schema_for).
+        result = US.validate_user_answers(answers, config)
         if not result.ok:
             missing = US.missing_keys(result)
             payload = {

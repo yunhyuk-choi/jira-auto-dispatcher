@@ -198,8 +198,11 @@ def check_secrets(cfg: Any, *, project_dir: str = ".") -> CheckResult:
     # 폴링만 쓰는(웹훅 안 쓰는) 정상 배포가 빨간불이 된다.
     refs: list = [("jira.watcher_token_file",
                    getattr(getattr(cfg, "jira", None), "watcher_token_file", ""), True)]
+    # ⚠️ forge 가 없다고 선언한 배포(forge.kind: none)에서는 **찾지 않는다.** 옛 설정에
+    #    token_ref 가 남아 있을 수 있는데, 그걸 근거로 없는 파일을 요구하면 "forge 를
+    #    안 쓴다"는 선언이 곧 진단 실패가 된다(설치자가 더미 토큰을 만들게 한 압력).
     forge_ref = central_forge_token_ref(cfg)
-    if forge_ref:
+    if forge_ref and forge_mod.resolve_kind(cfg) != forge_mod.KIND_NONE:
         refs.append(("forge.token_ref", forge_ref, True))
     notifier = getattr(cfg, "notifier", None)
     if notifier is not None and getattr(notifier, "provider", "none") != "none":
@@ -551,8 +554,24 @@ def check_forge_token(cfg: Any, *, project_dir: str = ".", http: Any = None) -> 
     ⚠️ **어디로 보내는가가 먼저다.** ``forge.base_url`` 이 비어 있으면 설정된 레포 URL 에서
     유도하고(:func:`app.forge.resolve_base_url`), 유도조차 못 하면 SaaS 기본값으로 떨어지지
     않고 **SKIP 한다** — 사내 PAT 가 gitlab.com 으로 나가는 것보다 검사를 못 하는 편이 낫다.
+
+    ⚠️ 그러므로 "``forge.base_url`` 이 비면 SKIP"은 **틀린 요약**이다(옛 룰북이 그렇게
+    적어 두었다). 비어 있어도 레포 URL 에서 **유도되면 실제로 프로브하고 FAIL 이 날 수
+    있다.** SKIP 되는 것은 *유도조차 못 했을 때*뿐이다. 그리고 ``forge.kind: none`` 이면
+    아예 붙을 곳이 없으므로 그 자체로 SKIP 이다(무엇이 꺼지는지 함께 보고한다).
     """
     kind = forge_mod.resolve_kind(cfg)
+    if kind == forge_mod.KIND_NONE:
+        # forge 가 **없다고 선언한** 배포다. 예전에는 이걸 표현할 방법이 없어서(kind 가
+        # 무조건 gitlab|github) 설치자가 gitlab 을 의미 없이 채우고 더미 토큰을 만들었다.
+        # 지금은 1급 값이며, 그 대가로 무엇이 꺼지는지를 **여기서 말한다**(조용한 SKIP 금지).
+        return CheckResult(
+            "forge_token", STATUS_SKIP,
+            "forge.kind 가 none 입니다 — 순수 git 원격에 push 만 하는 배포라 붙을 "
+            "forge API 가 없습니다(정상). 이 설정으로 꺼지는 기능: "
+            + " / ".join(forge_mod.DEGRADED_WITHOUT_FORGE),
+            "사내 GitLab·GitHub 을 쓰는 배포라면 forge.kind 를 그것으로 바꾸고 "
+            "forge.token_ref 에 토큰 참조를 적으세요.")
     ref = central_forge_token_ref(cfg)
     if not ref:
         return CheckResult("forge_token", STATUS_SKIP,

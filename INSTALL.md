@@ -412,6 +412,13 @@ python -m app.setup discover --json > jira.json   # 기계용(후속 온보딩·
   유도하고, 유도조차 못 하면 SaaS(gitlab.com)로 떨어지는 대신 건너뛴다 — 사내 PAT 가
   외부로 전송되는 것보다 검사를 못 하는 편이 낫다. SKIP 이 뜨면 `forge.base_url` 을
   적어 주면 된다(SaaS 를 쓴다면 `https://gitlab.com` 을 그대로 적어도 된다).
+  ⚠️ **"`base_url` 이 비면 SKIP" 이 아니다** — 비어 있어도 **유도되면 실제로 프로브하고
+  FAIL 이 날 수 있다.** SKIP 은 *유도조차 못 했을 때*뿐이다.
+- ⚠️ **`forge.kind: none`(forge 없음)이면 이 검사는 그 자체로 SKIP 이고, 무엇이 꺼지는지
+  SKIP 메시지가 열거한다.** 원격이 순수 git(사내 git 서버·베어 리포·`file://`)이라
+  MR/PR API 가 없는 배포를 위한 값이다 — **아무 forge 나 골라 더미 토큰 파일을 만들지
+  마라.** 그러면 거짓 설정이 `config.yaml` 에 남고, 나중에 그 값을 믿은 코드가 존재하지
+  않는 API 를 찾는다.
 - ⚠️ **호스트에서 돌릴 때와 컨테이너 안에서 돌릴 때 보이는 것이 다르다.** `/run/secrets`
   나 `tcp://socket-proxy:2375` 는 컨테이너 관점이라, 호스트에서는 해당 검사가 `SKIP` 으로
   나오고 안내가 붙는다. 기동 후에는 안에서 한 번 더 돌린다:
@@ -748,7 +755,7 @@ GitHub PAT 안내만 보이고, 사내 GitLab 이면 토큰 발급 링크도 그
 | `jira_account_id` **(필수)** | 폴러가 티켓 담당자를 당신에게 매핑하는 키. **틀리면 당신 티켓은 영원히 감지되지 않는다(에러도 없다)** | 폼의 **`내 accountId 조회`** 버튼(이메일+토큰으로 서버가 `GET /rest/api/3/myself` 를 대신 호출) · 또는 Jira 프로필 URL 의 `/people/<accountId>` 뒷부분 |
 | `jira_email` **(필수)** | Atlassian 계정 이메일. Jira Cloud 인증은 (이메일, 토큰) **쌍**이다 | 본인 Atlassian 계정 |
 | `jira_token` **(필수)** | 본인 Jira API 토큰 | Atlassian 계정 → Security → API tokens → Create (`https://id.atlassian.com/manage-profile/security/api-tokens`) |
-| `forge_token` **(필수)** | 브랜치 push + 변경요청(MR/PR) 생성을 **당신 이름으로** 하는 개인 토큰 | GitLab: 아바타 → Edit profile → Access Tokens, 스코프 `api` / GitHub: Settings → Developer settings → Personal access tokens, 스코프 `repo` |
+| `forge_token` **(필수 — `forge.kind: none` 이면 선택)** | 브랜치 push + 변경요청(MR/PR) 생성을 **당신 이름으로** 하는 개인 토큰 | GitLab: 아바타 → Edit profile → Access Tokens, 스코프 `api` / GitHub: Settings → Developer settings → Personal access tokens, 스코프 `repo` |
 | `claude_setup_token` **(필수)** | 워커 안 에이전트가 쓸 **당신의** Claude 자격 | 본인 머신 터미널에서 `claude setup-token`(Max 구독). ⚠️ 재발급하면 기존 토큰이 무효화된다 |
 | `git_name` · `git_email` | 커밋 author. ⚠️ `git_email` 은 forge 계정에 **인증된 이메일**이어야 커밋이 당신 계정에 연결된다 | 본인 |
 | `autonomy_mode` | A=완전자율(변경요청 초안까지) / B=경량 1차. 처음엔 B 권장 | 본인이 고른다 |
@@ -758,6 +765,11 @@ GitHub PAT 안내만 보이고, 사내 GitLab 이면 토큰 발급 링크도 그
 > 하고 **MR/PR 을 만들지 못한다** — 에러 없이 반쪽만 도는, 이 시스템에서 가장 비싼 실패
 > 모드다. 두 자율 모드(A·B) 모두 브랜치를 원격에 push 하도록 지시하므로 forge 를 쓰지
 > 않는 경우가 없다. 그래서 **조건부가 아니라 무조건 필수**로 올렸다.
+>
+> **예외는 하나다 — `forge.kind: none`.** 그 배포에는 발급할 forge 토큰이 존재하지 않으므로
+> 이 항목이 **선택으로 내려간다**(관리 UI 가 그렇게 렌더한다). 없는 것을 요구하면 합류
+> 자체가 불가능해지고, 그건 설치 스키마가 설치자에게 더미 토큰을 만들게 했던 것과 같은
+> 결함이다. 그 배포의 push 자격은 git 자신이 관리한다(ssh 키·credential helper).
 
 ### 8.2 풀 퍼미션 동의는 **본인이** 한다
 

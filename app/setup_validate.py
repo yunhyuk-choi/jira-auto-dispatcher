@@ -339,7 +339,29 @@ def resolve_values(flat: Mapping, sections: Optional[tuple] = None) -> tuple:
     #    :func:`app.config._build_deploy` 는 이 키의 기본값을 인스턴스에서 파생한다.
     _apply_instance_derived(values, explicit, _sections(sections))
     _apply_profile_derived(values, explicit, _sections(sections))
+    _apply_forgeless_derived(values, explicit, _sections(sections))
     return values, explicit, notes
+
+
+def _apply_forgeless_derived(values: dict, explicit: dict, sections: tuple) -> None:
+    """``forge.kind: none`` 이면 forge 토큰 참조는 **빈 값이 답이다**(제자리 변경).
+
+    이걸 하지 않으면 렌더러가 예시 파일의 ``token_ref: service/forge-token`` 을 그대로
+    남기고, ``doctor`` 의 secrets 검사가 **존재하지 않는 토큰 파일**을 찾아 FAIL 을 낸다 —
+    forge 를 안 쓴다고 선언한 배포가 그 선언 때문에 진단을 통과하지 못하는 셈이다.
+    (설치자가 더미 토큰 파일을 만들게 만든 것이 정확히 이 모양의 압력이었다.)
+
+    ⚠️ 명시 답변은 이긴다 — forge 는 none 인데 토큰 참조를 굳이 적었다면 그건 그 사람의
+    선택이고, 잘못이면 스키마의 다른 규칙이 말해 준다. 여기서 지우지 않는다.
+    """
+    field = S.get_field_in(sections, "forge.token_ref")
+    if field is None or "forge.token_ref" in explicit:
+        return
+    if values.get("forge.kind") == S.FORGE_KIND_NONE:
+        # explicit 에도 넣는다 — 렌더러는 "답한 것만" 쓰므로, 여기 없으면 예시 파일의
+        # `service/forge-token` 이 그대로 남아 **쓰지 않는 토큰 참조**가 config 에 박힌다.
+        values["forge.token_ref"] = ""
+        explicit["forge.token_ref"] = ""
 
 
 def _apply_profile_derived(values: dict, explicit: dict, sections: tuple) -> None:
