@@ -5,13 +5,17 @@ description: jira-auto-dispatcher 를 처음 설치·설정할 때 쓴다. 설�
 
 # jira-auto-dispatcher 설치
 
-> 이 파일은 **생성된 개인 산출물**이다(gitignore). 원본은 리포가 추적하는
-> `skill-templates/install-jira-auto-dispatcher/SKILL.template.md` 이고,
-> `python -m app.setup skill` 이 그 템플릿에서 이 파일을 만든다.
+> **이 룰북은 두 자리에서 읽힌다.** ① 설치자가 `.claude/skills/…/SKILL.md` 로 펼쳐 슬래시
+> 커맨드(`/install-jira-auto-dispatcher`)로 부르는 **생성된 개인 산출물**(gitignore), ② 상위
+> 오케스트레이터가 이 리포를 클론한 뒤 **서브 에이전트 룰북으로 그대로 싣는 원본**.
+> 어느 쪽이든 **작업 디렉토리는 이 리포 클론**이고 절차는 같다.
+>
+> 추적되는 원본은 `skill-templates/install-jira-auto-dispatcher/SKILL.template.md` 이고,
+> `python -m app.setup skill` 이 그 템플릿에서 ①의 파일을 만든다.
 > 내용을 바꾸려면 **템플릿을 고치고** `python -m app.setup skill --force` 로 다시 생성해라
-> (여기를 직접 고치면 다음 재생성 때 갈린다 — 그래서 `--force` 없이는 덮어쓰지 않는다).
+> (생성물을 직접 고치면 다음 재생성 때 갈린다 — 그래서 `--force` 없이는 덮어쓰지 않는다).
 
-이 스킬은 **값을 캐내는 인터페이스**다. 검증·생성·판정은 **전부** 기존 CLI 가 한다:
+이 룰북은 **값을 캐내는 인터페이스**다. 검증·생성·판정은 **전부** 기존 CLI 가 한다:
 
 | 명령 | 하는 일 |
 |---|---|
@@ -34,7 +38,11 @@ description: jira-auto-dispatcher 를 처음 설치·설정할 때 쓴다. 설�
 
 ## 두 갈래 — 어느 쪽이든 게이트는 같다
 
-**A. 지금 이 대화로 진행**(아래 절차). 값을 물어보고 `setup-answers.json` 에 모은 뒤 CLI 를 태운다.
+**A. 대화로 진행**(아래 절차). 값을 물어보고 `setup-answers.json` 에 모은 뒤 CLI 를 태운다.
+설치자가 직접 부르든, 상위 오케스트레이터가 이 룰북을 서브에 실어 띄우든 절차는 **같다**.
+다만 서브로 실렸을 때는 **사용자와의 직통 채널이 없다** — 질문·확인·시크릿 생성 요청은 전부
+상위를 통해 올리고, 상위가 받아 온 답으로 이어간다. 끝나면 맨 아래
+「상위에 돌려줄 것」의 4-튜플을 반환한다.
 
 **B. claude 없이**(1차 진입점): 설치자가 직접 `python -m app.setup wizard` 를 실행한다. 같은
 질문을 터미널에서 하고 같은 답변 파일·같은 CLI 를 쓴다. 설치자가 대화를 원하지 않거나,
@@ -42,12 +50,42 @@ description: jira-auto-dispatcher 를 처음 설치·설정할 때 쓴다. 설�
 
 ---
 
+## 전제조건 — 없으면 0) 첫 명령에서 막힌다
+
+설치 자체는 **설치자가 자기 손으로** 한다(브라우저·관리자 권한이 필요하다). 여기서 할 일은
+*무엇을 · 어디서 · 어떻게* 받는지 주고, **확인 명령의 출력으로** 갖춰졌는지 판정하는 것이다 —
+"설치했다"는 말은 근거가 아니다. 하나라도 실패하면 **거기서 멈춰라.** 없는 도구를 있다고
+가정하고 넘어가면 한참 뒤 엉뚱한 곳(5)의 `render`·6)의 기동)에서 터진다.
+
+| 필요한 것 | 왜 | 공식 설치처 | 확인 명령 |
+|---|---|---|---|
+| **Docker Engine + Compose v2** | central·worker 컨테이너를 띄운다(6단계) | Windows·macOS: <https://docs.docker.com/desktop/> · Linux: <https://docs.docker.com/engine/install/> + <https://docs.docker.com/compose/install/linux/> | `docker --version` · `docker compose version` · `docker ps` |
+| **git** | dlc-meta·런타임 레포 clone, worker 의 브랜치·MR | <https://git-scm.com/downloads> | `git --version` |
+| **Python** | 설치 관문 CLI(`python -m app.setup`)를 **호스트에서** 돌린다 | <https://www.python.org/downloads/> | `python --version` |
+| **이 리포의 파이썬 의존성** | 관문 CLI 가 `pyyaml`·`requests`(+진단의 `docker` SDK)를 쓴다 | 리포 클론 안에서 `pip install -r requirements.txt` | `python -c "import flask, yaml, requests, docker; print('deps ok')"` |
+
+- **Compose 는 v2 다** — `docker compose`(공백)가 돌아야 한다. `docker-compose`(하이픈, v1)만
+  있으면 이 리포의 명령이 전부 어긋난다.
+- `docker --version` 은 클라이언트만 본다. **데몬까지** 확인하려면 `docker ps` 다(Docker
+  Desktop 은 앱이 실행 중이어야 한다).
+- **파이썬 버전** — 컨테이너 안은 이미지가 3.12 로 고정한다(`Dockerfile` = `python:3.12-slim`).
+  호스트 파이썬이 그와 같을 필요는 없다(호스트는 관문 CLI 만 돌린다). 다만 이 리포가 **실제로
+  검증하는 조합은 3.12** 이므로(CI 가 3.12 로만 돈다) 3.12 를 권장한다. 리눅스·macOS 는
+  `python`·`pip` 이 `python3`·`pip3` 일 수 있다.
+- `docker` SDK 가 없으면 `doctor` 의 docker 검사가 **FAIL 이 아니라 SKIP** 으로 빠진다 —
+  갖춰졌다고 **오해하기 쉬운 자리**다. 위 import 확인을 건너뛰지 마라.
+
+---
+
 ## 절차
 
 ### 0) 자리 확인
 
+작업 디렉토리는 **이 리포 클론**이다(두 소비 방식 모두) — 아니면 멈추고 위치부터 잡아라.
+위 전제조건의 확인 명령이 하나라도 실패하면 그것부터 해결한다.
+
 ```bash
-python --version && docker compose version && ls config/config.example.yaml
+git rev-parse --show-toplevel && python --version && docker compose version && ls config/config.example.yaml
 ```
 
 `setup-answers.json` 이 이미 있으면 **이어서 하는 중**이다 — 먼저 읽고, 이미 답한 것은
@@ -154,6 +192,9 @@ curl -fsS http://127.0.0.1:8787/healthz
 docker compose exec central python -m app.setup doctor      # 컨테이너 관점으로 한 번 더
 ```
 
+관리 UI 포트는 `.env` 의 `JAD_PORT`(기본 8787)다 — 바꿨다면 위 두 줄의 8787 도 그 값으로
+읽어라. 그 주소가 **대시보드 좌표**이고, 상위에 반드시 돌려줘야 하는 값이다(맨 아래 절).
+
 호스트에서 SKIP 이던 검사(`/run/secrets`·`tcp://socket-proxy:2375`)가 컨테이너 안에서는
 실측된다. 마지막으로 관리 UI 에서 사용자 온보딩을 안내하라 — per-user 자격증명은 설치
 단계가 아니라 그 폼에서 받는다.
@@ -170,3 +211,28 @@ docker compose exec central python -m app.setup doctor      # 컨테이너 관�
 | `POST /onboard` 가 409 | 기동 시 doctor 게이트가 막은 것. `/api/doctor` 의 FAIL 을 먼저 고쳐라 |
 
 정본 문서: `INSTALL.md`(설치) · `SECURITY.md`(위험 모델) · `DEPLOY.md`(상시 운영).
+
+---
+
+## 상위에 돌려줄 것 — 4-튜플
+
+상위 오케스트레이터가 이 룰북을 서브로 띄웠을 때의 **반환 계약**이다(사람이 직접 부른
+경우에도 같은 4개를 마지막 보고에 적으면 된다).
+
+| 항목 | 무엇을 싣나 |
+|---|---|
+| **생성 파일 경로[]** | `config/config.yaml` · `.env` · `setup-answers.json` · `secrets/service/*`(**경로만**) · 생성했다면 `.claude/skills/install-jira-auto-dispatcher/SKILL.md` |
+| **정합성 체크** | `validate`·`doctor`(**호스트·컨테이너 두 관점**)의 종료코드와 항목별 PASS/FAIL/SKIP. SKIP 은 그 이유까지. 네 판단이 아니라 그 명령의 출력이 근거다 |
+| **인터뷰 응답 원본** | `setup-answers.json` 의 내용(참조·비-시크릿 값만 들어 있다) + 설치자가 고른 상태·전이·커스텀필드 id 와 그 근거(`discover` 결과) |
+| **권고 다음 단계** | 남은 일 — 보통 ① 관리 UI 온보딩 폼으로 per-user 자격증명 등록 ② Jira 웹훅 등록 ③ FAIL·SKIP 중 사람이 결정해야 하는 항목 |
+
+**반드시 실어라 — 관리 UI 대시보드 좌표.** 상위가 이 값을 `dlc-meta` 에 기록한다.
+
+- 좌표: `http://<central 호스트>:<포트>` — 포트는 `.env` 의 `JAD_PORT`(기본 8787)
+- 인스턴스 접두어: `.env` 의 `JAD_INSTANCE`(기본 `jad`)와 거기서 파생된 컨테이너 이름
+  (`<접두어>-central`) — 한 호스트에 여러 인스턴스가 뜰 수 있어, 상위가 나중에 이 인스턴스를
+  지목하려면 필요하다
+
+⚠️ **시크릿 값은 반환에 싣지 마라.** 토큰·웹훅 시크릿은 **참조 경로**(`secrets/service/jira-token`
+같은)로만 말한다. `setup-answers.json` 은 설계상 참조만 담으므로 그 내용은 그대로 실어도
+되지만, 싣기 전에 값이 섞여 들어가지 않았는지 **한 번 훑어라**.
