@@ -118,6 +118,24 @@ def test_with_token_leaves_schemeless_url_alone():
     assert F.with_token("", "T") == ""
 
 
+@pytest.mark.parametrize("url", [
+    "file:///c/workspace/dlc-meta",
+    "file://C:/workspace/dlc-meta",
+    "ssh://git@gitlab.example.com/g/p.git",
+    "git://example.com/p.git",
+])
+def test_with_token_only_injects_into_http_urls(url):
+    """토큰 인증은 http(s) 에서만 의미가 있다 — 그 외 스킴은 **원문 그대로** 돌려준다.
+
+    예전에는 스킴이 있기만 하면 주입해서 ``file://oauth2:<token>@/c/…`` 라는 어디에도
+    없는 URL 을 만들었다(실측). 깨진 URL 로 실패하는 것보다, 토큰이 엉뚱한 문자열에
+    실려 로그·에러 메시지로 새는 쪽이 더 나쁘다.
+    """
+    injected = F.with_token(url, "SECRET-TOKEN")
+    assert injected == url
+    assert "SECRET-TOKEN" not in injected
+
+
 def test_repos_with_token_delegates_to_forge():
     """app.repos 의 주입 지점도 같은 분기를 탄다(호출부가 두 갈래로 갈리지 않게)."""
     assert (R._with_token("https://github.com/o/r.git", "T")

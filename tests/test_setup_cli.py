@@ -349,11 +349,73 @@ def test_discover_unknown_section_is_usage_error(tmp_path, capsys):
     assert "알 수 없는 조회 항목" in capsys.readouterr().err
 
 
-def test_discover_missing_config_is_usage_error(capsys):
+def test_discover_without_any_input_is_a_usage_error_that_names_both_routes(tmp_path, capsys):
+    """설정도 답변도 없으면 사용 오류 — 다만 **두 갈래를 모두** 알려 준다."""
     with pytest.raises(SystemExit) as exc:
-        CLI.main(["discover", "--config", "없는설정.yaml"])
+        CLI.main(["discover", "--config", str(tmp_path / "없는설정.yaml"),
+                  "--project-dir", str(tmp_path)])
+    assert exc.value.code == CLI.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "조회에 쓸 입력이 없습니다" in err
+    assert "--answers" in err and "jira.base_url" in err
+
+
+def test_discover_broken_config_is_still_a_usage_error(tmp_path, capsys):
+    """있는데 깨진 설정은 여전히 사용 오류다(조용히 답변 파일로 도망가지 않는다)."""
+    bad = tmp_path / "config.yaml"
+    bad.write_text("role: [불완전\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as exc:
+        CLI.main(["discover", "--config", str(bad), "--project-dir", str(tmp_path)])
     assert exc.value.code == CLI.EXIT_USAGE
     assert "로드할 수 없습니다" in capsys.readouterr().err
+
+
+# --- 순환 의존 회귀: config.yaml 없이도 조회가 된다 --------------------------------
+
+#: 조회에 필요한 **최소 답변** — 문서가 "이 셋만 채워도 돈다"고 말하는 바로 그 셋.
+_MINIMAL_DISCOVER_ANSWERS = {
+    "jira": {"base_url": "https://x.atlassian.net",
+             "watcher_email": "bot@example.com",
+             "watcher_token_file": "service/jira-token"},
+}
+
+
+def _stub_discover(monkeypatch, seen: dict):
+    """실제 네트워크 대신 cfg 만 받아 적는 대역을 심는다."""
+    from app import setup_discover as D
+
+    def fake(cfg, **kwargs):
+        seen["base_url"] = cfg.jira.base_url
+        seen["email"] = cfg.jira.watcher_email
+        return D.DiscoveryResult()
+
+    monkeypatch.setattr(D, "discover", fake)
+
+
+def test_discover_runs_from_an_answers_file_without_any_config(tmp_path, monkeypatch):
+    """**A 회귀**: config.yaml 이 없어도 답변 파일만으로 조회가 돈다.
+
+    예전에는 조회하려면 ``render`` 가 먼저였고, ``render`` 는 전체 검증을 돌려 조회가
+    채워 주려던 값(``jira.trigger_statuses``)이 없으면 죽었다 — 빈 디렉토리에서 문서를
+    그대로 따라가면 그 자리에서 막히는 순환이었다.
+    """
+    seen: dict = {}
+    _stub_discover(monkeypatch, seen)
+    answers = _write_json(tmp_path, "setup-answers.json", _MINIMAL_DISCOVER_ANSWERS)
+    assert CLI.main(["discover", "--answers", answers, "--project-dir", str(tmp_path),
+                     "--config", str(tmp_path / "없다.yaml")]) == CLI.EXIT_OK
+    assert seen == {"base_url": "https://x.atlassian.net", "email": "bot@example.com"}
+
+
+def test_discover_falls_back_to_the_answers_file_and_says_so(tmp_path, monkeypatch, capsys):
+    """플래그 없이도 막히지 않는다 — 다만 무엇을 읽었는지 **말한다**(조용한 폴백 금지)."""
+    seen: dict = {}
+    _stub_discover(monkeypatch, seen)
+    _write_json(tmp_path, "setup-answers.json", _MINIMAL_DISCOVER_ANSWERS)
+    assert CLI.main(["discover", "--project-dir", str(tmp_path),
+                     "--config", str(tmp_path / "없다.yaml")]) == CLI.EXIT_OK
+    assert seen["base_url"] == "https://x.atlassian.net"
+    assert "setup-answers.json" in capsys.readouterr().err
 
 
 def test_discover_reports_non_zero_when_a_lookup_fails(tmp_path, capsys, monkeypatch):

@@ -30,8 +30,12 @@ set -euo pipefail
 
 # --- 파라미터(전부 env 로 오버라이드 가능) ---
 APP_DIR="${1:-${JAD_APP_DIR:-/opt/jira-auto-dispatcher}}"
-IMAGE="${JAD_IMAGE:-jira-auto-dispatcher:latest}"
-ROLLBACK_TAG="${JAD_ROLLBACK_TAG:-jira-auto-dispatcher:rollback}"
+# 이미지·롤백 태그도 **인스턴스 축**이다 — compose 와 같은 파생 규칙을 쓴다
+# (JAD_INSTANCE 미설정이면 예전과 같은 latest/rollback. app/naming.py default_image).
+# 태그를 두 인스턴스가 공유하면 여기서 빌드·롤백하는 순간 **다른 인스턴스의 워커가
+# 쓰는 실행 코드**가 바뀐다.
+IMAGE="${JAD_IMAGE:-jira-auto-dispatcher:${JAD_INSTANCE:-latest}}"
+ROLLBACK_TAG="${JAD_ROLLBACK_TAG:-jira-auto-dispatcher:rollback${JAD_INSTANCE:+-${JAD_INSTANCE}}}"
 SERVICE="${JAD_SERVICE:-central}"                       # compose 서비스 키(= worker 도달 DNS)
 HEALTH_URL="${JAD_HEALTH_URL:-http://localhost:8787/healthz}"
 HEALTH_RETRIES="${JAD_HEALTH_RETRIES:-30}"              # 총 대기 = retries * interval

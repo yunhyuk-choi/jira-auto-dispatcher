@@ -461,3 +461,49 @@ def test_fields_without_a_pattern_are_unaffected():
     result = V.validate_answers(GOOD)
     assert result.ok
     assert not any(f.code == V.CODE_BAD_FORMAT for f in result.findings)
+
+
+# --- 인스턴스 축 파생(다중 인스턴스 격리) ---------------------------------------
+
+
+def test_instance_derives_image_network_and_workspace_volume():
+    """``deploy.instance`` 하나가 이미지·네트워크·워크스페이스 볼륨을 함께 옮긴다.
+
+    이게 없으면 두 번째 인스턴스의 config.yaml 에 예시 파일의 **기본 인스턴스 이름**이
+    그대로 남아, compose 는 ``jad-stg-*`` 를 만드는데 central 은 ``jad-*`` 를 부른다 —
+    워커가 남의 인스턴스 이미지·네트워크·레포 클론을 쓰는 조용한 결합이다.
+    """
+    result = V.validate_answers(_merged(deploy={"instance": "jad-stg"}))
+    assert result.ok, result.format_text()
+    assert result.explicit["spawn.image"] == "jira-auto-dispatcher:jad-stg"
+    assert result.explicit["spawn.network"] == "jad-stg-net"
+    assert result.explicit["deploy.workspace_volume"] == "jad-stg-workspace"
+
+
+def test_default_instance_derivation_matches_the_old_hardcoded_names():
+    """기본 인스턴스에서는 파생 결과가 예전 값과 같다(기존 배포 무변경)."""
+    result = V.validate_answers(GOOD)
+    assert result.explicit["spawn.image"] == "jira-auto-dispatcher:latest"
+    assert result.explicit["spawn.network"] == "jad-net"
+    assert result.explicit["deploy.workspace_volume"] == "jad-workspace"
+
+
+def test_instance_derivation_beats_the_profile_table_for_workspace_volume():
+    """겹치는 키(``deploy.workspace_volume``)는 **인스턴스 파생이 이긴다.**
+
+    프로파일 표의 값은 인스턴스를 모르는 기본값(``jad-workspace``)이라, 그게 이기면 두
+    스택이 워크스페이스 볼륨(레포 클론·레포락 장부)을 공유한다. 설정 로더
+    (:func:`app.config._build_deploy`)도 같은 우선순위다.
+    """
+    result = V.validate_answers(
+        _merged(deploy={"instance": "jad-stg", "profile": "local"}))
+    assert result.explicit["deploy.workspace_volume"] == "jad-stg-workspace"
+
+
+def test_explicit_names_still_beat_the_instance_derivation():
+    """직접 적어 준 이름은 인스턴스가 바뀌어도 그대로다(명시 = 의사표시)."""
+    answers = _merged(deploy={"instance": "jad-stg", "workspace_volume": "shared-ws"})
+    answers["spawn"] = {"image": "registry.example.com/jad:1.2.3"}
+    result = V.validate_answers(answers)
+    assert result.explicit["deploy.workspace_volume"] == "shared-ws"
+    assert result.explicit["spawn.image"] == "registry.example.com/jad:1.2.3"

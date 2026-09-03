@@ -676,8 +676,37 @@ _DEPLOY = SchemaSection(
             legacy_keys=("spawn.workspace_volume",),
             description=(
                 "central·모든 워커가 공유하는 워크스페이스 **named 볼륨** 이름"
-                "(레포 단일 클론·단일 pull 지점)."
+                "(레포 단일 클론·단일 pull 지점). ``deploy.instance`` 에서 파생되므로 "
+                "보통 답하지 않는다(:func:`instance_derived_values`)."
             ),
+        ),
+        SchemaField(
+            key="spawn.image",
+            type=FieldType.STRING,
+            default="jira-auto-dispatcher:latest",
+            description=(
+                "워커(와 central)를 띄우는 **이미지 이름**. ``deploy.instance`` 에서 "
+                "파생된다 — 기본 인스턴스 ``jad`` 면 ``jira-auto-dispatcher:latest``, "
+                "그 외에는 ``jira-auto-dispatcher:<instance>``"
+                "(:func:`app.naming.default_image`). ⚠️ **인스턴스마다 태그가 달라야 "
+                "한다** — 한 태그를 공유하면 두 번째 인스턴스를 빌드하는 순간 돌고 있는 "
+                "첫 인스턴스의 워커 코드가 갈아치워진다. 레지스트리 이미지를 쓰는 등 "
+                "이름을 직접 정할 때만 답하고, 그때는 ``.env`` 의 ``JAD_IMAGE`` 도 같은 "
+                "값으로 맞춰라(compose 가 실제로 빌드하는 이름이 정본이라 env 가 이긴다)."
+            ),
+            example="jira-auto-dispatcher:latest",
+        ),
+        SchemaField(
+            key="spawn.network",
+            type=FieldType.STRING,
+            default="jad-net",
+            description=(
+                "워커를 붙일 docker 네트워크 **이름**. ``deploy.instance`` 에서 파생된다"
+                "(``<instance>-net`` — :func:`app.naming.default_network_name`). "
+                "compose 가 만드는 네트워크 이름과 **같아야** 한다(계약 A) — 어긋나면 "
+                "워커가 남의 인스턴스 네트워크에 붙거나 스폰이 실패한다."
+            ),
+            example="jad-net",
         ),
     ),
 )
@@ -763,6 +792,37 @@ def profile_derived_values(profile: Any) -> dict:
     if not derived:
         return {}
     return {f"deploy.{k}": v for k, v in derived.items() if v not in (None, "")}
+
+
+def instance_derived_values(instance: Any) -> dict:
+    """``deploy.instance`` 에서 **파생되는 답**을 ``{점 표기 키: 값}`` 으로 돌려준다.
+
+    :func:`profile_derived_values` 와 같은 사상이며, 파생 규칙의 단일 원천은
+    :mod:`app.naming` 이다(설정 로더도 그 함수들을 쓴다 — 두 벌로 갈라지지 않게).
+
+    왜 필요한가:
+        인스턴스 이름은 **docker 리소스 이름 공간 전체**를 옮긴다. 그런데 렌더러의
+        템플릿(``config.example.yaml``)에는 기본 인스턴스의 값(``jad-net``·
+        ``jad-workspace``·``jira-auto-dispatcher:latest``)이 **문자로** 적혀 있어서,
+        ``deploy.instance: jad-stg`` 로 답해도 그 세 줄이 그대로 남는다. 그러면 compose 는
+        ``jad-stg-*`` 를 만드는데 central 은 ``jad-*`` 를 부른다 — 워커가 **남의
+        인스턴스** 네트워크·워크스페이스·이미지를 쓰게 되는 조용한 결합이다(계약 A 위반).
+        그래서 파생값을 답의 일부로 취급해 렌더에 반영한다.
+
+    Args:
+        instance: 인스턴스 이름. 비면 기본 인스턴스로 본다.
+
+    Returns:
+        점 표기 키 → 파생값(``spawn.network``·``spawn.image``·``deploy.workspace_volume``).
+    """
+    from app import naming   # 지연 임포트 — 스키마 선언 시점에 설정 모듈을 끌어오지 않는다
+
+    name = str(instance or "").strip() or naming.DEFAULT_INSTANCE
+    return {
+        "spawn.network": naming.default_network_name(name),
+        "spawn.image": naming.default_image(name),
+        "deploy.workspace_volume": naming.default_workspace_volume(name),
+    }
 
 
 def iter_fields_in(sections: Tuple) -> Iterator[SchemaField]:

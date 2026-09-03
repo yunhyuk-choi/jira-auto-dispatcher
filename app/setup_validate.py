@@ -263,6 +263,29 @@ def flatten_answers(raw: Mapping, sections: Optional[tuple] = None) -> dict:
     return out
 
 
+def nest_answers(flat: Mapping) -> dict:
+    """:func:`flatten_answers` 의 역 — 점 표기 답변을 **중첩 매핑**으로 되돌린다.
+
+    두 소비처가 있어 여기(평탄화의 짝 자리)에 둔다:
+        - 마법사가 저장하는 ``setup-answers.json``(사람이 읽고 손으로 고치는 모양).
+        - ``discover`` 가 답변만으로 **조회용 설정 객체**를 만들 때
+          (:func:`app.setup_discover.config_from_answers`) — ``load_config_from_dict`` 이
+          중첩 매핑을 받기 때문이다.
+    """
+    out: dict = {}
+    for key, value in (flat or {}).items():
+        parts = str(key).split(".")
+        node = out
+        for part in parts[:-1]:
+            nxt = node.get(part)
+            if not isinstance(nxt, dict):
+                nxt = {}
+                node[part] = nxt
+            node = nxt
+        node[parts[-1]] = value
+    return out
+
+
 def resolve_values(flat: Mapping, sections: Optional[tuple] = None) -> tuple:
     """평탄화된 답변 → ``(해석된 값 표, 명시적으로 답한 값 표, 경고 목록)``.
 
@@ -306,6 +329,13 @@ def resolve_values(flat: Mapping, sections: Optional[tuple] = None) -> tuple:
         if f.default is not None:
             values[f.key] = copy.deepcopy(f.default)
 
+    # ⚠️ **인스턴스 파생이 먼저다.** 두 파생이 겹치는 키가 하나 있다 —
+    #    ``deploy.workspace_volume``. 프로파일 표(:data:`app.setup_schema.PROFILE_DEFAULTS`)의
+    #    값은 인스턴스를 모르는 기본값(``jad-workspace``)이라, 이걸 먼저 넣으면 두 번째
+    #    인스턴스의 config 에 **첫 인스턴스의 워크스페이스 볼륨**이 박힌다(두 스택이 레포
+    #    클론·레포락 장부를 공유하는 조용한 결합). 설정 로더도 같은 우선순위다 —
+    #    :func:`app.config._build_deploy` 는 이 키의 기본값을 인스턴스에서 파생한다.
+    _apply_instance_derived(values, explicit, _sections(sections))
     _apply_profile_derived(values, explicit, _sections(sections))
     return values, explicit, notes
 
@@ -328,6 +358,26 @@ def _apply_profile_derived(values: dict, explicit: dict, sections: tuple) -> Non
         return                      # 이 스키마는 배포 프로파일을 묻지 않는다(사용자 스키마 등)
     for key, value in S.profile_derived_values(values.get("deploy.profile")).items():
         if key in explicit:         # 명시 답변·레거시 키가 이긴다
+            continue
+        if S.get_field_in(sections, key) is None:
+            continue
+        values[key] = value
+        explicit[key] = value
+
+
+def _apply_instance_derived(values: dict, explicit: dict, sections: tuple) -> None:
+    """``deploy.instance`` 파생값(네트워크·이미지·워크스페이스 볼륨)을 답에 합친다.
+
+    :func:`_apply_profile_derived` 와 같은 이유·같은 우선순위다. 이게 없으면 두 번째
+    인스턴스의 ``config.yaml`` 에 예시 파일의 **기본 인스턴스 이름**(``jad-net`` ·
+    ``jad-workspace`` · ``jira-auto-dispatcher:latest``)이 그대로 남아, compose 가 만든
+    이름과 central 이 부르는 이름이 조용히 어긋난다
+    (:func:`app.setup_schema.instance_derived_values`).
+    """
+    if S.get_field_in(sections, "deploy.instance") is None:
+        return                      # 이 스키마는 인스턴스를 묻지 않는다(사용자 스키마 등)
+    for key, value in S.instance_derived_values(values.get("deploy.instance")).items():
+        if key in explicit:         # 명시 답변이 이긴다
             continue
         if S.get_field_in(sections, key) is None:
             continue

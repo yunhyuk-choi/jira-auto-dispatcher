@@ -181,6 +181,16 @@ COMPOSE_PROJECT_NAME=jad-stg  # ⚠️ 상태 볼륨 — 아래 설명. 빠뜨�
 `jad-stg-central` · `jad-stg-socket-proxy` · `jad-stg-net` · `jad-stg-workspace` ·
 `jad-stg-worker-<user>` 로 전부 갈린다. compose 가 그 값으로 리소스를 만든 뒤 같은 값을
 central 에도 넘기므로 **compose 가 만든 이름과 central 이 부르는 이름이 어긋날 수 없다.**
+
+**워커 이미지도 같은 축에서 갈린다 — `.env` 에 더 적을 것은 없다.** compose 가
+`jira-auto-dispatcher:${JAD_INSTANCE:-latest}` 로 태그를 파생하고(미설정이면 예전 그대로
+`:latest`), 그 문자열을 central 에 `JAD_IMAGE` 로 넘겨 spawner 가 **같은 태그**로 워커를
+띄운다. 이게 없던 시절에는 이미지 이름이 compose 에 변수 없이 박혀 있어서, 두 번째
+인스턴스에서 `docker compose build` 하는 순간 **돌고 있는 첫 인스턴스의 워커 이미지가
+갈아치워졌다**(이름 공간만 갈리고 실행 코드는 공유). 사내 레지스트리 이미지를 쓰는 등
+이름을 직접 정해야 할 때만 `.env` 에 `JAD_IMAGE=<repo>:<tag>` 를 더한다.
+`config.yaml` 의 `spawn.image`·`spawn.network` 도 `render` 가 `deploy.instance` 에 맞춰
+써 주므로 손으로 고칠 필요가 없다(정합은 `tests/test_compose_contract.py` 가 잠근다).
 `config.yaml` 의 `deploy.instance` 로도 적을 수 있지만 정본은 `.env` 쪽이다(다르면 env 를
 따르고 부팅 로그에 ERROR 가 남는다). 상세와 주의점은 DEPLOY.md §9.2.
 
@@ -281,9 +291,14 @@ cat > answers.json <<'JSON'
 JSON
 # ↑ run.dlc_meta_repo_url 이 없다 — 아래 --dlc-meta 가 채운다(사람이 적을 값이 아니다).
 
+# ⚠️ 순서는 **조회 → 검증 → 생성 → 진단**이다. 조회를 뒤로 미루면, 조회가 채워 줄 값
+#    (jira.trigger_statuses)이 없어 validate·render 가 막히는 순환에 빠진다.
+python -m app.setup discover --answers answers.json                # 인스턴스 조회(아래 참조)
+#   ↑ config.yaml 이 아직 없어도 된다 — 답변의 base_url·watcher_email·watcher_token_file 만 쓴다.
+#     조회 결과에서 고른 상태·전이·커스텀필드를 answers.json 에 채운 뒤 아래로 간다.
 python -m app.setup validate answers.json --dlc-meta ../dlc-meta   # 통과 못 하면 non-zero
 python -m app.setup render   answers.json --dlc-meta ../dlc-meta   # → config/config.yaml
-python -m app.setup discover                       # 인스턴스 조회(아래 참조)
+#   ↑ config/config.yaml 이 이미 있으면 exit 2. 다시 만들려면 --force(자동 .bak-* 백업).
 python -m app.setup doctor                         # 실측 진단
 ```
 
@@ -328,15 +343,24 @@ id 로 건다. 커스텀필드 id·전이 id 는 **인스턴스마다 완전히 
   **기존 배포 주의**: 이전에는 위 두 id 가 코드 기본값이었다. 그 값을 쓰고 있었다면
   `config.yaml` 의 `jira.custom_fields` 에 명시해야 완료 전이 동작이 그대로 유지된다.
 
-`discover` 는 `jira.base_url` · `jira.watcher_email` · `jira.watcher_token_file` 만 채운
-`config.yaml` 로도 돌아간다(나머지를 채우기 **전에** 쓰라고 만든 것이다).
+`discover` 는 `jira.base_url` · `jira.watcher_email` · `jira.watcher_token_file` **셋만**
+있으면 돌아간다(`jira.project` 까지 있으면 상태·전이도 조회하고, 없으면 그 둘만 사유와
+함께 SKIP 한다). 나머지를 채우기 **전에** 쓰라고 만든 명령이라 **`config.yaml` 이 아직
+없어도 된다** — 답변 파일을 그대로 읽는다:
 
 ```bash
-python -m app.setup discover                      # 전부
+python -m app.setup discover --answers answers.json   # config.yaml 없이 (권장 — 첫 조회)
+python -m app.setup discover                      # config/config.yaml 이 이미 있으면 그걸 쓴다
 python -m app.setup discover --only custom_fields # 필드 후보만
 python -m app.setup discover --issue PROJ-12      # 이 티켓으로 전이 실측(생략 시 최근 티켓)
 python -m app.setup discover --json > jira.json   # 기계용(후속 온보딩·웹 UI가 소비)
 ```
+
+> ⚠️ **조회하려고 `render` 를 먼저 돌리지 마라.** `render` 는 전체 검증을 돌리므로
+> `jira.trigger_statuses` 가 없으면 exit 1 인데, 그건 조회가 채워 주려던 값이다 — 빈
+> 상태에서는 빠져나올 수 없는 순환이 된다. `--answers`(또는 작업 디렉토리의
+> `setup-answers.json` 자동 인식)로 조회가 **먼저** 온다. 입력이 하나도 없으면 사용
+> 오류(exit 2)로 죽되 두 갈래를 모두 알려 준다 — 조용히 빈 결과를 내지 않는다.
 
 - **자동 선택은 아낀다.** 커스텀필드는 이름이 *정확히* 일치하는 필드가 **유일할 때만**
   고른다. 비슷한 이름이 여럿이거나 부분 일치뿐이면 고르지 않고 **후보만** 보여준다 —

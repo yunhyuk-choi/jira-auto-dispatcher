@@ -654,3 +654,70 @@ def test_env_instance_alone_is_enough(tmp_path, monkeypatch):
     assert cfg.deploy.instance == "jad-stg"
     assert cfg.spawn.network == "jad-stg-net"
     assert cfg.spawn.workspace_volume == "jad-stg-workspace"
+
+
+# --- 워커 이미지도 인스턴스 축이다(다중 인스턴스가 서로의 실행 코드를 밟지 않게) ----
+
+
+def test_default_instance_image_is_unchanged(tmp_path, monkeypatch):
+    """기본 인스턴스의 이미지 이름은 예전 하드코딩 값 그대로다(기존 배포 무변경)."""
+    monkeypatch.setenv("SECRETS_DIR", "/run/secrets")
+    monkeypatch.delenv("JAD_INSTANCE", raising=False)
+    monkeypatch.delenv("JAD_IMAGE", raising=False)
+    cfg = C.load_config(_write(tmp_path, _MINIMAL))
+    assert cfg.spawn.image == "jira-auto-dispatcher:latest"
+
+
+def test_instance_name_moves_the_image_tag(tmp_path, monkeypatch):
+    """인스턴스가 다르면 **이미지 태그도 다르다** — 한쪽 빌드가 다른 쪽을 갈아치우지 못한다."""
+    monkeypatch.setenv("SECRETS_DIR", "/run/secrets")
+    monkeypatch.delenv("JAD_INSTANCE", raising=False)
+    monkeypatch.delenv("JAD_IMAGE", raising=False)
+    cfg = C.load_config(_write(tmp_path, _MINIMAL + "deploy: { instance: jad-stg }\n"))
+    assert cfg.spawn.image == "jira-auto-dispatcher:jad-stg"
+
+
+def test_env_instance_moves_the_image_tag_too(tmp_path, monkeypatch):
+    """``.env`` 의 JAD_INSTANCE 한 줄이 이미지 태그까지 옮긴다(더 적을 것이 없다)."""
+    monkeypatch.setenv("SECRETS_DIR", "/run/secrets")
+    monkeypatch.setenv("JAD_INSTANCE", "jad-stg")
+    monkeypatch.delenv("JAD_IMAGE", raising=False)
+    cfg = C.load_config(_write(tmp_path, _MINIMAL))
+    assert cfg.spawn.image == "jira-auto-dispatcher:jad-stg"
+
+
+def test_explicit_image_beats_the_instance_derivation(tmp_path, monkeypatch):
+    """이름을 직접 적어 둔 배포(사내 레지스트리 등)는 인스턴스가 바뀌어도 흔들리지 않는다."""
+    monkeypatch.setenv("SECRETS_DIR", "/run/secrets")
+    monkeypatch.delenv("JAD_INSTANCE", raising=False)
+    monkeypatch.delenv("JAD_IMAGE", raising=False)
+    cfg = C.load_config(_write(tmp_path, _MINIMAL + """
+deploy: { instance: jad-stg }
+spawn: { image: registry.example.com/jad:1.2.3 }
+"""))
+    assert cfg.spawn.image == "registry.example.com/jad:1.2.3"
+
+
+def test_env_image_wins_over_config_and_says_so(tmp_path, monkeypatch, caplog):
+    """env ``JAD_IMAGE`` 는 **compose 가 실제로 빌드한 태그**다 — 어긋나면 env 를 따른다."""
+    monkeypatch.setenv("SECRETS_DIR", "/run/secrets")
+    monkeypatch.delenv("JAD_INSTANCE", raising=False)
+    monkeypatch.setenv("JAD_IMAGE", "jira-auto-dispatcher:jad-stg")
+    with caplog.at_level("ERROR", logger="jad.config"):
+        cfg = C.load_config(_write(
+            tmp_path, _MINIMAL + "spawn: { image: registry.example.com/jad:1 }\n"))
+    assert cfg.spawn.image == "jira-auto-dispatcher:jad-stg"
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert "JAD_IMAGE" in logged and "registry.example.com/jad:1" in logged
+
+
+def test_env_image_on_a_derived_default_is_not_an_error(tmp_path, monkeypatch, caplog):
+    """파생 기본값이 남아 있던 경우는 '어긋난 것'이 아니다 — 맞추되 ERROR 로 울지 않는다."""
+    monkeypatch.setenv("SECRETS_DIR", "/run/secrets")
+    monkeypatch.delenv("JAD_INSTANCE", raising=False)
+    monkeypatch.setenv("JAD_IMAGE", "jira-auto-dispatcher:jad-stg")
+    with caplog.at_level("ERROR", logger="jad.config"):
+        cfg = C.load_config(_write(
+            tmp_path, _MINIMAL + "spawn: { image: jira-auto-dispatcher:latest }\n"))
+    assert cfg.spawn.image == "jira-auto-dispatcher:jad-stg"
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]

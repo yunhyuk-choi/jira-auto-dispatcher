@@ -350,12 +350,20 @@ def with_token(url: str, token: str, *, kind: Any = None, config: Any = None) ->
     기존 자격정보가 있으면 제거하고 재주입한다. 스킴이 없으면 원문 그대로 반환한다
     (scp 형식·상대 경로에 토큰을 억지로 끼워 깨진 URL 을 만들지 않는다).
 
+    ⚠️ **http/https 가 아니면 주입하지 않는다.** 토큰 인증은 HTTP(S) 원격에서만 의미가
+    있는데, 예전에는 스킴이 있기만 하면 주입해서 ``file:///c/…`` 같은 로컬 원격을
+    ``file://oauth2:<token>@/c/…`` 라는 **어디에도 없는 URL** 로 만들었다(실측). 깨진
+    URL 로 실패하는 것도 문제지만, 토큰을 엉뚱한 문자열에 실어 로그·에러 메시지로 흘릴
+    위험이 더 크다. ``file:``·``ssh:``·``git:`` 등은 원문 **그대로** 돌려준다.
+
     ⚠️ 토큰은 **반환 URL 에만** 실린다 — 이 함수는 로그를 남기지 않는다.
     """
     m = _SCHEME.match(url or "")
     if not m:
         return url
     scheme, rest = m.group(1), m.group(2)
+    if scheme.lower() not in ("http://", "https://"):
+        return url
     if "@" in rest:  # 기존 user[:pass]@ 제거
         rest = rest.split("@", 1)[1]
     username = token_username(kind_for(url=url, kind=kind, config=config))

@@ -21,7 +21,7 @@
 | 대상 서버 | `<서버>` — 이 시스템 **전용 호스트** 권장(SECURITY.md §4) |
 | SSH 계정 | `<deploy-user>` (docker 실행 권한 필요) |
 | 필요 런타임 | Docker Engine + Docker Compose v2 (`docker compose`) |
-| 이미지 | `jira-auto-dispatcher:latest` (central·worker 공용 단일 이미지) |
+| 이미지 | `jira-auto-dispatcher:latest` (central·worker 공용 단일 이미지). 태그는 **인스턴스에서 파생**한다 — `jira-auto-dispatcher:${JAD_INSTANCE:-latest}`(§9.2) |
 | 네트워크 | `jad-net` (compose가 생성; 동적 worker가 이름으로 합류) |
 | 관리 UI 포트 | `8787` (⚠️ 신뢰 네트워크 한정 — 인터넷 노출 금지) |
 | 인스턴스 이름 | `jad` (기본) — 컨테이너·네트워크·볼륨 이름 접두어. 한 호스트에 여러 벌 띄울 때만 바꾼다(§9.2) |
@@ -29,7 +29,10 @@
 계약 정합(이 3개는 `Dockerfile`·`docker-compose.yml`·`config/config.yaml`·`app/spawner.py`가
 모두 동일해야 한다):
 
-- **image** = `jira-auto-dispatcher:latest`
+- **image** = `jira-auto-dispatcher:latest` (= `jira-auto-dispatcher:${JAD_INSTANCE:-latest}`)
+  — compose 가 이 문자열을 central 에 env `JAD_IMAGE` 로도 넘겨 spawner 가 같은 태그를 쓴다.
+  ⚠️ 인스턴스마다 태그가 달라야 한다 — 공유하면 한쪽 빌드가 **돌고 있는 다른 쪽의 워커
+  실행 코드**를 갈아치운다(`tests/test_compose_contract.py` 가 이 정합을 잠근다)
 - **network** = `jad-net` (= `<인스턴스>-net`)
 - **central DNS** = `http://central:8787` (compose **서비스 키**가 `central` — 컨테이너
   이름과 무관하다. 그래서 컨테이너 이름에 접두어를 붙여도 이 주소는 그대로다)
@@ -107,8 +110,8 @@ deploy:
   workspace_volume: jad-workspace
 
 spawn:
-  image: jira-auto-dispatcher:latest
-  network: jad-net
+  image: jira-auto-dispatcher:latest           # deploy.instance 에서 파생(render 가 써 준다)
+  network: jad-net                             # 〃  (<instance>-net)
   run_as: "1000:1000"
 ```
 
@@ -408,16 +411,23 @@ COMPOSE_PROJECT_NAME=jad-stg  # ⚠️ 상태 볼륨 jad-state 는 이것으로�
 | 공유 워크스페이스 볼륨 | `jad-workspace` | `jad-stg-workspace` |
 | worker 컨테이너 | `jad-worker-<user>` | `jad-stg-worker-<user>` |
 | worker per-user 볼륨 | `jad-<user>` | `jad-stg-<user>` |
+| **워커/central 이미지 태그** | `jira-auto-dispatcher:latest` | `jira-auto-dispatcher:jad-stg` |
 
 - **compose 와 central 이 어긋날 수 없다**: compose 가 그 값으로 리소스를 만든 뒤 같은 값을
   central 에 env 로 넘기고, central 의 config 가 거기서 `spawn.network`·
   `deploy.workspace_volume`·워커 이름을 파생한다(`app/naming.py`). `config.yaml` 의
   `deploy.instance` 를 따로 적어 두고 `.env` 와 다르면 **env 를 따르고 부팅 로그에 ERROR** 가
   남는다(compose 가 실제로 만든 이름이 env 쪽이기 때문).
-- **바꾸지 않는 것**: compose 서비스 키(`central`·`socket-proxy`)와 이미지 태그. 서비스 키는
-  네트워크 DNS(`tcp://socket-proxy:2375`)가 쓰고, 이미지는 인스턴스끼리 공유해도 무해하다
-  (⚠️ 다만 두 인스턴스가 **서로 다른 버전**을 돌려야 하면 `image:`/`build` 도 따로 태그해야
-  한다 — 같은 태그를 재빌드하면 다른 인스턴스가 재생성될 때 새 이미지를 집는다).
+- **바꾸지 않는 것**: compose 서비스 키(`central`·`socket-proxy`) — 네트워크
+  DNS(`tcp://socket-proxy:2375`)가 그 이름으로 돈다.
+- ⚠️ **이미지 태그도 인스턴스 축이다(예전 서술은 틀렸다).** 이 문단은 한때 "이미지는
+  인스턴스끼리 공유해도 무해하다"고 적었는데, 실제로는 **한쪽에서 `docker compose build`
+  하는 순간 돌고 있는 다른 인스턴스의 워커 실행 코드가 바뀐다**(이름 공간만 갈리고 코드는
+  공유 — 리허설에서 실제로 밟았고, 먼저 뜬 인스턴스는 `docker-compose.override.yml` 로
+  우회하고 있었다). 지금은 compose 가
+  `jira-auto-dispatcher:${JAD_INSTANCE:-latest}` 로 태그를 파생하고 그 문자열을 central 에
+  env `JAD_IMAGE` 로 넘겨 spawner 가 같은 태그를 쓴다 — `.env` 에 더 적을 것이 없다.
+  사내 레지스트리 이미지를 쓸 때만 `JAD_IMAGE=<repo>:<tag>` 를 명시한다.
 - ⚠️ **`JAD_INSTANCE` 가 옮기지 *못하는* 것 — 상태 볼륨 `jad-state`.** 이름을 고정하지
   않아 compose **프로젝트명**으로만 갈리는데, 프로젝트명의 기본값은 **디렉토리 이름**이다
   (예전 이 문단은 "별도 디렉토리 = 다른 프로젝트명"이라고 적었는데 **틀렸다** — 같은 레포를
