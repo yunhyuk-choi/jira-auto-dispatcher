@@ -543,6 +543,92 @@ def test_dlc_meta_auth_failure_is_masked(tmp_path):
     assert "***" in r.message
 
 
+def test_dlc_meta_auth_failure_hint_names_the_token(tmp_path):
+    """인증 실패는 **토큰**을 지목한다(네트워크가 아니다)."""
+    cfg, root = _cfg_with_forge_secret(tmp_path)
+    r = D.check_dlc_meta(
+        cfg, project_dir=root,
+        runner=_runner(128, stderr="fatal: Authentication failed for 'https://x/y.git/'"))
+    assert r.status == D.STATUS_FAIL
+    assert "토큰" in r.hint and "네트워크" not in r.hint
+
+
+# --- git 실패는 **원인별로** 갈린다 (실측 오진 회귀) -------------------------------
+# dubious ownership 인데 "네트워크·DNS·방화벽을 보라"고 안내했다 — 그 말을 믿으면
+# 애먼 데를 뒤진다. git 이 stderr 로 이미 말한 것을 우선한다(Jira 404 선례와 동일).
+
+
+def test_dlc_meta_dubious_ownership_is_not_reported_as_a_network_problem(tmp_path):
+    cfg, root = _cfg_with_forge_secret(tmp_path)
+    stderr = ("fatal: detected dubious ownership in repository at "
+              "'/app/workspace/dlc-meta'")
+    r = D.check_dlc_meta(cfg, project_dir=root, runner=_runner(128, stderr=stderr))
+    assert r.status == D.STATUS_FAIL
+    # git 원문을 살려서 보여준다.
+    assert "dubious ownership" in r.message
+    # 원인은 소유자 — 네트워크·DNS·VPN 을 지목하지 않는다.
+    for wrong in ("DNS", "방화벽", "VPN"):
+        assert wrong not in r.hint
+    assert "소유자" in r.hint
+
+
+def test_dlc_meta_dubious_ownership_hint_offers_the_narrow_path_first(tmp_path):
+    """``safe.directory '*'`` 를 무턱대고 권하지 않는다 — 좁은 대안이 먼저다."""
+    cfg, root = _cfg_with_forge_secret(tmp_path)
+    stderr = ("fatal: detected dubious ownership in repository at "
+              "'/app/workspace/dlc-meta'")
+    r = D.check_dlc_meta(cfg, project_dir=root, runner=_runner(128, stderr=stderr))
+    hint = r.hint
+    narrow = hint.index('safe.directory "/app/workspace/dlc-meta"')
+    broad = hint.index("safe.directory '*'")
+    assert narrow < broad, "좁은 대안(해당 경로)이 전역 '*' 보다 먼저 와야 한다"
+    assert "⚠️" in hint[narrow:broad] or "⚠️" in hint[broad - 40:broad]
+
+
+def test_dlc_meta_dubious_ownership_without_a_parsable_path_still_warns(tmp_path):
+    """경로를 못 뽑아도 안내는 원문을 가리키며 살아 있다."""
+    cfg, root = _cfg_with_forge_secret(tmp_path)
+    r = D.check_dlc_meta(cfg, project_dir=root,
+                         runner=_runner(128, stderr="fatal: dubious ownership"))
+    assert r.status == D.STATUS_FAIL and "소유자" in r.hint
+
+
+def test_dlc_meta_not_a_repository_is_its_own_cause(tmp_path):
+    cfg, root = _cfg_with_forge_secret(tmp_path)
+    r = D.check_dlc_meta(
+        cfg, project_dir=root,
+        runner=_runner(128, stderr="fatal: '/tmp/x' does not appear to be a git repository"))
+    assert r.status == D.STATUS_FAIL
+    assert "레포" in r.hint
+    assert "DNS" not in r.hint and "소유자" not in r.hint
+
+
+def test_dlc_meta_dns_failure_is_the_network_cause(tmp_path):
+    cfg, root = _cfg_with_forge_secret(tmp_path)
+    r = D.check_dlc_meta(
+        cfg, project_dir=root,
+        runner=_runner(128, stderr="fatal: unable to access ...: Could not resolve host: git.x"))
+    assert r.status == D.STATUS_FAIL
+    assert "DNS" in r.hint
+
+
+def test_dlc_meta_unrecognized_failure_does_not_guess_a_cause(tmp_path):
+    """모르는 실패에 **아무 원인도 지목하지 않는다**(예전 기본값이 네트워크였다)."""
+    cfg, root = _cfg_with_forge_secret(tmp_path)
+    r = D.check_dlc_meta(cfg, project_dir=root,
+                         runner=_runner(1, stderr="fatal: 알 수 없는 무엇인가"))
+    assert r.status == D.STATUS_FAIL
+    assert "알 수 없는 무엇인가" in r.message
+    for guessed in ("DNS", "방화벽", "VPN", "소유자", "토큰"):
+        assert guessed not in r.hint
+
+
+def test_dlc_meta_silent_git_failure_says_so(tmp_path):
+    cfg, root = _cfg_with_forge_secret(tmp_path)
+    r = D.check_dlc_meta(cfg, project_dir=root, runner=_runner(1))
+    assert r.status == D.STATUS_FAIL and "아무 말도" in r.message
+
+
 def test_dlc_meta_skips_without_url(tmp_path):
     cfg = make_cfg(run={"dlc_meta_repo_url": ""},
                    deploy={"secrets_base_dir": str(tmp_path)})

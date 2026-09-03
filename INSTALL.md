@@ -169,14 +169,13 @@ run:
 로 멈춘다. 이름 접두어를 인스턴스마다 나누면 된다 — 노브는 `.env` 의 `JAD_INSTANCE`
 하나이고, **미설정이면 `jad`** 라 지금 배포는 아무것도 달라지지 않는다.
 
-```bash
-# 두 번째 인스턴스는 **별도 디렉토리**에 배포한다(소스·config·secrets 를 각자 갖는다).
-cd /opt/jad-stg
-cat >> .env <<'EOF'
-JAD_INSTANCE=jad-stg      # 컨테이너·네트워크·볼륨 이름 접두어
-JAD_PORT=8788             # 관리 UI 호스트 포트(인스턴스마다 달라야 한다)
-EOF
-docker compose up -d
+두 번째 인스턴스는 **별도 디렉토리**에 배포하고(소스·config·secrets 를 각자 갖는다) 그
+디렉토리의 `.env` 에 아래 **세 줄**을 넣는다:
+
+```
+JAD_INSTANCE=jad-stg          # 컨테이너·네트워크·워크스페이스 볼륨 이름 접두어
+JAD_PORT=8788                 # 관리 UI 호스트 포트(인스턴스마다 달라야 한다)
+COMPOSE_PROJECT_NAME=jad-stg  # ⚠️ 상태 볼륨 — 아래 설명. 빠뜨리면 조용히 상태를 공유한다
 ```
 
 `jad-stg-central` · `jad-stg-socket-proxy` · `jad-stg-net` · `jad-stg-workspace` ·
@@ -185,6 +184,24 @@ central 에도 넘기므로 **compose 가 만든 이름과 central 이 부르는
 `config.yaml` 의 `deploy.instance` 로도 적을 수 있지만 정본은 `.env` 쪽이다(다르면 env 를
 따르고 부팅 로그에 ERROR 가 남는다). 상세와 주의점은 DEPLOY.md §9.2.
 
+> ⚠️ **세 번째 줄을 빠뜨리지 마라 — `JAD_INSTANCE` 가 덮지 못하는 자리가 하나 있다.**
+> central 의 상태 볼륨 `jad-state`(jobs · watermark · dedup · registry)는 이름을 박지 않아
+> **compose 프로젝트명**으로만 갈리는데, 프로젝트명의 기본값은 **디렉토리 이름**이다.
+> "별도 디렉토리"만으로는 부족하다 — 같은 레포를 한 번 더 클론하면(두 번째 인스턴스를
+> 만드는 가장 자연스러운 방법) 디렉토리 이름이 같아 프로젝트명도 같아지고 두 인스턴스가
+> 같은 상태 볼륨을 쓴다. 그러면 **같은 티켓을 중복 처리하고 등록 사용자가 섞인다.**
+> 실측(`docker compose config` 의 `volumes.jad-state.name`):
+>
+> | `.env` | `jad-state` 실제 이름 |
+> |---|---|
+> | (없음 — 기본) | `<디렉토리이름>_jad-state` ← **기존 배포 무변경** |
+> | `JAD_INSTANCE=jad-stg` 만 | `<디렉토리이름>_jad-state` ← **안 갈린다** |
+> | `JAD_INSTANCE=jad-stg` + `COMPOSE_PROJECT_NAME=jad-stg` | `jad-stg_jad-state` ← 갈린다 |
+>
+> compose 에는 "미설정이면 프로젝트 접두어, 설정하면 인스턴스 접두어"를 표현할 문법이
+> 없다. `volumes.jad-state.name` 을 박으면 기본값 자체가 바뀌어 **지금 돌고 있는 배포가
+> 상태를 통째로 잃으므로**, 이 한 자리만 사람이 명시하는 쪽으로 남겼다.
+
 ### 2.3 호스트 OS 별 표기 (리눅스 / 맥 / 윈도우)
 
 코드에는 플랫폼 분기가 없다 — 컨테이너 안은 항상 리눅스다. 호스트 절대경로를 직접 적는
@@ -192,9 +209,29 @@ central 에도 넘기므로 **compose 가 만든 이름과 central 이 부르는
 (갈래 B·C)면 이 값은 **컨테이너 경로**(`/run/secrets`)라 호스트 OS 와 무관하고, 로컬 개발
 (갈래 A)이면 그냥 로컬 디렉토리다(윈도우도 슬래시 표기: `C:/Users/<you>/.jad/secrets`).
 
+**시크릿 파일 만들기 — OS 중립 방법이 기본이다.** 갈래 A·B·C 어디서든 시크릿은 "값이
+아니라 파일"이고, 아래 한 줄이면 리눅스·macOS·윈도우가 같은 명령으로 덮인다(파이썬은
+이미 전제조건이다 — §1). 토큰은 화면에 찍히지 않고 파일로만 간다:
+
+```bash
+python -c "import getpass,os,pathlib,secrets; d=pathlib.Path('secrets/service'); d.mkdir(parents=True,exist_ok=True); [os.chmod(p,0o700) for p in (d.parent,d)]; w=lambda n,v:(d.joinpath(n).write_text(v,encoding='utf-8'), os.chmod(d/n,0o600)); w('jira-token',getpass.getpass('Jira API 토큰: ')); w('forge-token',getpass.getpass('forge PAT: ')); w('jira-webhook',secrets.token_hex(32))"
+```
+
+웹훅 시크릿(`jira-webhook`)은 사람이 정하는 값이 아니라 난수다. POSIX 셸을 쓴다면
+§3 (2)의 `printf`·`chmod` 방식도 그대로 유효하다.
+
+- **이미 갖고 있는 토큰 파일을 그대로 써도 된다** — 재발급할 이유가 없다. 그 파일을
+  `secrets/<참조 경로>` 로 복사하면 끝이고, 참조 이름을 맞출 필요도 없다
+  (`jira.watcher_token_file`·`forge.token_ref` 를 그 경로로 적으면 된다).
 - 시크릿 파일 권한 하드닝(`chmod 600`)은 리눅스/맥에서만 의미가 있다. 윈도우에서는 chmod 가
   무시되므로(코드도 `OSError` 를 무해하게 넘긴다) NTFS ACL 로 별도 보호해야 한다 —
   **윈도우 호스트는 개인 평가용으로만 쓰는 것을 권한다.**
+- ⚠️ 그 결과 **윈도우 호스트에서는 컨테이너 doctor 의 `[WARN] secrets … 권한이
+  헐겁습니다` 가 영구적으로 뜬다**(실측). 바인드 마운트된 파일이 리눅스 컨테이너 안에서
+  헐겁게 보이고, 컨테이너 안에서 `chmod` 를 해도 사라지지 않는다. **넘어가도 된다** —
+  `WARN` 은 온보딩 게이트를 막지 않고(`FAIL` 만 막는다) 기능도 degrade 되지 않는다.
+  다만 파일이 실제로 헐거운 것은 사실이므로 공유 머신이면 `icacls` 로 조여라.
+  리눅스·macOS 에서 같은 WARN 이 나오면 그건 **진짜 문제**다.
 - 텍스트 파일은 전부 **LF**로 정규화된다(`.gitattributes`). 윈도우에서 편집기 설정으로
   CRLF 를 강제하면 컨테이너 안 셸 스크립트가 깨질 수 있다.
 

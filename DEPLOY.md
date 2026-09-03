@@ -389,14 +389,13 @@ worker 의 bind 마운트가 전부 사라지면서 `deploy.host_deploy_dir` / e
 컨테이너·네트워크·볼륨 이름은 **인스턴스 접두어**에서 파생한다. 접두어는 `.env` 의
 `JAD_INSTANCE` 하나이고 **미설정이면 `jad`** 다 — 지금 도는 배포는 아무것도 달라지지 않는다.
 
-```bash
-# 두 번째 인스턴스: 별도 디렉토리에 배포하고 .env 에 두 줄만 추가
-mkdir -p /opt/jad-stg && cd /opt/jad-stg      # 소스·config·secrets 는 이 디렉토리에 따로
-cat >> .env <<'EOF'
-JAD_INSTANCE=jad-stg      # 컨테이너·네트워크·볼륨 접두어
-JAD_PORT=8788             # 관리 UI 호스트 포트(인스턴스마다 달라야 한다)
-EOF
-docker compose up -d
+두 번째 인스턴스는 별도 디렉토리에 배포하고(소스·config·secrets 를 따로 갖는다) 그
+디렉토리의 `.env` 에 아래 세 줄을 넣은 뒤 `docker compose up -d`:
+
+```
+JAD_INSTANCE=jad-stg          # 컨테이너·네트워크·워크스페이스 볼륨 접두어
+JAD_PORT=8788                 # 관리 UI 호스트 포트(인스턴스마다 달라야 한다)
+COMPOSE_PROJECT_NAME=jad-stg  # ⚠️ 상태 볼륨 jad-state 는 이것으로만 갈린다(아래)
 ```
 
 이 한 값이 옮기는 것:
@@ -419,9 +418,23 @@ docker compose up -d
   네트워크 DNS(`tcp://socket-proxy:2375`)가 쓰고, 이미지는 인스턴스끼리 공유해도 무해하다
   (⚠️ 다만 두 인스턴스가 **서로 다른 버전**을 돌려야 하면 `image:`/`build` 도 따로 태그해야
   한다 — 같은 태그를 재빌드하면 다른 인스턴스가 재생성될 때 새 이미지를 집는다).
-- **상태 볼륨(`jad-state`)** 은 이름을 고정하지 않는다 — compose 프로젝트 접두어가 붙어
-  이미 인스턴스별로 갈린다(별도 디렉토리 = 다른 프로젝트명). 같은 디렉토리에서 두 벌을
-  띄우려면 `COMPOSE_PROJECT_NAME` 도 함께 나눈다.
+- ⚠️ **`JAD_INSTANCE` 가 옮기지 *못하는* 것 — 상태 볼륨 `jad-state`.** 이름을 고정하지
+  않아 compose **프로젝트명**으로만 갈리는데, 프로젝트명의 기본값은 **디렉토리 이름**이다
+  (예전 이 문단은 "별도 디렉토리 = 다른 프로젝트명"이라고 적었는데 **틀렸다** — 같은 레포를
+  한 번 더 클론하면 디렉토리 이름이 같다). 그러면 두 인스턴스가 jobs·watermark·dedup·
+  registry 를 공유해 **같은 티켓을 중복 처리하고 등록 사용자가 섞인다.** 그래서 위 세 번째
+  줄(`COMPOSE_PROJECT_NAME`)이 필요하다. 실측(`docker compose config` 의
+  `volumes.jad-state.name`):
+
+  | `.env` | `jad-state` 실제 이름 |
+  |---|---|
+  | (없음 — 기본) | `<디렉토리이름>_jad-state` ← **기존 배포 무변경** |
+  | `JAD_INSTANCE=jad-stg` 만 | `<디렉토리이름>_jad-state` ← **안 갈린다** |
+  | `JAD_INSTANCE` + `COMPOSE_PROJECT_NAME=jad-stg` | `jad-stg_jad-state` |
+
+  compose 문법으로는 "미설정이면 프로젝트 접두어, 설정하면 인스턴스 접두어"를 쓸 수 없고,
+  `volumes.jad-state.name` 을 박으면 **기본값이 바뀌어 지금 도는 배포가 상태를 통째로
+  잃는다.** 그래서 자동화하지 않고 이 한 줄을 사람이 명시하는 쪽으로 남겼다.
 - **인스턴스 이름을 나중에 바꾸면** 네트워크·볼륨이 새로 만들어진다 — 기존 공유 워크스페이스
   볼륨의 클론은 따라오지 않는다(레포는 다시 clone 된다. 잡 상태는 `jad-state` 에 있으므로
   프로젝트가 같으면 유지된다).

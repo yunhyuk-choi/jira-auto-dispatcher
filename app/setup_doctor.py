@@ -39,6 +39,7 @@ POLICY-ENCODING: 이 파일은 UTF-8(BOM 없음)·LF.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
@@ -620,6 +621,77 @@ def check_forge_token(cfg: Any, *, project_dir: str = ".", http: Any = None) -> 
                        f"{forge_mod.label(kind)} 인증 성공(계정 {login})")
 
 
+#: ``fatal: detected dubious ownership in repository at '/path'`` 에서 경로만 뽑는다
+#: (따옴표는 git 버전마다 다르다). 못 뽑으면 안내는 원문을 가리키는 쪽으로 물러선다.
+_DUBIOUS_PATH_RE = re.compile(r"dubious ownership in repository at ['\"]?([^'\"\n]+)")
+
+
+#: "그런 레포는 없다" 신호. git 은 로컬·원격 어느 쪽이 문제냐에 따라 문구가 다르고
+#: (``does not appear to be a git repository`` / ``not a git repository``), forge 는
+#: **권한 없는 비공개 레포**도 같은 말로 답한다(존재를 흘리지 않으려고).
+_GIT_NO_REPO_SIGNALS = ("not a git repository", "does not appear to be a git repository",
+                        "repository not found", "project not found",
+                        "repository does not exist")
+
+#: 인증 실패 신호(git·forge 가 실제로 뱉는 문구). ``could not read Username`` 은 자격이
+#: 아예 없을 때 나온다 — 이 검사는 프롬프트를 꺼 두므로(GIT_TERMINAL_PROMPT=0) 매달리지
+#: 않고 이 문장으로 떨어진다.
+_GIT_AUTH_SIGNALS = ("authentication", "could not read username", "could not read password",
+                     "terminal prompts disabled", "permission denied", "access denied",
+                     "invalid username or password", "403", "401")
+
+#: 네트워크·DNS 신호. ⚠️ 여기 없는 실패를 네트워크로 **추정하지 않는다**(오진의 원인).
+_GIT_NETWORK_SIGNALS = ("could not resolve host", "name or service not known",
+                        "temporary failure in name resolution", "connection refused",
+                        "connection timed out", "network is unreachable",
+                        "failed to connect", "no route to host", "operation timed out")
+
+
+def _git_failure_hint(detail: str) -> str:
+    """git 실패 **원문**을 원인별 안내로 가른다(추측으로 덮지 않는다).
+
+    ⚠️ 실측된 오진: ``dlc_meta`` 가 FAIL 인데 힌트는 "이 호스트에서 그 원격에 네트워크로
+    닿는지(DNS·방화벽·VPN) 확인하세요" 였다. 진짜 이유는 git 이 stderr 로 이미 말한
+    ``fatal: detected dubious ownership in repository at ...`` — 원격은 멀쩡했고 문제는
+    **로컬 디렉토리의 소유자**였다. 그 힌트를 믿었으면 네트워크를 뒤졌을 것이다.
+
+    그래서 규칙은 :func:`_endpoint_absent_failure` 의 Jira 404 선례와 같다 — *git 이 한
+    말이 우선*이다. 여기서는 인식한 신호에 대해서만 구체적 안내를 얹고, 인식하지 못하면
+    **아무 원인도 지목하지 않고** 원문을 읽으라고 말한다(예전 기본값이 네트워크였던 것이
+    오진의 원인이었다).
+    """
+    low = (detail or "").lower()
+    if "dubious ownership" in low:
+        found = _DUBIOUS_PATH_RE.search(detail or "")
+        path = found.group(1).strip() if found else "<위 원문에 적힌 경로>"
+        return (
+            "원격 문제가 아닙니다 — git 이 **로컬 디렉토리의 소유자가 자기와 다르다**는 "
+            "이유로 실행 자체를 거부했습니다(이 검사는 현재 디렉토리에서 git 을 돌리므로, "
+            "원격에 닿기 전에 거기 있는 레포의 소유자 검사에 먼저 걸립니다). 다른 계정이 "
+            "클론했거나(sudo·다른 사용자), 컨테이너·마운트로 uid 가 어긋난 경우입니다. "
+            f"그 경로만 **좁게** 신뢰 목록에 넣으세요: "
+            f"git config --global --add safe.directory \"{path}\" "
+            "⚠️ safe.directory '*' 로 여는 안내를 흔히 보게 되는데, 그건 이 계정의 git "
+            "전체에서 소유자 검사를 끄는 것이라 남이 놓아 둔 레포의 설정·훅까지 신뢰하게 "
+            "됩니다 — 경로가 여럿이라 하나씩 넣기 어려울 때만, 그 대가를 알고 쓰세요. "
+            "소유자를 맞출 수 있으면(chown) 그쪽이 낫습니다."
+        )
+    if any(sig in low for sig in _GIT_NO_REPO_SIGNALS):
+        return ("git 이 그 대상을 레포로 보지 않습니다 — run.dlc_meta_repo_url 이 clone "
+                "가능한 URL(또는 실재하는 레포 경로)인지 확인하세요. 원격이 있는데도 "
+                "이렇게 나오면 그 자격으로는 **레포가 보이지 않는** 것일 수 있습니다"
+                "(비공개 레포에 권한 없는 토큰 — forge 는 404 처럼 응답합니다).")
+    if any(sig in low for sig in _GIT_AUTH_SIGNALS):
+        return ("인증 실패로 보입니다 — forge 토큰의 스코프·유효기간과 그 토큰이 이 "
+                "레포에 접근 가능한지 확인하세요.")
+    if any(sig in low for sig in _GIT_NETWORK_SIGNALS):
+        return ("이 호스트에서 그 원격에 네트워크로 닿는지(DNS·방화벽·VPN·프록시) "
+                "확인하세요.")
+    return ("git 이 위 원문으로 이유를 말했습니다 — 그 문장을 먼저 읽으세요"
+            "(원인을 추측해 덮지 않습니다). 같은 명령을 손으로 돌리면 전체 출력을 "
+            "볼 수 있습니다: git ls-remote --heads <run.dlc_meta_repo_url>")
+
+
 def check_dlc_meta(cfg: Any, *, project_dir: str = ".",
                    runner: Optional[Callable] = None) -> CheckResult:
     """⚠️ dlc-meta 원격을 **이 호스트에서** 실제로 fetch 할 수 있는가.
@@ -662,12 +734,11 @@ def check_dlc_meta(cfg: Any, *, project_dir: str = ".",
     if rc != 0:
         detail = mask_secrets(
             (getattr(cp, "stderr", "") or getattr(cp, "stdout", "") or "").strip(), token)
-        hint = ("인증 실패로 보입니다 — forge 토큰의 스코프·유효기간과 그 토큰이 이 "
-                "레포에 접근 가능한지 확인하세요."
-                if "authentication" in detail.lower() or "403" in detail or "401" in detail
-                else "이 호스트에서 그 원격에 네트워크로 닿는지(DNS·방화벽·VPN) 확인하세요.")
-        return CheckResult("dlc_meta", STATUS_FAIL,
-                           f"git ls-remote 실패(rc={rc}): {detail}", hint)
+        # 원인은 git 이 stderr 로 이미 말했다 — 원문을 그대로 싣고(마스킹만 하고),
+        # 힌트는 그 원문에서 **갈라서** 낸다(_git_failure_hint).
+        message = (f"git ls-remote 실패(rc={rc}): {detail}" if detail
+                   else f"git ls-remote 실패(rc={rc}) — git 이 아무 말도 하지 않았습니다")
+        return CheckResult("dlc_meta", STATUS_FAIL, message, _git_failure_hint(detail))
     heads = len([ln for ln in (getattr(cp, "stdout", "") or "").splitlines() if ln.strip()])
     if heads == 0:
         return CheckResult("dlc_meta", STATUS_WARN,

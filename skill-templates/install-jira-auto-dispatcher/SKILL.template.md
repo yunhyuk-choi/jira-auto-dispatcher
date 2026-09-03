@@ -21,7 +21,7 @@ description: jira-auto-dispatcher 를 처음 설치·설정할 때 쓴다. 설�
 |---|---|
 | `python -m app.setup discover` | 이 Jira 인스턴스에 **실제로 있는** 커스텀필드·상태·전이 id 조회 |
 | `python -m app.setup validate <답변.json>` | 스키마 검증. **통과 못 하면 non-zero** |
-| `python -m app.setup render <답변.json>` | `config/config.yaml` 생성(+ `.env` 공유 시크릿) |
+| `python -m app.setup render <답변.json>` | `config/config.yaml` 생성(`.env` 는 만들지 않는다 — 6)에서 손으로 쓴다) |
 | `python -m app.setup doctor` | 그 설정으로 **실제로 붙는지** 실측 |
 
 **절대 하지 말 것**
@@ -141,17 +141,39 @@ git rev-parse --show-toplevel && python --version && docker compose version && l
 
 ### 3) 시크릿 파일 — **설치자가 직접** 만든다
 
-값이 이 대화에 들어오지 않게, 아래 명령을 그대로 주고 **설치자가 자기 터미널에서**
-실행하게 하라(리눅스/맥; 윈도우는 `INSTALL.md` §2.3):
+값이 이 대화에 들어오지 않게, 아래를 그대로 주고 **설치자가 자기 터미널에서** 실행하게
+하라. **1순위는 파이썬 한 줄**이다 — 파이썬은 이미 전제조건이라 리눅스·macOS·윈도우가
+같은 명령 하나로 덮인다(입력은 화면에 찍히지 않고, 값은 파일로만 간다):
+
+```bash
+python -c "import getpass,os,pathlib,secrets; d=pathlib.Path('secrets/service'); d.mkdir(parents=True,exist_ok=True); [os.chmod(p,0o700) for p in (d.parent,d)]; w=lambda n,v:(d.joinpath(n).write_text(v,encoding='utf-8'), os.chmod(d/n,0o600)); w('jira-token',getpass.getpass('Jira API 토큰: ')); w('forge-token',getpass.getpass('forge PAT: ')); w('jira-webhook',secrets.token_hex(32))"
+```
+
+웹훅 시크릿(`jira-webhook`)은 사람이 정할 값이 아니라 난수다 — 묻지 마라.
+(대안 · 리눅스/macOS 셸만) 같은 일을 셸로:
 
 ```bash
 mkdir -p secrets/service && chmod 700 secrets secrets/service
 umask 077
 read -rs -p 'Jira API 토큰: ' T && printf '%s' "$T" > secrets/service/jira-token && unset T
 read -rs -p 'forge PAT: '     T && printf '%s' "$T" > secrets/service/forge-token && unset T
-openssl rand -hex 32 > secrets/service/jira-webhook     # 웹훅 토큰은 사람이 정할 값이 아니다
+openssl rand -hex 32 > secrets/service/jira-webhook
 chmod 600 secrets/service/*
 ```
+
+- **이미 토큰 파일을 갖고 있으면 그대로 써도 된다** — 재발급시킬 이유가 없다. 그 파일을
+  `secrets/service/<참조 이름>` 으로 **복사**하게 하라. 값이 대화에 들어오지 않으므로
+  규율 취지에 그대로 부합한다(파일 이름을 굳이 맞출 필요도 없다 — 답변의
+  `*_ref`·`watcher_token_file` 을 그 참조 경로로 적으면 된다).
+- ⚠️ **윈도우에서는 `0600` 이 실제로 적용되지 않는다**(NTFS 는 POSIX 모드 비트를 그렇게
+  쓰지 않는다). 그래서 컨테이너 doctor 가 `[WARN] secrets … 권한이 헐겁습니다` 를
+  **영구적으로** 낸다(리허설 실측 — 바인드 마운트된 파일이 리눅스 컨테이너 안에서 헐겁게
+  보이고, 컨테이너 안에서 `chmod` 를 해도 사라지지 않는다).
+  **판단: 이 WARN 은 그대로 두고 넘어가도 된다** — WARN 은 온보딩 게이트를 막지 않고
+  (`FAIL` 만 막는다) 기능이 degrade 되지도 않는다. 다만 파일이 실제로 헐거운 것은
+  사실이므로, 윈도우 호스트는 개인 평가용으로만 쓰고(`INSTALL.md` §2.3) 공유 머신이면
+  NTFS ACL(`icacls`)로 따로 조여라. ⚠️ **리눅스·macOS 에서 같은 WARN 이 나오면 그건 진짜
+  문제다** — 위 명령대로 했다면 나오지 않는다.
 
 `secrets/` 는 gitignore 되고, compose 가 이 디렉토리를 `deploy.secrets_base_dir` 자리에
 마운트한다. 파일이 없거나 권한이 헐거우면 `doctor --only secrets` 가 잡는다 — 네가
@@ -177,14 +199,50 @@ python -m app.setup discover --json > /tmp/jira.json
 
 ```bash
 python -m app.setup validate setup-answers.json --dlc-meta ../dlc-meta   # 0 아니면 여기서 멈춘다
-python -m app.setup render   setup-answers.json --dlc-meta ../dlc-meta   # → config/config.yaml + .env
+python -m app.setup render   setup-answers.json --dlc-meta ../dlc-meta   # → config/config.yaml
 python -m app.setup doctor
 ```
 
 `validate` 가 non-zero 면 **`render` 로 넘어가지 마라.** 출력의 `key` 와 `hint` 를 그대로
 읽고 그 항목만 다시 물어라. 종료코드: `0` 통과 / `1` 게이트 실패 / `2` 사용 오류.
 
+**`render` 의 경고 두 줄은 성격이 다르다 — 뭉뚱그리지 마라.**
+
+- `⚠️ 아직 자리표시자가 남은 줄` → **반드시 고친다.** `<...>` 가 그대로 남은 것이고
+  `doctor --only config` 가 FAIL 로 잡는다(게이트).
+- `⚠️ 답하지도 파생되지도 않아 예시 값이 남은 항목` → **오류가 아니다.** 그 키에
+  `config.example.yaml` 의 예시 값이 그대로 있다는 뜻이니, 생성된 `config/config.yaml`
+  에서 그 키의 **실제 값을 보고** 아래로 가른다:
+  - **무해 — 그대로 둔다**: 값이 `""`·`[]`·`false`·`none` 이거나, 그 기능이 꺼져 있어
+    아무도 읽지 않는 참조. 리허설 사례가 전부 여기였다 — `jira.projects: []`(추가 감시
+    프로젝트 없음) · `run.docs_repo_url: ""`(설계 문서 레포 미사용 → 프로비저닝 skip +
+    경고) · `notifier.webhook_ref`(`provider: none` 이면 읽히지 않는다).
+  - **반드시 고친다**: 값이 **남의 조직의 구체적인 id·이름**인 항목 —
+    `jira.trigger_statuses` · `cancel_statuses` · `optout_labels` · `custom_fields` ·
+    `done_transition_id` · `done_transition_names`. 이것들은 검증도 진단도 통과한 뒤
+    착수 시점에 터지거나(없는 커스텀필드 → Jira 400) **에러 없이 아무 티켓도 못 찾는다**
+    (상태 이름 불일치). 4)의 `discover` 결과로 다시 물어라.
+  - **기능을 켰으면 고친다**: `notifier.provider` 를 `none` 이 아닌 값으로 바꿔 놓고
+    `webhook_ref` 가 예시 그대로면 알림이 조용히 안 나간다.
+
 ### 6) 기동과 확인
+
+**기동 전에 `.env` 부터.** `docker ps` 로 이 호스트에 이미 다른 인스턴스가 떠 있는지
+확인하라(`*-central` 이 보이면 있는 것이다). 있으면 `.env` 에 아래 **세 줄**을 넣어라 —
+빠뜨리면 이름이 겹쳐 뜨지 못하거나, 더 나쁘게는 상태를 공유한다:
+
+```
+JAD_INSTANCE=jad-stg          # 컨테이너·네트워크·워크스페이스 볼륨 이름 접두어
+JAD_PORT=8788                 # 관리 UI 호스트 포트 — 인스턴스마다 달라야 한다
+COMPOSE_PROJECT_NAME=jad-stg  # ⚠️ 상태 볼륨은 이 값으로만 갈린다(JAD_INSTANCE 로는 안 갈린다)
+```
+
+세 번째 줄이 특히 함정이다 — compose 프로젝트명은 **기본이 디렉토리 이름**이라, 같은
+레포를 한 번 더 클론해 두 번째 인스턴스를 만들면 프로젝트명이 같아져 `jad-state`
+볼륨(jobs·watermark·dedup·registry)을 **공유**한다. 두 인스턴스가 같은 티켓을 중복
+처리하고 등록 사용자가 섞인다. 상세는 `INSTALL.md` §2.2.
+첫 인스턴스면 세 줄 다 필요 없다(기본값 `jad` · 8787).
+`.env` 에는 central 자기 claude 토큰(`CLAUDE_CODE_OAUTH_TOKEN`)도 들어간다 — `INSTALL.md` §3.
 
 ```bash
 docker compose up -d
