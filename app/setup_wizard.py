@@ -308,19 +308,11 @@ def nest_answers(flat: dict) -> dict:
 
     ``INSTALL.md`` §2.5 의 손으로 쓰는 ``answers.json`` 과 같은 모양이라, 마법사를 그만두고
     수동 CLI 로 이어갈 수 있다(대화형은 유일 경로가 아니다).
+
+    구현 정본은 :func:`app.setup_validate.nest_answers` 다 — 평탄화의 역연산을 마법사만
+    쓰는 것이 아니라 ``discover`` 도 쓰기 때문이다(두 벌로 갈라지지 않게 한 자리에).
     """
-    out: dict = {}
-    for key, value in (flat or {}).items():
-        parts = str(key).split(".")
-        node = out
-        for part in parts[:-1]:
-            nxt = node.get(part)
-            if not isinstance(nxt, dict):
-                nxt = {}
-                node[part] = nxt
-            node = nxt
-        node[parts[-1]] = value
-    return out
+    return setup_validate.nest_answers(flat)
 
 
 def read_answers(path: str) -> dict:

@@ -240,18 +240,57 @@ def cmd_render(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _discover_config(args: argparse.Namespace) -> Any:
+    """``discover`` 가 쓸 설정 객체를 고른다 — **답변 파일 우선, config.yaml 폴백**.
+
+    고르는 순서(먼저 맞는 것이 이긴다):
+        1. ``--answers <파일>`` — 명시 지정. 아직 config.yaml 이 없는 정상 경로다.
+        2. ``--config`` 가 실제로 있으면 그 설정(기존 사용자 경로 — 동작 무변경).
+        3. ``<project-dir>/setup-answers.json`` 이 있으면 그것(빈 상태에서 문서를 그대로
+           따라온 사람이 아무 플래그 없이도 막히지 않게). **조용히 하지 않는다** — 무엇을
+           읽었는지 표준 에러로 말한다.
+        4. 셋 다 없으면 사용 오류(exit 2)로 죽되, **두 갈래를 모두** 알려 준다.
+    """
+    from app.config import ConfigError, load_config
+
+    if args.answers:
+        answers = _load_answers(args.answers)
+        print(f"조회 입력: 답변 파일 {args.answers}(config.yaml 없이 조회합니다)",
+              file=sys.stderr)
+        return setup_discover.config_from_answers(answers)
+
+    if os.path.exists(args.config):
+        try:
+            return load_config(args.config)
+        except ConfigError as exc:
+            _die(f"설정을 로드할 수 없습니다({args.config}): {exc}")
+
+    fallback = os.path.join(args.project_dir or ".", setup_wizard.DEFAULT_ANSWERS_PATH)
+    if os.path.exists(fallback):
+        print(f"{args.config} 이 아직 없어 답변 파일로 조회합니다: {fallback}",
+              file=sys.stderr)
+        return setup_discover.config_from_answers(_load_answers(fallback))
+
+    _die(
+        f"조회에 쓸 입력이 없습니다 — {args.config} 도, {fallback} 도 없습니다.\n"
+        f"  설정 파일이 아직 없어도 됩니다. 답변 파일에 아래 셋만 있으면 조회됩니다:\n"
+        f"    jira.base_url · jira.watcher_email · jira.watcher_token_file\n"
+        f"  예) python -m app.setup discover --answers setup-answers.json"
+    )
+    return None   # pragma: no cover — _die 가 SystemExit 를 던진다
+
+
 def cmd_discover(args: argparse.Namespace) -> int:
     """``discover`` — 이 Jira 인스턴스에 **실제로 있는 값**을 조회한다(읽기 전용).
 
     설치자가 커스텀필드 id·상태 이름·전이 id 를 눈으로 옮겨 적지 않게 하는 것이 목적이다
     (그 옮겨 적기가 이 시스템에서 가장 자주 재발한 오설정이다 — :mod:`app.setup_discover`).
-    """
-    from app.config import ConfigError, load_config
 
-    try:
-        cfg = load_config(args.config)
-    except ConfigError as exc:
-        _die(f"설정을 로드할 수 없습니다({args.config}): {exc}")
+    ⚠️ **config.yaml 이 아직 없어도 돈다** — 답변 파일만 있으면 된다(:func:`_discover_config`).
+    이 명령이 채워 주는 값이 없으면 ``render`` 가 검증에 막혀 config.yaml 을 만들지
+    못하므로, "조회하려면 먼저 render 하라"는 **순환**이 되기 때문이다(리허설 실측).
+    """
+    cfg = _discover_config(args)
 
     only = tuple(n.strip() for n in (args.only or "").split(",") if n.strip())
     try:
@@ -411,7 +450,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_discover.add_argument("--config", default="config/config.yaml",
                             help="조회에 쓸 설정 파일(기본 config/config.yaml). "
                                  "jira.base_url·watcher_email·watcher_token_file 만 "
-                                 "채워져 있으면 된다")
+                                 "채워져 있으면 된다. **없어도 된다** — 그 경우 답변 "
+                                 "파일로 조회한다(--answers)")
+    p_discover.add_argument("--answers", default="", metavar="PATH",
+                            help="설정 파일 대신 **답변 JSON** 으로 조회한다"
+                                 "(config.yaml 을 만들기 전 단계 — 위 세 값만 있으면 된다). "
+                                 f"생략해도 <project-dir>/{setup_wizard.DEFAULT_ANSWERS_PATH} "
+                                 f"가 있으면 그것을 쓴다")
     p_discover.add_argument("--project-dir", default=".",
                             help="배포 디렉토리(호스트 쪽 secrets/ 폴백 계산 기준)")
     p_discover.add_argument("--issue", default="",

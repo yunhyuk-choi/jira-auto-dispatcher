@@ -788,16 +788,26 @@ def load_config(path: str = DEFAULT_CONFIG_PATH) -> AppConfig:
     return cfg
 
 
-def load_config_from_dict(raw: dict) -> AppConfig:
+def load_config_from_dict(raw: dict, *, validate: bool = True) -> AppConfig:
     """이미 로드된 dict에서 AppConfig를 구성(테스트/임베드용).
 
     env 치환·오버라이드·검증은 동일하게 적용한다.
+
+    Args:
+        raw: 설정 매핑.
+        validate: 필수키 검증(:func:`_validate`)을 돌릴지. **기본은 돈다** — 시스템을
+            실제로 기동하는 설정에서 이 게이트를 끄면 안 된다. ``False`` 는 *아직 설정이
+            완성되기 전*의 읽기 전용 용도 하나뿐이다: 설치 중 답변만으로 Jira 를 조회하는
+            :func:`app.setup_discover.config_from_answers`. 거기서는 "필수값이 아직 없다"가
+            정상 상태이고, 없어서 못 하는 조회는 그 자리에서 사유와 함께 SKIP 으로 보고된다
+            (조용히 넘어가지 않는다). 설치 게이트는 그대로 ``validate``/``render``/``doctor``
+            가 지킨다.
     """
     raw = _substitute_env(dict(raw))
-    return _build_config(raw)
+    return _build_config(raw, validate=validate)
 
 
-def _build_config(raw: dict) -> AppConfig:
+def _build_config(raw: dict, *, validate: bool = True) -> AppConfig:
     """치환 완료된 raw dict → 검증된 AppConfig.
 
     신규 섹션(forge·notifier·deploy·consent)과 레거시 섹션(notify·match·spawn·secrets·
@@ -896,7 +906,11 @@ def _build_config(raw: dict) -> AppConfig:
             reset_buffer_sec=int(resume.get("reset_buffer_sec", 120)),
         ),
         spawn=SpawnConfig(
-            image=str(spawn.get("image", "jira-auto-dispatcher:latest")),
+            # 이미지도 **인스턴스 축**이다 — 명시하지 않았으면 인스턴스에서 파생한다
+            # (기본 인스턴스면 ``jira-auto-dispatcher:latest``, 예전 하드코딩 기본값과
+            # 같다). 한 태그를 두 인스턴스가 공유하면 한쪽의 빌드가 **돌고 있는** 다른
+            # 쪽 워커의 코드를 갈아치운다(:func:`app.naming.default_image`).
+            image=str(spawn.get("image") or naming.default_image(deploy.instance)),
             # 명시하지 않았으면 **인스턴스 이름에서 파생**(기본 인스턴스면 ``jad-net`` —
             # 예전 하드코딩 기본값과 같다). 명시 값은 언제나 이긴다.
             network=str(spawn.get("network")
@@ -978,7 +992,8 @@ def _build_config(raw: dict) -> AppConfig:
     _apply_env_overrides(cfg)
     # 레포 URL 로 forge base_url 을 확정한다 — run.* 경로·env 가 모두 정해진 뒤에 한다.
     _resolve_forge_base_url(cfg)
-    _validate(cfg)
+    if validate:
+        _validate(cfg)
     return cfg
 
 
@@ -1059,6 +1074,7 @@ def _apply_env_overrides(cfg: AppConfig) -> None:
         cfg.secrets.base_dir = cfg.secrets.base_dir.replace("${SECRETS_DIR}", secrets_dir) or secrets_dir
 
     _apply_instance_override(cfg, os.environ.get("JAD_INSTANCE"))
+    _apply_image_override(cfg, os.environ.get("JAD_IMAGE"))
 
     # ⚠️ ``CENTRAL_URL`` · ``WORKER_SHARED_SECRET`` env 는 **더 이상 읽지 않는다.**
     # 둘 다 워커가 중앙의 dispatch HTTP 를 폴링하던 시절의 값이었고(폴링 대상 주소 ·
@@ -1160,6 +1176,40 @@ def _apply_instance_override(cfg: AppConfig, env_instance: Any) -> None:
     if cfg.deploy.workspace_volume == naming.default_workspace_volume(old):
         cfg.deploy.workspace_volume = naming.default_workspace_volume(new)
         cfg.spawn.workspace_volume = cfg.deploy.workspace_volume
+    if cfg.spawn.image == naming.default_image(old):
+        cfg.spawn.image = naming.default_image(new)
+
+
+def _apply_image_override(cfg: AppConfig, env_image: Any) -> None:
+    """env ``JAD_IMAGE`` 로 워커 이미지 이름을 덮어쓴다(:func:`_apply_instance_override` 와 같은 사상).
+
+    compose 는 이 스택의 이미지를 **실제로 그 이름으로 빌드한 뒤** 같은 문자열을 central 에
+    env 로 넣는다. 즉 env 는 "설정에 적힌 희망"이 아니라 **호스트에 실재하는 태그**다.
+    두 값이 어긋날 때 config.yaml 을 따르면 spawner 는 남의 인스턴스 이미지(또는 없는
+    태그)로 워커를 띄운다 — 그래서 실재하는 쪽을 따른다.
+
+    조용히 바꾸지는 않는다. 다만 **설치자가 직접 적어 둔 이름일 때만** ERROR 다 —
+    config 값이 그 인스턴스의 파생 기본값이면 어긋난 것이 아니라 아직 인스턴스 축으로
+    옮겨지지 않은 것뿐이라(예: 렌더된 예시 값), 잡음이 되지 않게 INFO 로 남긴다.
+    """
+    new = str(env_image or "").strip()
+    if not new:
+        return
+    old = str(getattr(cfg.spawn, "image", "") or "").strip()
+    if new == old:
+        return
+    derived = naming.default_image(getattr(cfg.deploy, "instance", "")
+                                  or naming.DEFAULT_INSTANCE)
+    if old and old != derived and old != naming.default_image(naming.DEFAULT_INSTANCE):
+        log.error(
+            "⚠️ 워커 이미지 이름이 어긋납니다 — env JAD_IMAGE=%r 인데 config 의 "
+            "spawn.image 는 %r 입니다. compose 가 **실제로 빌드한** 태그는 env 쪽이므로 "
+            "env 를 따릅니다. 두 값을 같게 맞추세요(.env 의 JAD_INSTANCE 하나만 정하면 "
+            "이미지 이름도 거기서 파생됩니다).", new, old,
+        )
+    else:
+        log.info("워커 이미지를 env JAD_IMAGE 로 맞춥니다: %r → %r", old, new)
+    cfg.spawn.image = new
 
 
 def _retire_fractal_central(cfg: AppConfig) -> None:

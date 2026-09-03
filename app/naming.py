@@ -54,6 +54,10 @@ from typing import Any
 #: ``jad-worker-<user>``·``jad-<user>``).
 DEFAULT_INSTANCE = "jad"
 
+#: 이미지 리포지토리 이름(태그 앞부분). 태그는 인스턴스에서 파생한다
+#: (:func:`default_image`) — 리포 이름 자체는 인스턴스와 무관해 고정한다.
+DEFAULT_IMAGE_REPO = "jira-auto-dispatcher"
+
 
 def instance_name(config: Any) -> str:
     """이 배포의 인스턴스 이름(``deploy.instance``, 기본 :data:`DEFAULT_INSTANCE`).
@@ -102,3 +106,29 @@ def default_network_name(instance: str = DEFAULT_INSTANCE) -> str:
 def default_workspace_volume(instance: str = DEFAULT_INSTANCE) -> str:
     """인스턴스 이름에서 파생한 공유 워크스페이스 볼륨 기본 이름 — ``<instance>-workspace``."""
     return f"{(instance or DEFAULT_INSTANCE).strip() or DEFAULT_INSTANCE}-workspace"
+
+
+def default_image(instance: str = DEFAULT_INSTANCE) -> str:
+    """인스턴스 이름에서 파생한 워커/central 이미지 이름 — ``jira-auto-dispatcher:<tag>``.
+
+    **왜 이미지도 인스턴스 축에 묶는가**: compose 가 이미지 이름을 고정하고 있으면
+    (``image: jira-auto-dispatcher:latest``) 두 번째 인스턴스를 빌드하는 순간 **돌고 있는
+    첫 인스턴스의 워커 이미지가 통째로 바뀐다.** 태그 하나가 두 스택의 코드를 공유해
+    버리는 것이라, 다중 인스턴스의 격리가 이름 공간에서만 성립하고 **실행 코드에서는
+    성립하지 않는다**(실측 결함 — 먼저 뜬 인스턴스가 override 파일로 우회하고 있었다).
+
+    태그 규칙(:data:`DEFAULT_INSTANCE` 만 특례):
+        - ``jad``(기본 인스턴스) → ``latest`` — **기존 배포 무변경**. 지금 돌고 있는
+          모든 단일 인스턴스 배포의 이미지 이름이 한 글자도 달라지지 않는다.
+        - 그 외 → 인스턴스 이름 그대로(``jad-stg`` → ``jira-auto-dispatcher:jad-stg``).
+
+    compose 쪽 짝은 ``${JAD_IMAGE:-jira-auto-dispatcher:${JAD_INSTANCE:-latest}}`` 이며
+    (``docker-compose.yml`` 상단 앵커), 계약 A 대로 **두 값이 같아야** 한다 —
+    ``tests/test_compose_contract.py`` 가 그 드리프트를 잡는다. 그리고 compose 는 그
+    결과 문자열을 central 에 env ``JAD_IMAGE`` 로도 넣어, config 에 옛 값이 남아 있어도
+    **실재하는 이름이 이긴다**(:func:`app.config._apply_image_override`).
+    """
+    tag = (instance or DEFAULT_INSTANCE).strip() or DEFAULT_INSTANCE
+    if tag == DEFAULT_INSTANCE:
+        tag = "latest"
+    return f"{DEFAULT_IMAGE_REPO}:{tag}"

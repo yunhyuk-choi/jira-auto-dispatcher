@@ -171,6 +171,8 @@ _KEY_TO_ATTR = {
     "deploy.docker_host": "deploy.docker_host",
     "deploy.secrets_base_dir": "deploy.secrets_base_dir",
     "deploy.workspace_volume": "deploy.workspace_volume",
+    "spawn.image": "spawn.image",
+    "spawn.network": "spawn.network",
     "consent.full_permissions": "consent.full_permissions",
     "consent.accepted_at": "consent.accepted_at",
 }

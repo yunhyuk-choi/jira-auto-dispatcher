@@ -4,7 +4,7 @@
 # 동적 spawn(app/spawner.py)하므로 compose에 고정 서비스로 두지 않는다.
 #
 # 계약 정합(반드시 유지 — spawner/config.example.yaml과 일치):
-#   image           jira-auto-dispatcher:latest   (config.spawn.image)
+#   image           jira-auto-dispatcher:${JAD_INSTANCE:-latest}  (config.spawn.image)
 #   network         ${JAD_INSTANCE:-jad}-net       (config.spawn.network)
 #
 # --- 한 호스트에 여러 인스턴스(평가·스테이징·프로덕션) ---
@@ -15,9 +15,17 @@
 # 그래서 compose 가 만든 이름과 central 이 부르는 이름이 어긋날 수 없다(app/naming.py).
 #
 #   # 두 번째 인스턴스: **별도 디렉토리**에 배포하고 .env 에 세 줄 추가
-#   JAD_INSTANCE=jad-stg          # 컨테이너·네트워크·워크스페이스 볼륨 접두어
+#   JAD_INSTANCE=jad-stg          # 컨테이너·네트워크·워크스페이스 볼륨·**이미지 태그** 접두어
 #   JAD_PORT=8788                 # 관리 UI 포트(호스트 포트는 인스턴스마다 달라야 한다)
 #   COMPOSE_PROJECT_NAME=jad-stg  # 상태 볼륨(jad-state) — 아래 ⚠️
+#
+# ⚠️ **이미지도 인스턴스 축이다.** 예전에는 여기에 `image: jira-auto-dispatcher:latest` 가
+#    변수 없이 박혀 있어서, 두 번째 인스턴스를 빌드하면 **돌고 있는 첫 인스턴스의 워커
+#    이미지가 통째로 바뀌었다**(이름 공간만 갈리고 실행 코드는 공유). 지금은 아래 앵커가
+#    `jira-auto-dispatcher:${JAD_INSTANCE:-latest}` 로 파생하므로 `.env` 의 세 줄 외에
+#    **더 적을 것이 없다** — JAD_INSTANCE 하나로 태그까지 갈린다(미설정이면 `latest`,
+#    즉 기존 배포는 한 글자도 안 달라진다). 레지스트리 이미지를 쓰는 등 이름을 직접
+#    정해야 하면 `.env` 에 `JAD_IMAGE=<repo>:<tag>` 를 주면 그게 이긴다.
 #
 # ⚠️ 서비스 키(`central`·`socket-proxy`)는 **바꾸지 않는다** — compose 네트워크 DNS 가
 #    그 이름으로 돌고(DOCKER_HOST=tcp://socket-proxy:2375) 컨테이너 이름과 무관하다.
@@ -36,6 +44,12 @@
 #
 # ⚠️ 보안: 관리 UI/워커는 도구권한 자율 에이전트(RCE 표면). 신뢰 네트워크 한정, 인터넷 노출 금지.
 #          docker.sock 직결은 호스트 root 동치 → 기본은 socket-proxy 경유(최소 권한). SECURITY.md.
+
+# central·worker 공용 단일 이미지 이름 — **인스턴스에서 파생**(app/naming.py default_image).
+# 앵커로 한 자리에만 적는다: `image:` 와 central 의 env `JAD_IMAGE` 가 반드시 같은 문자열
+# 이어야 하기 때문이다(계약 A — 두 곳이 갈리면 spawner 가 남의 태그로 워커를 띄운다).
+# tests/test_compose_contract.py 가 이 표현식과 naming.default_image() 의 드리프트를 잡는다.
+x-jad-image: &jad_image ${JAD_IMAGE:-jira-auto-dispatcher:${JAD_INSTANCE:-latest}}
 
 services:
   # --- (기본·권장) docker-socket-proxy: docker.sock 최소권한 완화책 ---
@@ -60,7 +74,7 @@ services:
 
   central:
     build: .
-    image: jira-auto-dispatcher:latest   # spawner가 worker를 이 이미지로 띄운다
+    image: *jad_image                    # spawner가 worker를 이 이미지로 띄운다(env JAD_IMAGE 로 전달)
     container_name: ${JAD_INSTANCE:-jad}-central
     restart: unless-stopped
     # ⚠️ 좀비 프로세스 방지: central 의 PID 1 도 `python -m app.main`(ENTRYPOINT)이다.
@@ -93,6 +107,11 @@ services:
       # 컨테이너 이름을 파생하므로(deploy.instance 를 이긴다 — app/config.py), compose 가
       # 실제로 만든 이름과 central 이 부르는 이름이 어긋날 수 없다.
       JAD_INSTANCE: ${JAD_INSTANCE:-jad}
+      # 워커 이미지 — **위 `image:` 와 같은 앵커**다. compose 가 실제로 빌드한 태그를
+      # central 에 그대로 알려 주므로, config.yaml 의 spawn.image 에 옛 값이 남아 있어도
+      # 실재하는 이름이 이긴다(app/config.py _apply_image_override). 이 한 줄이 없으면
+      # "compose 는 :jad-stg 를 빌드했는데 spawner 는 :latest 로 띄운다"가 조용히 성립한다.
+      JAD_IMAGE: *jad_image
     ports:
       - "${JAD_PORT:-8787}:8787"              # 관리 UI — ⚠️ 인터넷 노출 금지.
       #                                        공개 호스트면 "127.0.0.1:${JAD_PORT:-8787}:8787" 로 바꾸고 SSH 터널로 접근하라(INSTALL.md §4).

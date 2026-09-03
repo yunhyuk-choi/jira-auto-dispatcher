@@ -693,6 +693,41 @@ def discover_labels(client: Any, cfg: Any, base_url: str = "") -> Section:
 # ---------------------------------------------------------------------------
 
 
+def config_from_answers(answers: Any) -> Any:
+    """수집 중인 **답변**만으로 조회 전용 설정 객체를 만든다(파일을 만들지 않는다).
+
+    왜 필요한가 — **순환 의존을 끊는다**:
+        ``discover`` 는 "아직 모르는 값"(상태·전이·커스텀필드 id)을 채워 주는 명령이다.
+        그런데 예전에는 그 앞에 ``config.yaml`` 이 있어야 했고, ``config.yaml`` 은
+        ``render`` 로만 만들 수 있으며, ``render`` 는 전체 검증을 돌려 **``discover`` 가
+        채워 주려던 바로 그 값**(``jira.trigger_statuses``)이 없으면 exit 1 로 죽었다.
+        빈 디렉토리에서 문서를 그대로 따라가면 그 자리에서 막힌다(리허설 실측).
+
+        그래서 조회는 **답변을 직접** 받는다. 필요한 것은 셋뿐이다 —
+        ``jira.base_url`` · ``jira.watcher_email`` · ``jira.watcher_token_file``.
+
+    시크릿 루트는 여기서 손대지 않는다. 답변의 ``deploy.secrets_base_dir`` 은 컨테이너
+    관점(``/run/secrets``)일 수 있지만, 호스트 폴백은
+    :func:`app.setup_doctor.resolve_secrets_root` 가 이미 한다(진단과 같은 규칙 — 두 벌로
+    갈라지지 않게).
+
+    Args:
+        answers: 답변(중첩 매핑 또는 점 표기 — 둘 다 받는다).
+
+    Returns:
+        :class:`app.config.AppConfig` — 조회에 필요한 값만 채워진 것.
+    """
+    from app import setup_validate
+    from app.config import load_config_from_dict
+
+    flat = setup_validate.flatten_answers(dict(answers or {}))
+    # ⚠️ 필수키 검증을 끄고 만든다. 이 시점에는 ``jira.project``·``deploy.secrets_base_dir``
+    #    이 아직 없는 것이 **정상**이고(그걸 정하려고 조회하는 중이다), 없어서 못 하는
+    #    조회는 아래 :func:`discover` 가 사유와 함께 SKIP 으로 보고한다 — 조용히 넘어가지
+    #    않는다. 실제 기동 설정의 게이트는 validate/render/doctor 가 그대로 지킨다.
+    return load_config_from_dict(setup_validate.nest_answers(flat), validate=False)
+
+
 def discover(cfg: Any, *, project_dir: str = ".", only: tuple = (),
              issue_key: str = "", client: Any = None) -> DiscoveryResult:
     """설정이 가리키는 Jira 인스턴스를 조회한다(**부작용 없는 읽기만**).
