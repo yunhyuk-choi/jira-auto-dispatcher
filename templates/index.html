@@ -5,140 +5,415 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>jira-auto-dispatcher — central 관리 콘솔</title>
     <style>
-      body {
-        font-family: "Segoe UI", sans-serif;
-        max-width: 1000px;
-        margin: 0 auto;
-        padding: 20px;
-        background-color: #1e1e1e;
-        color: #d4d4d4;
+      /* =====================================================================
+         Linear 디자인 언어 이식 — **재스타일링**(동작 변경 아님).
+         Linear 에서 가져오는 것은 *구조*다: 4단 표면 사다리 · 4단 잉크 계층 ·
+         changelog-row(카드 아닌 "행 + 1px hairline 바닥선") · status-badge 규격 ·
+         4px 기반 간격 스케일 · 반경 스케일 · 입력칸/포커스 규격.
+         **의미 색은 기존 VS Code Dark+ 값을 그대로 쓴다** — 팀이 이미 읽는 색이다.
+         밀도는 마케팅 스케일이 아니라 운영 콘솔 스케일로 줄였다(표 행 7px, 섹션 16px).
+         외부 리소스 0개 — 웹폰트·CDN·link 없음(사내 방화벽 서빙 전제).
+         ===================================================================== */
+
+      /* PALETTE:BEGIN — 색 리터럴은 이 블록 안에만 존재한다(밖에는 0개). */
+      :root {
+        /* 표면 사다리(Linear) — canvas → surface-4. 층을 건너뛰지 않는다.
+           canvas=페이지 / 1=섹션·sticky 헤더 / 2=중첩 패널·입력칸·배지·보조버튼 /
+           3=호버 / 4=진행 중 행(가장 들린 면). */
+        --canvas: #010102;
+        --surface-1: #0f1011;
+        --surface-2: #141516;
+        --surface-3: #18191a;
+        --surface-4: #191a1b;
+        --hairline: #23252a;
+        --hairline-strong: #34343a;
+        --hairline-tertiary: #3e3e44;
+        --edge-highlight: rgba(255, 255, 255, 0.035);
+
+        /* 잉크 계층(Linear) — 값 → 보조 → 설명 → 비활성. */
+        --ink: #f7f8f8;
+        --ink-muted: #d0d6e0;
+        --ink-subtle: #8a8f98;
+        --ink-tertiary: #62666d;
+
+        /* 의미 색 — 기존 VS Code Dark+ 값 유지(새 색 발명 금지). */
+        --accent: #569cd6;         /* 제목·단계 표시 */
+        --accent-light: #9cdcfe;   /* 라벨·필드명·검사명 */
+        --ok: #4ec9b0;             /* 성공·링크 */
+        --warn: #cca700;           /* 경고 경계선 */
+        --warn-ink: #e6c66a;       /* 경고 문구 */
+        --danger: #f48771;         /* 실패·필수 표시 */
+        --danger-ink: #f4a6a6;
+        --info-ink: #8fbaf0;
+        --neutral-ink: #cccccc;
+        --neutral-ink-dim: #aaaaaa;
+
+        /* 1차 액션(버튼) — 기존 값. */
+        --action: #0e639c;
+        --action-hover: #1177bb;
+        --on-action: #ffffff;
+
+        /* 상태 틴트 — 진단 배너·차단 안내·동의 블록. 기존 값 유지. */
+        --tint-fail: #2d1414;
+        --line-fail: #7a2b2b;
+        --tint-warn: #332b00;
+        --tint-pass: #14261f;
+        --line-pass: #2d5a45;
+
+        /* 포커스 링 — Linear 규격(2px·50% 불투명)에 기존 accent 색. */
+        --focus-ring: rgba(86, 156, 214, 0.5);
       }
+      /* PALETTE:END */
+
+      /* --- 비-색 토큰: 간격·반경·타입. 비율은 Linear, 절대값은 콘솔용. --- */
+      :root {
+        --sp-1: 4px;
+        --sp-2: 8px;
+        --sp-3: 12px;
+        --sp-4: 16px;
+        --sp-5: 24px;
+        --r-xs: 4px;
+        --r-sm: 6px;
+        --r-md: 8px;
+        --r-lg: 12px;
+        --r-pill: 9999px;
+        /* 시스템 스택만 — 외부 폰트 0개. 윈도우 전용 폰트 이름을 박아 두면 맥·리눅스에서
+           조용히 generic sans 로 떨어지므로 쓰지 않는다: system-ui 가 3 OS 각각에서
+           그 OS 의 UI 서체로 해석된다. */
+        --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui,
+          "Helvetica Neue", "Liberation Sans", Arial, sans-serif;
+        /* 데이터·ID·상태 토큰용 — Linear 자신의 폴백 체인. */
+        --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
+          "Liberation Mono", monospace;
+      }
+
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+
+      body {
+        font-family: var(--font-sans);
+        font-size: 13px;
+        line-height: 1.5;
+        letter-spacing: -0.05px;
+        max-width: 1080px;
+        margin: 0 auto;
+        padding: var(--sp-5) var(--sp-4) 64px;
+        background-color: var(--canvas);
+        color: var(--ink-muted);
+        -webkit-font-smoothing: antialiased;
+      }
+
+      /* --- 타입 계층 — 음수 트래킹은 큰 글자에만(Linear). --- */
       h2 {
-        color: #569cd6;
-        border-bottom: 1px solid #3c3c3c;
-        padding-bottom: 10px;
+        font-size: 20px;
+        font-weight: 600;
+        line-height: 1.2;
+        letter-spacing: -0.4px;
+        color: var(--accent);
+        margin: 0 0 var(--sp-5);
+        padding-bottom: var(--sp-3);
+        border-bottom: 1px solid var(--hairline);
       }
       h3 {
-        color: #9cdcfe;
+        font-size: 14px;
+        font-weight: 600;
+        line-height: 1.25;
+        letter-spacing: -0.2px;
+        color: var(--accent-light);
+        margin: 0 0 var(--sp-3);
       }
+      h4 {
+        font-size: 12px;
+        font-weight: 600;
+        line-height: 1.3;
+        letter-spacing: 0.2px;
+        color: var(--ink);
+        margin: var(--sp-3) 0 var(--sp-2);
+      }
+      p {
+        margin: var(--sp-2) 0;
+      }
+      a {
+        color: var(--ok);
+      }
+      code {
+        font-family: var(--font-mono);
+        font-size: 0.92em;
+        color: var(--ink);
+        background-color: var(--surface-2);
+        border: 1px solid var(--hairline);
+        border-radius: var(--r-xs);
+        padding: 1px 5px;
+      }
+      b {
+        font-weight: 600;
+        color: var(--ink);
+      }
+
+      /* --- 섹션 = 표면 1단 리프트 + hairline. 그림자 대신 사다리. --- */
       section {
-        background-color: #252526;
-        padding: 20px;
-        border-radius: 8px;
-        margin-bottom: 20px;
-        border: 1px solid #3c3c3c;
+        background-color: var(--surface-1);
+        border: 1px solid var(--hairline);
+        border-radius: var(--r-lg);
+        padding: var(--sp-4) var(--sp-4) var(--sp-5);
+        margin-bottom: var(--sp-4);
+        /* Linear 의 "상단 edge highlight" — 어두운 면에 픽셀 렌더 느낌. */
+        box-shadow: inset 0 1px 0 var(--edge-highlight);
       }
+
       #auth-link {
-        color: #4ec9b0;
-        font-weight: bold;
+        font-family: var(--font-mono);
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--ok);
         word-break: break-all;
       }
+
+      /* --- 안내 박스 — 표면 2단 + 2px 의미 색 룰. 틴트 면은 진짜 경보에만. --- */
+      .info-box,
+      .todo-box,
+      .join-step {
+        border: 1px solid var(--hairline);
+        border-radius: var(--r-md);
+        padding: var(--sp-3);
+        font-size: 12px;
+        line-height: 1.55;
+        background-color: var(--surface-2);
+      }
       .info-box {
-        background-color: #332b00;
-        padding: 10px;
-        border-left: 4px solid #cca700;
-        margin: 15px 0;
-        font-size: 0.9em;
+        border-left: 2px solid var(--warn);
+        color: var(--ink-muted);
+        margin: var(--sp-3) 0;
       }
       .todo-box {
-        background-color: #2a2d2e;
-        padding: 10px;
-        border-left: 4px solid #569cd6;
-        margin: 10px 0;
-        font-size: 0.9em;
-        color: #999;
+        border-left: 2px solid var(--accent);
+        color: var(--ink-subtle);
+        margin: var(--sp-2) 0;
       }
+
       .flex-form {
         display: flex;
-        gap: 10px;
-        margin-top: 10px;
+        align-items: flex-end;
+        gap: var(--sp-3);
+        margin-top: var(--sp-3);
       }
       .grid-form {
         display: grid;
         grid-template-columns: 1fr 1fr;
-        gap: 10px;
-        margin-top: 10px;
+        gap: var(--sp-3) var(--sp-4);
+        margin-top: var(--sp-2);
       }
+
+      /* 라벨 = 필드명(의미 색). 설명문은 .field-note(ink-subtle)가 받는다. */
       label {
         display: block;
-        font-size: 0.8em;
-        color: #9cdcfe;
-        margin-bottom: 4px;
+        font-size: 11px;
+        font-weight: 500;
+        line-height: 1.3;
+        letter-spacing: 0.2px;
+        color: var(--accent-light);
+        margin-bottom: var(--sp-1);
       }
+
+      /* --- 입력칸 — Linear 규격(한 단 위 표면·8px 반경·8/12 패딩)을 콘솔로 압축. --- */
       input[type="text"],
       input[type="password"],
       select {
         width: 100%;
-        box-sizing: border-box;
-        padding: 10px;
-        border-radius: 4px;
-        border: 1px solid #3c3c3c;
-        background-color: #3c3c3c;
-        color: white;
+        font-family: inherit;
+        font-size: 13px;
+        line-height: 1.4;
+        padding: 7px 10px;
+        border-radius: var(--r-md);
+        border: 1px solid var(--hairline-strong);
+        background-color: var(--surface-2);
+        color: var(--ink);
+      }
+      input[type="text"]::placeholder,
+      input[type="password"]::placeholder {
+        color: var(--ink-tertiary);
+      }
+      input[type="text"]:hover,
+      input[type="password"]:hover,
+      select:hover {
+        background-color: var(--surface-3);
+      }
+      input[type="text"]:focus,
+      input[type="password"]:focus,
+      select:focus {
+        background-color: var(--surface-2);
+        border-color: var(--hairline-tertiary);
+        outline: 2px solid var(--focus-ring);
+        outline-offset: -1px;
+      }
+      input[type="checkbox"] {
+        accent-color: var(--accent);
       }
       /* 체크박스 항목은 "라벨 위 / 입력 아래" 격자에 맞지 않는다 — 한 줄로 붙인다. */
       .check-row {
         display: flex;
         align-items: center;
-        gap: 8px;
+        gap: var(--sp-2);
       }
       .check-row label {
         margin-bottom: 0;
       }
+
+      /* --- 버튼 — 1차 액션은 기존 파랑, 표 안 동작은 보조(표면 2단). --- */
       button {
-        padding: 10px 20px;
-        background-color: #0e639c;
-        color: white;
-        border: none;
-        border-radius: 4px;
+        font-family: inherit;
+        font-size: 13px;
+        font-weight: 500;
+        line-height: 1.2;
+        letter-spacing: 0;
+        padding: 8px 14px;
+        background-color: var(--action);
+        color: var(--on-action);
+        border: 1px solid var(--action);
+        border-radius: var(--r-md);
         cursor: pointer;
         white-space: nowrap;
       }
       button:hover {
-        background-color: #1177bb;
+        background-color: var(--action-hover);
+        border-color: var(--action-hover);
+      }
+      button:focus-visible {
+        outline: 2px solid var(--focus-ring);
+        outline-offset: 1px;
       }
       button:disabled {
-        background-color: #555;
+        background-color: var(--surface-3);
+        border-color: var(--hairline);
+        color: var(--ink-tertiary);
         cursor: not-allowed;
       }
+      /* 행마다 1차 액션 색이 깔리면 표가 시끄럽다 — 표 안·부수 동작은 보조 버튼. */
+      td button,
+      #doctor-refresh,
+      .field-inline button {
+        background-color: var(--surface-2);
+        border-color: var(--hairline-strong);
+        color: var(--ink);
+        font-size: 11px;
+        padding: 4px 10px;
+      }
+      td button:hover,
+      #doctor-refresh:hover,
+      .field-inline button:hover {
+        background-color: var(--surface-3);
+        border-color: var(--hairline-tertiary);
+      }
+      td button:disabled,
+      #doctor-refresh:disabled,
+      .field-inline button:disabled {
+        background-color: var(--surface-1);
+        border-color: var(--hairline);
+        color: var(--ink-tertiary);
+      }
+      /* 표 안 드롭다운은 폼 입력칸이 아니라 행 컨트롤 — 행 높이를 버튼에 맞춘다. */
+      td select {
+        width: auto;
+        font-size: 11px;
+        padding: 3px 8px;
+      }
+
+      /* --- 표 = changelog-row 패턴. 카드로 감싸지 않고 행 + 1px 바닥선. --- */
       table {
         width: 100%;
         border-collapse: collapse;
-        margin-top: 10px;
+        margin-top: var(--sp-2);
       }
       th,
       td {
         text-align: left;
-        padding: 8px;
-        border-bottom: 1px solid #3c3c3c;
-        font-size: 0.85em;
+        padding: 7px 10px;
+        font-size: 12px;
+        line-height: 1.45;
+        vertical-align: middle;
+        border-bottom: 1px solid var(--hairline);
       }
+      /* 표 헤더 = 분류 라벨(eyebrow) — 값보다 조용해야 한다. */
       th {
-        color: #569cd6;
+        font-size: 11px;
+        font-weight: 500;
+        letter-spacing: 0.3px;
+        color: var(--ink-subtle);
+        white-space: nowrap;
+        border-bottom: 1px solid var(--hairline-strong);
       }
+      td {
+        color: var(--ink-muted);
+      }
+      /* 마지막 행 아래 선은 지운다 — 목록이 끝나는 자리에 테두리를 만들지 않는다. */
+      tbody tr:last-child > td {
+        border-bottom: none;
+      }
+      tbody tr:hover > td {
+        background-color: var(--surface-3);
+      }
+      /* 데이터·ID·상태 토큰은 mono — 자릿수가 맞아 읽기 쉽다. */
+      #users-table td:nth-child(1),
+      #jobs-table td:nth-child(1),
+      #jobs-table td:nth-child(2),
+      #jobs-table td:nth-child(3),
+      #jobs-table td:nth-child(5),
+      #running-table td:nth-child(1),
+      #running-table td:nth-child(2),
+      #running-table td:nth-child(3) {
+        font-family: var(--font-mono);
+        font-size: 11.5px;
+        color: var(--ink);
+      }
+
       .hint {
-        font-size: 0.8em;
-        color: #9aa;
         display: block;
+        font-size: 11px;
+        color: var(--ink-subtle);
         margin-top: 2px;
       }
-      h4 {
-        color: #9cdcfe;
-        margin: 6px 0 4px;
-        font-size: 0.95em;
-      }
+
       /* 진행 중 패널 — 상단에서 running 잡만 바로 보이게. */
       #running-panel {
-        background-color: #14261f;
-        border: 1px solid #2d5a45;
-        border-radius: 6px;
-        padding: 10px 12px;
-        margin-bottom: 14px;
+        background-color: var(--surface-2);
+        border: 1px solid var(--hairline);
+        border-radius: var(--r-md);
+        padding: var(--sp-3);
+        margin-bottom: var(--sp-3);
       }
+      #running-panel h4 {
+        margin-top: 0;
+      }
+      #running-panel table {
+        margin-top: var(--sp-1);
+      }
+      #running-panel th,
+      #running-panel td {
+        border-bottom-color: var(--hairline-strong);
+      }
+      #running-panel tbody tr:hover > td {
+        background-color: var(--surface-3);
+      }
+      #running-table {
+        table-layout: fixed;
+      }
+      #running-table th,
+      #running-table td {
+        word-break: break-word;
+        overflow-wrap: anywhere;
+      }
+      #running-table th:nth-child(1), #running-table td:nth-child(1) { width: 18%; }
+      #running-table th:nth-child(2), #running-table td:nth-child(2) { width: 16%; }
+      #running-table th:nth-child(3), #running-table td:nth-child(3) { width: 22%; }
+      #running-table th:nth-child(4), #running-table td:nth-child(4) { width: 44%; }
+
       /* 필터/검색 바 — 사용자 드롭다운 + 부분일치 검색. */
       #jobs-controls {
         align-items: flex-end;
-        margin: 4px 0 10px;
+        margin: var(--sp-1) 0 var(--sp-3);
       }
       #jobs-controls .filter-user {
         min-width: 160px;
@@ -146,27 +421,36 @@
       #jobs-controls .filter-search {
         flex: 1;
       }
+
       /* 전체 목록 스크롤 컨테이너 — 페이지 전체가 길어지지 않게 내부 스크롤. */
       #jobs-scroll {
         max-height: 60vh;
         overflow-y: auto;
-        border: 1px solid #3c3c3c;
-        border-radius: 4px;
+        overflow-x: auto;
+        border: 1px solid var(--hairline);
+        border-radius: var(--r-md);
       }
       #jobs-scroll table {
         margin-top: 0;
       }
-      /* 스크롤해도 헤더 고정. */
+      /* 스크롤해도 헤더 고정. 섹션과 같은 면을 깔아 행이 그 아래로 사라지게. */
       #jobs-scroll thead th {
         position: sticky;
         top: 0;
-        background-color: #252526;
+        background-color: var(--surface-1);
+        box-shadow: inset 0 -1px 0 var(--hairline-strong);
         z-index: 1;
       }
-      /* 진행중 행 하이라이트 — 스크롤 중 직관적으로 구분. */
-      tr.running-row > td {
-        background-color: #17352a;
+      /* 진행중 행 하이라이트 — 표면 사다리 최상단 + 좌측 룰은 --ok(초록 의미 유지). */
+      tr.running-row > td,
+      tbody tr.running-row:hover > td {
+        background-color: var(--surface-4);
+        color: var(--ink);
       }
+      tr.running-row > td:first-child {
+        box-shadow: inset 2px 0 0 var(--ok);
+      }
+
       /* 전체 잡 테이블 — 7컬럼이 컨테이너 폭 안에 들어오도록 고정 레이아웃 + 줄바꿈.
          가로 스크롤 방지: 폭 합 100%, 긴 문자열(reset_at ISO 등)은 강제 줄바꿈. */
       #jobs-table {
@@ -184,191 +468,264 @@
       #jobs-table th:nth-child(5), #jobs-table td:nth-child(5) { width: 12%; } /* reset_at(대개 —) */
       #jobs-table th:nth-child(6), #jobs-table td:nth-child(6) { width: 22%; } /* 갱신시각(KST) */
       #jobs-table th:nth-child(7), #jobs-table td:nth-child(7) { width: 18%; } /* 동작 */
-      /* 취소 사유 배지. */
+
+      /* 사용자 표도 7컬럼 — 좁은 폭에서 페이지를 가로로 밀지 않게 고정 레이아웃. */
+      #users-table {
+        table-layout: fixed;
+      }
+      #users-table th,
+      #users-table td {
+        word-break: break-word;
+        overflow-wrap: anywhere;
+      }
+      #users-table th:nth-child(1), #users-table td:nth-child(1) { width: 15%; }
+      #users-table th:nth-child(2), #users-table td:nth-child(2) { width: 15%; }
+      #users-table th:nth-child(3), #users-table td:nth-child(3) { width: 16%; }
+      #users-table th:nth-child(4), #users-table td:nth-child(4) { width: 11%; }
+      #users-table th:nth-child(5), #users-table td:nth-child(5) { width: 12%; }
+      #users-table th:nth-child(6), #users-table td:nth-child(6) { width: 12%; }
+      #users-table th:nth-child(7), #users-table td:nth-child(7) { width: 19%; }
+
+      /* 취소 사유 배지 — Linear status-badge 규격(표면 2단·caption·pill·2/8 패딩).
+         구별은 배경 틴트가 아니라 잉크로 한다(면은 사다리가 담당). */
       .badge {
         display: inline-block;
-        padding: 1px 8px;
-        border-radius: 10px;
-        font-size: 0.75em;
-        font-weight: bold;
+        font-family: var(--font-mono);
+        font-size: 11px;
+        font-weight: 500;
+        line-height: 1.4;
+        padding: 2px 8px;
+        border-radius: var(--r-pill);
         white-space: nowrap;
+        background-color: var(--surface-2);
+        border: 1px solid var(--hairline-strong);
+        color: var(--ink-muted);
       }
       .badge-cancelled {
-        background-color: #5a1d1d;
-        color: #f4a6a6;
+        color: var(--danger-ink);
       }
       .badge-optout {
-        background-color: #4a3a0a;
-        color: #e6c66a;
+        color: var(--warn-ink);
       }
       .badge-reassigned {
-        background-color: #263a5a;
-        color: #8fbaf0;
+        color: var(--info-ink);
       }
       .badge-manual {
-        background-color: #3a3a3a;
-        color: #cccccc;
+        color: var(--neutral-ink);
       }
       .badge-other {
-        background-color: #333333;
-        color: #aaaaaa;
+        color: var(--neutral-ink-dim);
       }
+
       /* --- 설정 자가진단 배너 — 페이지 최상단. 실패는 여기서 먼저 보여야 한다. --- */
       #doctor-panel {
-        border-radius: 6px;
-        padding: 12px 14px;
-        margin: 0 0 16px;
-        font-size: 0.9em;
-        border: 1px solid #3c3c3c;
-        background-color: #252526;
+        background-color: var(--surface-1);
+        border: 1px solid var(--hairline);
+        border-radius: var(--r-lg);
+        padding: var(--sp-3) var(--sp-4);
+        margin: 0 0 var(--sp-4);
+        font-size: 12px;
       }
       #doctor-panel.doctor-fail {
-        background-color: #2d1414;
-        border-color: #7a2b2b;
+        background-color: var(--tint-fail);
+        border-color: var(--line-fail);
       }
       #doctor-panel.doctor-warn {
-        background-color: #332b00;
-        border-color: #cca700;
+        background-color: var(--tint-warn);
+        border-color: var(--warn);
       }
       #doctor-panel.doctor-pass {
-        background-color: #14261f;
-        border-color: #2d5a45;
+        background-color: var(--tint-pass);
+        border-color: var(--line-pass);
       }
       #doctor-head {
         display: flex;
         align-items: center;
-        gap: 10px;
+        gap: var(--sp-3);
         justify-content: space-between;
       }
       #doctor-title {
-        font-weight: bold;
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: -0.1px;
+        color: var(--ink);
       }
       #doctor-panel ul {
-        margin: 10px 0 0;
+        margin: var(--sp-3) 0 0;
         padding-left: 18px;
       }
       #doctor-panel li {
-        margin-bottom: 8px;
-        line-height: 1.45;
+        margin-bottom: var(--sp-2);
+        line-height: 1.5;
+        color: var(--ink-muted);
       }
       #doctor-panel .check-name {
-        font-family: Consolas, monospace;
-        color: #9cdcfe;
+        font-family: var(--font-mono);
+        font-size: 11.5px;
+        color: var(--accent-light);
       }
       #doctor-panel .check-hint {
         display: block;
-        color: #c8c8c8;
-        font-size: 0.92em;
+        color: var(--ink-subtle);
+        font-size: 11.5px;
         margin-top: 2px;
       }
       #doctor-panel .mark-fail {
-        color: #f48771;
-        font-weight: bold;
+        font-family: var(--font-mono);
+        font-weight: 600;
+        color: var(--danger);
       }
       #doctor-panel .mark-warn {
-        color: #e6c66a;
-        font-weight: bold;
+        font-family: var(--font-mono);
+        font-weight: 600;
+        color: var(--warn-ink);
       }
       #doctor-meta {
-        color: #9aa;
-        font-size: 0.85em;
-        margin-top: 8px;
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--ink-subtle);
+        margin-top: var(--sp-2);
       }
       #doctor-refresh {
-        padding: 6px 12px;
-        font-size: 0.85em;
+        padding: 4px 10px;
+        font-size: 11px;
       }
+
       /* 온보딩이 차단됐을 때 폼을 흐리게 — 눌러도 안 되는 이유가 함께 보이게. */
       #onboard-section.blocked #onboard-form {
         opacity: 0.45;
         pointer-events: none;
       }
       #onboard-blocked-note {
-        background-color: #2d1414;
-        border-left: 4px solid #7a2b2b;
-        padding: 10px;
-        margin: 10px 0;
-        font-size: 0.9em;
-        color: #f4a6a6;
+        background-color: var(--tint-fail);
+        border: 1px solid var(--line-fail);
+        border-left: 2px solid var(--danger);
+        border-radius: var(--r-md);
+        padding: var(--sp-3);
+        margin: var(--sp-3) 0;
+        font-size: 12px;
+        line-height: 1.55;
+        color: var(--danger-ink);
       }
-      /* --- 합류 2단 절차 --- */
-      .join-step {
-        background-color: #2a2d2e;
-        border-left: 4px solid #569cd6;
-        padding: 10px 12px;
-        margin: 10px 0;
-        font-size: 0.9em;
+      #onboard-msg {
+        font-size: 12px;
         line-height: 1.5;
+        margin: var(--sp-2) 0 0;
+        min-height: 1em;
+      }
+
+      /* --- 합류 2단 절차 — 한 컴포넌트 안에서 잉크 4단을 다 쓴다. --- */
+      .join-step {
+        border-left: 2px solid var(--accent);
+        margin: var(--sp-2) 0;
+        color: var(--ink-muted);
       }
       .join-step .step-no {
-        color: #569cd6;
-        font-weight: bold;
+        font-family: var(--font-mono);
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--accent);
       }
       .join-step .step-where {
-        color: #9aa;
-        font-size: 0.85em;
+        font-size: 11px;
+        color: var(--ink-tertiary);
       }
       .join-step .step-why {
         display: block;
-        color: #e6c66a;
-        margin-top: 4px;
+        color: var(--warn-ink);
+        margin-top: var(--sp-1);
       }
+      .join-step > div {
+        color: var(--ink-subtle);
+        margin-top: var(--sp-1);
+      }
+
       /* --- 스키마 렌더 폼 --- */
       .form-section {
-        margin: 14px 0 4px;
+        margin: var(--sp-4) 0 var(--sp-2);
+      }
+      .form-section > h4 {
+        margin-top: 0;
       }
       .form-section > .section-desc {
-        font-size: 0.85em;
-        color: #b8b8b8;
-        line-height: 1.5;
-        margin: 2px 0 8px;
+        font-size: 11.5px;
+        color: var(--ink-subtle);
+        line-height: 1.55;
+        margin: 2px 0 var(--sp-3);
       }
       .form-section.section-consent {
-        background-color: #332b00;
-        border-left: 4px solid #cca700;
-        padding: 10px 12px;
+        background-color: var(--tint-warn);
+        border: 1px solid var(--hairline);
+        border-left: 2px solid var(--warn);
+        border-radius: var(--r-md);
+        padding: var(--sp-3);
       }
       .form-section.section-consent > .section-desc {
-        color: #e6c66a;
+        color: var(--warn-ink);
       }
       .field-req {
-        color: #f48771;
+        color: var(--danger);
       }
       .field-note {
         display: block;
-        font-size: 0.8em;
-        color: #9cdcfe;
-        margin-top: 2px;
-        line-height: 1.45;
+        font-size: 11px;
+        color: var(--ink-subtle);
+        margin-top: var(--sp-1);
+        line-height: 1.5;
       }
       .field-err {
         display: none;
-        font-size: 0.8em;
-        color: #f48771;
+        font-size: 11px;
+        color: var(--danger);
         margin-top: 3px;
-        line-height: 1.45;
+        line-height: 1.5;
       }
       .field-link {
-        color: #4ec9b0;
-        font-size: 0.8em;
+        font-size: 11px;
+        color: var(--ok);
       }
       .field-inline {
         display: flex;
-        gap: 6px;
-      }
-      .field-inline button {
-        padding: 6px 10px;
-        font-size: 0.8em;
+        gap: var(--sp-2);
       }
       .consent-row {
         display: flex;
         align-items: flex-start;
-        gap: 8px;
+        gap: var(--sp-2);
       }
       .consent-row input[type="checkbox"] {
         margin-top: 3px;
-        width: 16px;
-        height: 16px;
+        width: 15px;
+        height: 15px;
+      }
+      /* 동의 문구는 라벨이지만 필드명이 아니다 — 읽는 문장이라 caption 잉크. */
+      .consent-label {
+        font-size: 12px;
+        font-weight: 400;
+        line-height: 1.55;
+        letter-spacing: 0;
+        color: var(--warn-ink);
+      }
+
+      /* --- 반응형 — 좁은 폭에서 표가 페이지를 가로로 밀지 않는다. --- */
+      @media (max-width: 900px) {
+        .grid-form {
+          grid-template-columns: 1fr;
+        }
+        #jobs-controls {
+          flex-wrap: wrap;
+        }
+      }
+      @media (max-width: 720px) {
+        body {
+          padding: var(--sp-4) var(--sp-3) 48px;
+        }
+        section {
+          padding: var(--sp-3);
+        }
+        .flex-form {
+          flex-wrap: wrap;
+        }
       }
     </style>
   </head>
@@ -406,7 +763,7 @@
         <div class="flex-form">
           <button id="onboard-btn" type="submit">사용자 등록 (enabled=false)</button>
         </div>
-        <p id="onboard-msg" style="font-size: 0.85em; margin-top: 8px"></p>
+        <p id="onboard-msg"></p>
       </form>
     </section>
 
@@ -678,7 +1035,7 @@
         return (
           '<div class="consent-row">' +
           fieldInputHtml(f) +
-          '<label for="f-' + esc(f.key) + '" style="font-size:0.9em;color:#e6c66a">' +
+          '<label for="f-' + esc(f.key) + '" class="consent-label">' +
           esc(f.description) + "</label>" +
           "</div>" +
           '<span class="field-err" id="e-' + esc(f.key) + '"></span>'
@@ -800,7 +1157,7 @@
             errBox.innerText = "";
             errBox.style.display = "none";
           }
-          onboardMsg.style.color = "#4ec9b0";
+          onboardMsg.style.color = "var(--ok)";
           onboardMsg.innerText =
             "accountId 조회 완료: " + (r.data.display_name || "");
         } else if (errBox) {
@@ -815,7 +1172,7 @@
         const payload = collectAnswers();
         onboardBusy = true;
         onboardBtn.disabled = true;
-        onboardMsg.style.color = "#9cdcfe";
+        onboardMsg.style.color = "var(--accent-light)";
         onboardMsg.innerText = "등록 중…";
         try {
           const res = await fetch("/onboard", {
@@ -826,7 +1183,7 @@
           const data = await res.json();
           if (res.ok) {
             showFindings([]);              // 이전 오류 표시 지우기
-            onboardMsg.style.color = "#4ec9b0";
+            onboardMsg.style.color = "var(--ok)";
             onboardMsg.innerText =
               "등록 완료: " + data.username + " (enabled=false — 표에서 활성화하세요)" +
               (data.consent_accepted_at
@@ -838,7 +1195,7 @@
             // 400 = 입력값 검증 실패. 서버 findings 의 key 가 폼 필드 이름과 같으므로
             // 입력칸 밑에 그대로 붙인다(검증 규칙은 서버 한 곳에만 있다).
             const orphan = showFindings(data.findings);
-            onboardMsg.style.color = "#f48771";
+            onboardMsg.style.color = "var(--danger)";
             onboardMsg.innerText =
               "실패: " +
               (data.error || res.status) +
@@ -848,7 +1205,7 @@
             if (data.blocking) loadDoctor();
           }
         } catch (e) {
-          onboardMsg.style.color = "#f48771";
+          onboardMsg.style.color = "var(--danger)";
           onboardMsg.innerText = "네트워크 오류: " + e;
         } finally {
           onboardBusy = false;
