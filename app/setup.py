@@ -6,6 +6,7 @@
     validate  :mod:`app.setup_validate`  답변이 스키마 선언을 만족하는가(종이 검사)
     render    :mod:`app.setup_render`    통과한 답변으로 config.yaml 생성(주석 보존)
     doctor    :mod:`app.setup_doctor`    그 설정으로 **실제로 붙는가**(실측 검사)
+    consent   :mod:`app.setup_consent`   풀 퍼미션 동의를 **사람에게서** 받아 증서로 남긴다
     wizard    :mod:`app.setup_wizard`    위 넷을 **대화로** 태운다(값을 캐내는 인터페이스)
     skill     :mod:`app.setup_skill`     추적되는 템플릿 → 로컬 `.claude/skills/` 생성(편의)
 
@@ -65,8 +66,8 @@ import os
 import sys
 from typing import Any, Optional
 
-from app import (setup_autofill, setup_discover, setup_doctor, setup_render,
-                 setup_skill, setup_validate, setup_wizard)
+from app import (setup_autofill, setup_consent, setup_discover, setup_doctor,
+                 setup_render, setup_skill, setup_validate, setup_wizard)
 
 EXIT_OK = 0
 EXIT_GATE_FAILED = 1
@@ -162,6 +163,108 @@ def _autofill_lines(report) -> list:
 # ---------------------------------------------------------------------------
 
 
+def _apply_consent(flat: dict, record) -> dict:
+    """동의 증서의 내용을 답변 위에 **덮어쓴다** — 증서가 정본, 답변은 사본.
+
+    이렇게 하는 이유는 두 가지다:
+        1. 온보딩 에이전트가 답변 파일에 동의를 적을 **이유 자체를 없앤다**. 적어도
+           소용이 없고(증서가 이긴다), 안 적어도 된다(증서가 채운다).
+        2. 출처(``channel``·``granted_by``·``relayed_by``)가 항상 함께 간다.
+
+    ⚠️ **동의를 거부한 증서는 덮어쓰지 않는다** — 그 경우는 "답변은 true 인데 증서는
+    아니다"라는 사실 자체가 오류 메시지여야 한다(setup_consent.PROBLEM_DENIED).
+    """
+    if record is not None and record.full_permissions:
+        flat.update(record.config_values())
+    return flat
+
+
+def _load_consent(args: argparse.Namespace):
+    """설치 관문이 쓸 동의 증서를 읽는다(없으면 ``None``).
+
+    깨진 증서는 **조용히 없는 셈 치지 않는다** — 사용 오류(exit 2)로 끝낸다. 없는 것과
+    깨진 것을 뭉뚱그리면 그 다음 오류 메시지가 엉뚱한 곳(답변 파일)을 가리킨다.
+    """
+    try:
+        return setup_consent.load_record(
+            project_dir=getattr(args, "project_dir", ".") or ".",
+            path=getattr(args, "consent_record", "") or "")
+    except setup_consent.ConsentError as exc:
+        _die(str(exc))
+
+
+def _consent_lines(record) -> list:
+    """동의 출처를 사람이 읽는 줄로(증서가 없으면 빈 목록)."""
+    if record is None:
+        return []
+    line = f"동의 출처: {record.describe()}"
+    if record.relayed:
+        return [line, f"  ↳ {setup_consent.RELAY_CAVEAT}", ""]
+    return [line, ""]
+
+
+def cmd_consent(args: argparse.Namespace) -> int:
+    """``consent`` — 풀 퍼미션 동의를 **사람에게서** 받아 증서로 남긴다.
+
+    이 명령이 따로 있는 이유(3차 리허설 실측): 온보딩 **서브 에이전트가 답변 파일에
+    ``consent.full_permissions: true`` 를 스스로 적어** 게이트를 통과시켰다. 동의를
+    답변 파일의 불리언에서 **출처가 붙은 증서**로 옮겨, 사람 채널(TTY) 또는 사용자
+    채널을 가진 상위의 중계로만 만들어지게 한다(:mod:`app.setup_consent`).
+
+    모드(넷 중 하나):
+        ``--request``  동의 요청서만 출력한다(부작용 없음). **서브 에이전트가 상위에
+                       반환할 것** — "멈춰라"와 "너에겐 채널이 없다"의 모순을 푸는 산출물.
+        ``--show``     지금 기록된 증서를 보여 준다.
+        ``--relay``    상위 오케스트레이터가 사람에게서 받은 동의를 전달한다.
+        (기본)         터미널 앞의 사람이 직접 동의한다(**stdin 이 TTY 여야 한다**).
+    """
+    project_dir = getattr(args, "project_dir", ".") or "."
+    path = getattr(args, "consent_record", "") or ""
+
+    if args.request:
+        payload = setup_consent.consent_request(project_dir=project_dir)
+        text_lines = ["[사람의 동의가 필요합니다 — 서브 에이전트는 대신 누를 수 없습니다]",
+                      "", *payload["disclosure"], "",
+                      payload["ask_user"], "",
+                      "상위 오케스트레이터가 사용자 응답을 받아 실행할 명령:",
+                      "  " + " ".join(payload["relay_command"]), "",
+                      "사람이 이 터미널 앞에 있다면:",
+                      "  " + " ".join(payload["human_command"]), "",
+                      payload["note"]]
+        _emit(payload, "\n".join(text_lines), args.json)
+        return EXIT_OK
+
+    if args.show:
+        record = _load_consent(args)
+        payload = {"path": setup_consent.record_path(project_dir, path),
+                   "record": record.to_dict() if record else None}
+        if record is None:
+            _emit(payload, f"동의 증서가 없습니다: {payload['path']}", args.json)
+            return EXIT_GATE_FAILED
+        _emit(payload, "\n".join([f"경로: {payload['path']}"] + _consent_lines(record)),
+              args.json)
+        return EXIT_OK
+
+    try:
+        if args.relay:
+            record = setup_consent.grant_relay(granted_by=args.granted_by,
+                                               statement=args.statement,
+                                               relayed_by=args.relayed_by)
+        else:
+            record = setup_consent.grant_interactive(granted_by=args.granted_by)
+    except setup_consent.ConsentError as exc:
+        print(f"동의를 기록하지 않았습니다: {exc}", file=sys.stderr)
+        return EXIT_GATE_FAILED
+
+    target = setup_consent.save_record(record, project_dir=project_dir, path=path)
+    payload = {"path": target, "record": record.to_dict()}
+    _emit(payload,
+          "\n".join([f"동의 증서를 기록했습니다: {target}"] + _consent_lines(record)
+                    + ["다음: python -m app.setup validate setup-answers.json"]),
+          args.json)
+    return EXIT_OK
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     """``validate`` — 답변을 스키마에 대고 검증(누락·조건부·허용값·타입을 **전부** 모아서).
 
@@ -171,11 +274,19 @@ def cmd_validate(args: argparse.Namespace) -> int:
     """
     answers = _load_answers(args.answers)
     flat, report = _autofill(answers, args)
-    result = setup_validate.validate_answers(flat)
+    record = _load_consent(args)
+    result = setup_validate.validate_answers(_apply_consent(flat, record),
+                                             attestation=record,
+                                             require_attestation=True)
     payload = result.to_dict()
+    if record is not None:
+        payload["consent"] = record.to_dict()
     if report is not None:
         payload["autofill"] = report.to_dict()
-    _emit(payload, "\n".join(_autofill_lines(report) + [result.format_text()]), args.json)
+    _emit(payload,
+          "\n".join(_autofill_lines(report) + _consent_lines(record)
+                    + [result.format_text()]),
+          args.json)
     return EXIT_OK if result.ok else EXIT_GATE_FAILED
 
 
@@ -187,13 +298,17 @@ def cmd_render(args: argparse.Namespace) -> int:
     """
     answers = _load_answers(args.answers)
     flat, report = _autofill(answers, args)
-    result = setup_validate.validate_answers(flat)
+    record = _load_consent(args)
+    result = setup_validate.validate_answers(_apply_consent(flat, record),
+                                             attestation=record,
+                                             require_attestation=True)
     if not result.ok:
         payload = result.to_dict()
         if report is not None:
             payload["autofill"] = report.to_dict()
         _emit(payload,
-              "\n".join(_autofill_lines(report) + [result.format_text()]), args.json)
+              "\n".join(_autofill_lines(report) + _consent_lines(record)
+                        + [result.format_text()]), args.json)
         print("검증에 실패해 config.yaml 을 생성하지 않았습니다.", file=sys.stderr)
         return EXIT_GATE_FAILED
 
@@ -405,6 +520,11 @@ def _add_autofill_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--no-autofill", action="store_true",
         help="자동 채움을 하지 않는다(답변에 적힌 값만 쓴다)")
+    parser.add_argument(
+        "--consent-record", default="", metavar="PATH",
+        help=f"동의 증서 경로(기본 <project-dir>/{setup_consent.RECORD_FILENAME}). "
+             f"`python -m app.setup consent` 가 만든다 — 답변 파일에 동의를 적는 것"
+             f"만으로는 통과하지 못한다")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -416,6 +536,35 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="종료코드: 0=통과 / 1=게이트 실패 / 2=사용 오류",
     )
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p_consent = sub.add_parser(
+        "consent",
+        help="풀 퍼미션 동의를 사람에게서 받아 증서로 남긴다(설치의 0단계 — 서브 "
+             "에이전트는 --request 로 상위에 요청서를 반환한다)")
+    p_consent.add_argument("--project-dir", default=".",
+                           help="배포 디렉토리(증서를 둘 기준점)")
+    p_consent.add_argument(
+        "--consent-record", default="", metavar="PATH",
+        help=f"증서 경로(기본 <project-dir>/{setup_consent.RECORD_FILENAME})")
+    p_consent.add_argument(
+        "--request", action="store_true",
+        help="동의 요청서만 출력한다(부작용 없음). **서브 에이전트가 쓸 유일한 모드** — "
+             "출력을 4-튜플의 *권고 다음 단계* 에 실어 상위에 반환한다")
+    p_consent.add_argument("--show", action="store_true",
+                           help="기록된 증서를 보여 준다(없으면 exit 1)")
+    p_consent.add_argument(
+        "--relay", action="store_true",
+        help="사용자 채널을 가진 **상위 오케스트레이터**가 사람에게서 받은 동의를 "
+             "전달한다. --granted-by · --statement · --relayed-by 가 전부 필요하다")
+    p_consent.add_argument("--granted-by", default="", metavar="WHO",
+                           help="동의한 **사람**(이름 또는 이메일)")
+    p_consent.add_argument("--statement", default="", metavar="TEXT",
+                           help="그 사람이 실제로 한 말 **원문**(--relay 필수). "
+                                "기계 상투어('yes'·'true')는 거부한다")
+    p_consent.add_argument("--relayed-by", default="", metavar="WHO",
+                           help="중계한 오케스트레이터 식별자(--relay 필수)")
+    p_consent.add_argument("--json", action="store_true", help="기계가 읽는 출력")
+    p_consent.set_defaults(func=cmd_consent)
 
     # wizard 를 **맨 앞**에 선언한다 — `--help` 를 처음 본 사람이 "뭐부터 하지"에서
     # 막히지 않게 하려는 것이다(발견 가능성이 설치 난이도의 절반이다).

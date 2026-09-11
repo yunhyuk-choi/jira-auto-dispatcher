@@ -17,9 +17,18 @@ server: { host: 0.0.0.0, port: 8787 }
 # (파일 쓰기·셸·git push)을 가진 코딩 에이전트를 헤드리스로 실행한다. 그 위험을 이해하고
 # 감수한다는 설치자의 명시 동의를 남긴다. 기본은 false(동의 안 함)이며 사람이 직접 켜야
 # 한다. (기존 배포 호환을 위해 지금은 미동의여도 부팅은 되고 경고만 남는다.)
+# ⚠️ **동의는 이 파일을 손으로 고쳐 만드는 것이 아니다.** 아래 값들은
+# `python -m app.setup consent` 가 만든 동의 증서(setup-consent.json)에서 render 가
+# 옮겨 적는다. 증서 없이 여기에 true 만 적으면 설치 관문 validate 가 막는다
+# (consent_unattested) — 온보딩 에이전트가 동의를 자기 승인한 실측 결함을 닫은 자리다.
 consent:
   full_permissions: false
   accepted_at: ""            # 동의 시각(ISO-8601, 예: 2026-08-25T09:00:00+09:00) — 감사 흔적
+  # 동의의 출처. human_interactive = 터미널 앞의 사람이 직접 입력 /
+  #             orchestrator_relay = 사용자 채널을 가진 상위가 사람에게서 받아 중계
+  channel: ""
+  granted_by: ""             # 동의한 사람(이름 또는 이메일)
+  relayed_by: ""             # 중계한 오케스트레이터(channel 이 orchestrator_relay 일 때만)
 
 # 어디에 세우는가. profile 하나만 고르면 나머지가 파생된다(app/setup_schema.PROFILE_DEFAULTS):
 #   local         개발자 노트북 — 시크릿은 로컬 디렉토리(env SECRETS_DIR)
@@ -66,11 +75,21 @@ deploy:
 # github=x-access-token), MR/PR 용어, 변경요청 URL 모양·닫기 API 가 여기서 갈린다.
 # 레포 URL 호스트가 스스로 밝히면(github.com·gitlab.example.com) 그 URL 에 한해 호스트가
 # 우선한다 — 한 배포가 여러 forge 를 섞어 써도(아래 run.*_repo_url 참조) 각각 맞게 붙는다.
+# 코드 호스팅. ⚠️ **`none` 은 1급 값이다** — 원격이 순수 git(사내 git 서버·베어 리포·
+# file://)이라 MR/PR API 가 없는 배포다. 아무 forge 나 골라 더미 토큰을 만들지 말 것.
+# `none` 이면 token_ref 가 필요 없고(doctor 의 forge_token 은 SKIP), 대신 이것들이 꺼진다:
+#   - 변경요청(MR/PR) 자동 생성·닫기 → 에이전트는 브랜치 push 까지만 간다
+#   - 잡 결과·알림의 변경요청 링크 → 브랜치명이 대신 남는다
+#   - 관리 UI 온보딩의 개인 forge PAT 요구 → 선택 항목으로 내려간다
 forge:
-  kind: gitlab                    # gitlab | github
+  kind: gitlab                    # gitlab | github | none
   base_url: ""                    # self-hosted(사내 GitLab·GHE) base URL. 비우면 SaaS 기본
+                                  # ⚠️ 비어 있어도 doctor 가 조용히 SKIP 하지 않는다 —
+                                  #    설정된 레포 URL 호스트에서 **유도**해 실제로 프로브한다.
+                                  #    유도조차 못 할 때만 SKIP(사내 PAT 외부 전송 방지).
   token_ref: service/forge-token  # 토큰 "값"이 아니라 secrets.base_dir 상대 파일 참조
                                   # (레거시: run.repo_resolver_gitlab_token_ref 도 계속 읽음)
+                                  # kind: none 이면 비워 둔다(필요 없다).
 
 # 감시할 Jira + **그 인스턴스에서만 통하는 값들**. 커스텀필드 id·완료 전이 id·상태 이름·
 # 라벨은 인스턴스마다 다르다 — 코드 상수가 아니라 여기서 받는다. 비우면 오늘의 기본값

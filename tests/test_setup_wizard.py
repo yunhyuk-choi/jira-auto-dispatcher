@@ -280,8 +280,11 @@ def test_answers_file_is_the_same_shape_the_manual_path_accepts(tmp_path):
     """마법사가 남긴 답변 파일을 수동 CLI 가 그대로 받는다(대화형은 유일 경로가 아니다)."""
     code, _responder, _out = run(tmp_path)
     assert code == W.EXIT_OK
+    # ⚠️ --project-dir 를 준다 — 마법사가 그 디렉토리에 **동의 증서**도 남기기 때문이다
+    #    (답변 파일의 true 만으로는 통과하지 않는다 — app/setup_consent.py).
+    assert (tmp_path / "setup-consent.json").exists(), "마법사가 동의 증서를 남겨야 한다"
     assert CLI.main(["validate", str(tmp_path / "setup-answers.json"),
-                     "--no-autofill"]) == CLI.EXIT_OK
+                     "--no-autofill", "--project-dir", str(tmp_path)]) == CLI.EXIT_OK
 
 
 # ---------------------------------------------------------------------------

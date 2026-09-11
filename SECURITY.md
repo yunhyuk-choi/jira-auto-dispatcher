@@ -41,19 +41,44 @@ worker 컨테이너의 `claude` 는 `--dangerously-skip-permissions` 를 **헤�
 - 이 파일은 컨테이너 **생성 시점에** 그 스펙으로 주입되고(`app/inject.py`) worker 가
   부팅 시 `~/.claude/settings.json` 으로 기록한다 — 매 spawn 마다 최신 내용으로 덮어쓴다.
 
-### 1.1 동의를 설정에 남긴다
+### 1.1 동의는 **사람에게서만** 온다
 
-`config.yaml` 의 `consent.full_permissions` 를 **명시적으로 `true`** 로 두어야 한다(기본
-`false`). `consent.accepted_at` 에 동의 시각을 남기면 감사 흔적이 된다.
+`config.yaml` 의 `consent.full_permissions` 가 **명시적으로 `true`** 여야 한다(기본
+`false`). 그런데 이 값 자체는 그냥 텍스트라, 온보딩을 대신하는 에이전트가 적어 넣을 수
+있다 — 실제로 리허설에서 **온보딩 서브 에이전트가 자기 승인**했다. 그래서 동의는 설정의
+불리언이 아니라 **출처가 붙은 증서**로 성립한다:
+
+```bash
+python -m app.setup consent        # 터미널 앞의 사람(TTY 필요) — 고지를 읽고 문구를 입력
+```
+
+증서(`setup-consent.json`, gitignore)에는 *누가 · 어느 채널로 · 언제* 동의했는지가 남고,
+`render` 가 그 사실을 `config.yaml` 로 옮긴다:
 
 ```yaml
 consent:
   full_permissions: true
   accepted_at: "2026-01-01T09:00:00+09:00"
+  channel: human_interactive      # 또는 orchestrator_relay
+  granted_by: "installer@your-org.example"
 ```
 
-> 기존 배포 호환을 위해 지금은 미동의 상태여도 부팅은 되고 경고만 남는다. 그러나 **미동의로
-> 운영하지 말라** — 이 값은 "읽고 이해했다"의 유일한 기록이다.
+**두 채널만 존재한다.**
+
+| 채널 | 누가 | 구조적 보증 |
+|---|---|---|
+| `human_interactive` | 터미널 앞의 사람 | **stdin 이 TTY 여야 한다** — 헤드리스 세션에서는 물리적으로 열리지 않는다 |
+| `orchestrator_relay` | 사용자 채널을 가진 상위 오케스트레이터 | 동의한 사람 · 그 사람의 **원문** · 중계자를 전부 남긴다. 모든 출력에서 "중계된 동의"로 표시된다 |
+
+서브 에이전트(`JAD_SETUP_ACTOR=subagent`)는 **두 채널 모두 거부된다.** 할 수 있는 일은
+`python -m app.setup consent --request` 로 동의 요청서를 만들어 상위에 올리는 것뿐이다.
+
+> 솔직한 한계: 셸을 가진 프로세스가 `--relay` 를 거짓으로 실행하는 것을 소프트웨어가
+> 물리적으로 막을 수는 없다. 그래서 이 설계는 **막는 것과 드러내는 것**을 함께 한다 —
+> 중계 동의는 조용히 사람 동의인 척하지 않는다.
+
+> 기존 배포 호환을 위해 지금은 미동의·출처 불명 상태여도 부팅은 되고 경고만 남는다.
+> 그러나 **그대로 운영하지 말라** — 이 값은 "읽고 이해했다"의 유일한 기록이다.
 
 ## 2. 왜 권한을 죽일 수 없는가 (구조적 이유)
 

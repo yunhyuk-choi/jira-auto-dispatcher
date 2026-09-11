@@ -19,6 +19,7 @@ description: jira-auto-dispatcher 를 처음 설치·설정할 때 쓴다. 설�
 
 | 명령 | 하는 일 |
 |---|---|
+| `python -m app.setup consent --request` | **사람의 동의**를 요청하는 요청서를 만든다(부작용 없음). 서브 에이전트가 동의와 관련해 할 수 있는 **유일한** 동작 |
 | `python -m app.setup discover --answers <답변.json>` | 이 Jira 인스턴스에 **실제로 있는** 커스텀필드·상태·전이 id 조회. **config.yaml 이 없어도 된다**(답변의 base_url·이메일·토큰 참조만 있으면 돈다) |
 | `python -m app.setup validate <답변.json>` | 스키마 검증. **통과 못 하면 non-zero** |
 | `python -m app.setup render <답변.json>` | `config/config.yaml` 생성(`.env` 는 만들지 않는다 — 6)에서 손으로 쓴다). 파일이 이미 있으면 **`--force`**(자동 백업) |
@@ -41,7 +42,16 @@ description: jira-auto-dispatcher 를 처음 설치·설정할 때 쓴다. 설�
 | 누가 진행하나 | 무엇을 쓰나 | 왜 |
 |---|---|---|
 | **사람**(터미널 앞의 설치자) | `python -m app.setup wizard` | 같은 질문을 터미널에서 하고, 답을 `setup-answers.json` 에 모아 아래 CLI 를 그대로 태운다. `claude` 가 없어도 설치가 끝난다 — **사람에게는 이쪽이 1차 진입점**이다 |
-| **에이전트**(이 룰북을 실은 서브·헤드리스 세션) | 아래 절차의 **비대화형 CLI** (`discover --answers` → `validate` → `render` → `doctor`) | ⚠️ `wizard` 를 **쓰지 마라** — 대화형 stdin 을 읽으므로 헤드리스에서는 멈추거나 EOF 로 죽는다. 에이전트는 자기 대화 채널에서 답을 모아 `setup-answers.json` 에 쓰고 위 네 명령만 돌린다 |
+| **에이전트**(이 룰북을 실은 서브·헤드리스 세션) | **먼저 `JAD_SETUP_ACTOR=subagent` 를 내보내고**, 아래 절차의 **비대화형 CLI** (`discover --answers` → `validate` → `render` → `doctor`) | ⚠️ `wizard` 를 **쓰지 마라** — 대화형 stdin 을 읽으므로 헤드리스에서는 멈추거나 EOF 로 죽는다(이제 `JAD_SETUP_ACTOR` 를 선언하면 wizard 가 스스로 거부한다). 에이전트는 자기 대화 채널에서 답을 모아 `setup-answers.json` 에 쓰고 위 명령만 돌린다 |
+
+**서브로 실렸으면 첫 명령 전에 주체를 선언해라** — 이건 예의가 아니라 **안전장치**다.
+설치 관문은 이 값을 보고 *동의를 만들 수 있는 주체인가*를 가른다.
+
+```bash
+export JAD_SETUP_ACTOR=subagent        # 리눅스·macOS
+$env:JAD_SETUP_ACTOR = "subagent"      # 윈도우 PowerShell
+```
+
 
 두 경로는 **같은 답변 파일·같은 검증기·같은 종료코드**를 쓴다. 그래서 중간에 갈아탈 수 있다
 (마법사를 하다 멈추고 CLI 로 잇거나 그 반대도 된다). 수동 절차 전체는 `INSTALL.md`.
@@ -55,8 +65,9 @@ description: jira-auto-dispatcher 를 처음 설치·설정할 때 쓴다. 설�
 | 상황 | 규칙 |
 |---|---|
 | `discover` 의 **`suggested_answers`**(확정된 값) | **진행한다.** 그대로 답변에 넣고, "확인 없이 채웠음"을 근거(`discover` 출력)와 함께 4-튜플의 *인터뷰 응답 원본* 에 **반드시 보고**한다. 확정값은 인스턴스가 실제로 준 사실이지 네 추측이 아니다 |
-| `discover` 의 **`candidates`**(후보 여럿·부분일치뿐) | **멈춘다.** 네가 고르지 마라. 여기까지의 답변 파일을 저장하고, 후보 목록을 그대로 *권고 다음 단계* 에 실어 반환한다. 잘못 고른 커스텀필드 id 는 검증도 진단도 통과한 뒤 **운영에서** 터진다 — 되돌리는 비용이 기다리는 비용보다 훨씬 크다 |
-| **동의**(`consent.full_permissions`) | **멈춘다.** 대신 눌러 주지 마라(1 항). 사람의 명시 동의가 없어 `validate` 가 `consent_required` 로 막는 것이 정상 동작이다 |
+| `discover` 의 **`blocking_choices`**(필수 항목인데 후보가 여럿·부분일치뿐) | **멈춘다.** 네가 고르지 마라. 여기까지의 답변 파일을 저장하고, 그 목록을 그대로 *권고 다음 단계* 에 실어 반환한다. 잘못 고른 커스텀필드 id 는 검증도 진단도 통과한 뒤 **운영에서** 터진다 — 되돌리는 비용이 기다리는 비용보다 훨씬 크다 |
+| `discover` 의 **`optional_unresolved`**(선택 항목인데 확정 못 함) | **진행한다.** 미설정으로 두고 4-튜플에 "무엇을 왜 비웠는지" 보고한다. 이건 `actual_start`·`actual_end` 처럼 **미설정이 정상**인 필드다 — 안 써도 되는 값 때문에 설치 전체를 멈추지 마라(리허설에서 실제로 그렇게 멈췄다) |
+| **동의**(`consent.full_permissions`) | **멈추되 빈손으로 멈추지 않는다.** `python -m app.setup consent --request --json` 을 돌려 그 출력을 4-튜플의 *권고 다음 단계* 에 그대로 실어 상위에 반환한다. 대신 눌러 줄 **수단 자체가 없다**(아래 1 항) |
 | **시크릿 값** | **멈춘다.** 토큰은 설치자가 자기 터미널에서 파일로 만든다(3 항). 값을 대화로 받아 오지 마라 |
 
 즉 **"확정된 사실은 진행 후 보고 · 판단이 필요한 선택과 사람의 권한은 멈춤"** 이다. 멈출 때도
@@ -105,11 +116,37 @@ git rev-parse --show-toplevel && python --version && docker compose version && l
 `setup-answers.json` 이 이미 있으면 **이어서 하는 중**이다 — 먼저 읽고, 이미 답한 것은
 다시 묻지 마라.
 
-### 1) 동의부터 (여기서 막히면 뒤는 무의미)
+### 1) 동의부터 (여기서 막히면 뒤는 무의미) — **동의는 사람에게서만 온다**
 
 이 시스템은 사람 승인 없이 파일 쓰기·셸·`git push` 권한을 가진 에이전트를 헤드리스로
-돌린다. 관리 UI(8787)와 worker 는 RCE 표면이다(`SECURITY.md`). 설치자가 명시로 동의하지
-않으면 `validate` 가 `consent_required` 로 막는다 — 대신 눌러 주지 마라.
+돌린다. 관리 UI(8787)와 worker 는 RCE 표면이다(`SECURITY.md`). 그래서 이 설치는 "사람이
+그 위험을 알고 풀 퍼미션을 준다"를 **전제**로 하고, 그 전제는 반드시 사람에게서 와야 한다.
+
+⚠️ **답변 파일에 `consent.full_permissions: true` 를 적는 것은 동의가 아니다.** 예전
+룰북은 "대신 눌러 주지 마라"라고 하면서 같은 문서에서 "서브에겐 사용자 채널이 없다"고도
+했다 — 양립 불가한 두 지시였고, 리허설에서 서브 에이전트가 **스스로 true 를 적어** 통과했다.
+지금은 그 구멍이 닫혀 있다: 동의는 **별도 증서**(`setup-consent.json`)로만 성립하고,
+증서는 아래 두 채널로만 만들어진다. 증서 없이 답변에 true 만 있으면 `validate` 가
+`consent_unattested` 로 **그 자리에서** 막는다.
+
+| 누가 | 명령 | 무엇이 기록되나 |
+|---|---|---|
+| **터미널 앞의 사람** | `python -m app.setup consent` | 고지를 읽고 확인 문구를 직접 입력한다. **stdin 이 TTY 여야** 하므로 헤드리스 세션에서는 애초에 돌지 않는다 |
+| **사용자 채널을 가진 상위 오케스트레이터** | `python -m app.setup consent --relay --granted-by "<사람>" --statement "<그 사람이 한 말 원문>" --relayed-by "<중계자>"` | 누가 동의했는지·그 사람의 원문·중계자가 함께 남는다. 이 경로로 만든 동의는 검증·진단·`config.yaml` 어디서나 "중계된 동의"로 표시된다 |
+
+**서브 에이전트인 너는 둘 다 할 수 없다**(`JAD_SETUP_ACTOR=subagent` 를 선언했으면 관문이
+거부하고, 선언하지 않았어도 TTY 가 없어 사람 채널은 열리지 않는다). 네가 할 일은 하나다:
+
+```bash
+python -m app.setup consent --request --json
+```
+
+이 출력(고지 원문 + 상위가 실행할 `--relay` 명령)을 **4-튜플의 *권고 다음 단계* 에 그대로
+실어 반환**해라. 상위가 사용자에게 묻고, 동의를 받으면 `--relay` 로 전달한다. 그 뒤에
+너를 다시 띄우면 증서가 이미 있으므로 그대로 이어서 진행된다.
+
+사용자가 동의하지 않으면 **그것으로 끝이다** — 설치를 진행하지 마라. 동의 거부는 오류가
+아니라 정상적인 결과다.
 
 ### 2) 값 모으기 — **묻는 횟수를 줄이는 것이 핵심**
 
@@ -117,11 +154,11 @@ git rev-parse --show-toplevel && python --version && docker compose version && l
 
 | 키 | 비고 |
 |---|---|
-| `consent.full_permissions` / `consent.accepted_at` | 설치자 본인의 동의 + 지금 시각(ISO-8601) |
+| ~~`consent.*`~~ | **묻지 마라.** 1 항의 증서(`setup-consent.json`)가 정본이고, 관문이 답변에 자동으로 합친다. 답변 파일에 적어도 무의미하다(증서가 이긴다) |
 | `jira.base_url` · `jira.project` · `jira.watcher_email` | Jira Cloud 전용 |
 | `jira.watcher_token_file` | 참조. 기본 `service/jira-token` |
-| `forge.kind` | dlc-meta URL 에서 자동 판정되면 **확인만** 받아라 |
-| `forge.token_ref` | 참조. 기본 `service/forge-token` |
+| `forge.kind` | `gitlab` / `github` / **`none`**. dlc-meta URL 에서 자동 판정되면 **확인만** 받아라. ⚠️ 원격이 순수 git(사내 git 서버·베어 리포·`file://`)이면 **`none` 이 정답이다** — 아무 forge 나 골라 더미 토큰을 만들지 마라(리허설에서 실제로 그랬고, 거짓 설정이 config 에 남았다) |
+| `forge.token_ref` | 참조. 기본 `service/forge-token`. **`forge.kind: none` 이면 필요 없다**(묻지 마라) |
 | `webhook.enabled` / `webhook.secret_ref` | 참조. 기본 `service/jira-webhook` |
 | `notifier.provider` | 기본 `none` — 알림 없이도 완전히 동작한다 |
 | `deploy.profile` | `local` / `cloud_vm` / `onprem_server` |
@@ -141,7 +178,6 @@ git rev-parse --show-toplevel && python --version && docker compose version && l
 
 ```json
 {
-  "consent": {"full_permissions": true, "accepted_at": "2026-01-01T09:00:00+09:00"},
   "deploy":  {"profile": "local", "secrets_base_dir": "/run/secrets"},
   "forge":   {"kind": "gitlab", "token_ref": "service/forge-token"},
   "jira":    {"base_url": "https://your-org.atlassian.net", "project": "PROJ",
@@ -217,6 +253,16 @@ python -m app.setup discover --answers setup-answers.json          # 사람이 �
 - 확정되지 않은 항목은 `candidates` 만 있다. **네가 고르지 마라** — 후보를 보여주고
   설치자가 고르게 하라. 부분일치로 잘못 고른 커스텀필드 id 는 검증도 진단도 통과한 뒤
   착수 시점에 엉뚱한 필드로 터진다.
+- ⚠️ **그러나 "후보가 여럿"이 전부 정지 사유는 아니다.** 정지 여부는 네가 판단하지 말고
+  `--json` 출력의 두 목록을 그대로 읽어라(선언에서 기계적으로 만들어진다):
+
+  | 목록 | 무엇 | 어떻게 |
+  |---|---|---|
+  | `blocking_choices` | **필수** 항목인데 확정 못 함 | 비어 있지 않으면 **멈추고** 사람이 고르게 한다 |
+  | `optional_unresolved` | **선택** 항목인데 확정 못 함(`actual_start`·`actual_end` 처럼 미설정이 정상) | **미설정으로 진행**하고 4-튜플에 보고한다 |
+
+  사람이 읽는 출력에도 같은 결론이 `[사람이 골라야 진행할 수 있는 항목 — …]` 로 찍힌다.
+  리허설에서는 이 구분이 없어 **안 써도 되는 필드 때문에 설치 전체가 멈추게** 돼 있었다.
 - 상태·전이는 `{"id": ..., "name": ...}` 형태로 적어라.
 - **`cancel_statuses` 는 "그 개념이 없는 프로젝트"가 흔하다.** 조회에 취소류 상태가 하나도
   없으면 그게 정상이며 **`[]` 로 두는 것이 정답**이다(`"cancel_statuses": []`). 비워 두면
@@ -328,11 +374,14 @@ bash scripts/smoke-deployed.sh http://127.0.0.1:8787        # (선택) 엔드포
 
 | 증상 | 먼저 볼 것 |
 |---|---|
+| `validate` 가 `consent_unattested` 로 막힘 | 동의 증서가 없다. 답변 파일의 true 는 동의가 아니다 — 1 항대로 `consent --request` 를 상위에 반환하고 기다려라. **답변 파일을 고쳐서 뚫으려 하지 마라**(뚫리지 않는다) |
+| `consent` 가 `이 채널에는 사람이 없습니다` 로 exit 1 | 정상이다. 헤드리스 세션에는 사람이 없다 — 사람 채널은 터미널에서만 열린다 |
 | `validate` 가 `run.dlc_meta_repo_url` 누락으로 막힘 | dlc-meta 클론 경로를 `--dlc-meta` 로 줬는가 |
 | `render` 가 `이미 파일이 있습니다` 로 exit 2 | 재렌더는 `--force`(먼저 `.bak-*` 백업). `config.yaml` 을 손으로 고치지 말고 답변 파일을 고쳐 다시 렌더한다 |
 | `discover` 가 `조회에 쓸 입력이 없습니다` 로 exit 2 | 아직 답변 파일이 없다. 2 항의 세 값(`jira.base_url`·`watcher_email`·`watcher_token_file`)만 담아 `setup-answers.json` 을 먼저 만든다 — **`render` 를 먼저 돌리는 게 아니다** |
 | 두 번째 인스턴스를 띄웠더니 첫 인스턴스가 이상해짐 | `.env` 의 세 줄(특히 `COMPOSE_PROJECT_NAME`)을 넣었는가. 이미지·네트워크·볼륨은 `JAD_INSTANCE` 에서 파생되므로 그 한 줄이 빠지면 전부 공유된다 |
-| `doctor` 의 `forge_token` 이 SKIP | `forge.base_url` 이 비어 있다(사내 PAT 를 외부로 안 보내려는 의도적 SKIP) |
+| `doctor` 의 `forge_token` 이 SKIP | 세 가지 중 하나다 — ① `forge.kind: none`(이 배포는 forge 를 안 쓴다. **정상**이며 무엇이 꺼지는지는 SKIP 메시지가 말해 준다) ② `forge.token_ref` 가 비었다 ③ base URL 을 **확정하지 못했다**. ⚠️ `forge.base_url` 이 비었다고 무조건 SKIP 이 아니다 — 설정된 레포 URL(`run.dlc_meta_repo_url` 등)에서 **유도되면 실제로 프로브한다.** 유도조차 못 할 때만 "사내 PAT 를 외부로 안 보내려는 의도적 SKIP" 이다 |
+| `doctor` 의 `forge_token` 이 FAIL 인데 `forge.base_url` 은 비어 있다 | 위와 같은 이유다. base URL 이 dlc-meta URL 에서 **유도돼** 그 호스트로 실제 요청이 나갔고 거절당한 것이다. 사내 forge 면 `forge.base_url` 을 명시하고, forge 를 아예 안 쓰는 배포면 `forge.kind: none` 으로 두어라(더미 토큰 파일을 만들지 마라) |
 | 폴러가 에러 없이 아무 티켓도 못 찾음 | `jira.trigger_statuses` 이름이 인스턴스와 어긋난 것 — `discover` 로 확인 |
 | `POST /onboard` 가 409 | 기동 시 doctor 게이트가 막은 것. `/api/doctor` 의 FAIL 을 먼저 고쳐라 |
 
@@ -347,7 +396,7 @@ bash scripts/smoke-deployed.sh http://127.0.0.1:8787        # (선택) 엔드포
 
 | 항목 | 무엇을 싣나 |
 |---|---|
-| **생성 파일 경로[]** | `config/config.yaml` · `.env` · `setup-answers.json` · `secrets/service/*`(**경로만**) · 생성했다면 `.claude/skills/install-jira-auto-dispatcher/SKILL.md` |
+| **생성 파일 경로[]** | `config/config.yaml` · `.env` · `setup-answers.json` · `setup-consent.json`(있다면 — **경로만**, 내용에 사람 이름·원문이 있다) · `secrets/service/*`(**경로만**) · 생성했다면 `.claude/skills/install-jira-auto-dispatcher/SKILL.md` |
 | **정합성 체크** | `validate`·`doctor`(**호스트·컨테이너 두 관점**)의 종료코드와 항목별 PASS/FAIL/SKIP. SKIP 은 그 이유까지. 네 판단이 아니라 그 명령의 출력이 근거다 |
 | **인터뷰 응답 원본** | `setup-answers.json` 의 내용(참조·비-시크릿 값만 들어 있다) + 설치자가 고른 상태·전이·커스텀필드 id 와 그 근거(`discover` 결과) |
 | **권고 다음 단계** | 남은 일 — 보통 ① 관리 UI 온보딩 폼으로 per-user 자격증명 등록 ② Jira 웹훅 등록 ③ FAIL·SKIP 중 사람이 결정해야 하는 항목 |

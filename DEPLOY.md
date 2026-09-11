@@ -278,7 +278,7 @@ central·모든 worker는 **하나의 named 볼륨**(`jad-workspace` → `/app/w
 | `jira_account_id` | ✔ | 담당자 매핑 키(티켓 assignee accountId). 폼의 `내 accountId 조회` 버튼이 `GET /rest/api/3/myself` 로 대신 찾아 준다(`POST /api/onboarding/whoami`) |
 | `jira_email` | ✔ | Jira actor 이메일(Basic auth) |
 | `jira_token` | ✔ | 사용자 Jira API 토큰 → `secrets/<user>/jira-token` |
-| `forge_token` | ✔ | 브랜치 push·MR/PR 생성용 → `secrets/<user>/forge-token` (옛 폼 필드 이름 `gitlab_token` 도 계속 받는다). **선택이 아니다** — 없으면 워커가 커밋만 하고 변경요청을 못 만드는 조용한 반쪽 동작이 된다 |
+| `forge_token` | ✔ (단 `forge.kind: none` 배포에서는 선택) | 브랜치 push·MR/PR 생성용 → `secrets/<user>/forge-token` (옛 폼 필드 이름 `gitlab_token` 도 계속 받는다). **선택이 아니다** — 없으면 워커가 커밋만 하고 변경요청을 못 만드는 조용한 반쪽 동작이 된다 |
 | `claude_setup_token` | ✔ | `claude setup-token` 발급 값 → `secrets/<user>/claude-oauth-token` |
 | `consent_full_permissions` | ✔ | **본인**의 풀 퍼미션 동의(체크박스). 서버가 강제하며(400) 수신 시각이 레지스트리 `consent.accepted_at` 에 남는다. 설치자의 `consent.full_permissions` 로 갈음하지 않는다 |
 | `git_name`/`git_email` | | 커밋 author 귀속(⚠️ `git_email` 은 forge 에 인증된 이메일이어야 연결된다) |

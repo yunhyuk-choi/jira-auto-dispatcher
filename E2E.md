@@ -92,7 +92,7 @@ UI 온보딩 폼(또는 `POST /onboard`)에 입력한다. 필드 목록의 **정
 **선택**: `git_name`/`git_email`(커밋 author 귀속), `autonomy_mode`, `permission_level`,
 `scope`, `notify_user_id`.
 
-- `forge_token` 은 **선택이 아니다**(브랜치 push·MR/PR 생성용 — GitLab/GitHub PAT,
+- `forge_token` 은 **선택이 아니다**(단 `forge.kind: none` 배포는 예외 — 발급할 토큰이 없다)(브랜치 push·MR/PR 생성용 — GitLab/GitHub PAT,
   `forge.kind` 에 맞춰. 옛 이름 `gitlab_token` 도 계속 받는다). 없으면 워커가 커밋만 하고
   변경요청을 못 만드는 조용한 반쪽 동작이 된다.
 - `consent_full_permissions` 는 **합류자 본인**의 풀 퍼미션 동의다. 서버가 강제하며

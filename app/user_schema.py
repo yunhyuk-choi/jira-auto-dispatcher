@@ -115,6 +115,15 @@ FORGE_TOKEN_GUIDE: dict = {
         "scope_why": "브랜치 push 와 Pull Request 생성에 모두 필요하다(public_repo 로는 부족).",
         "settings_path": "/settings/tokens",
     },
+    # forge 가 없는 배포(순수 git 원격) — 발급할 토큰이 **없다**. 안내가 비어 있으면
+    # 합류자가 "무엇을 붙여넣어야 하지"에서 막히므로, 없다는 사실을 말해 준다.
+    forge.KIND_NONE: {
+        "path": "이 배포에는 forge 가 없습니다(forge.kind: none) — 발급할 토큰이 없습니다",
+        "scope": "(없음)",
+        "scope_why": ("원격은 순수 git 이라 push 자격을 git 자신이 관리합니다"
+                      "(ssh 키·credential helper). 변경요청 자동 생성은 꺼져 있습니다."),
+        "settings_path": "",
+    },
 }
 
 #: Atlassian API 토큰 발급 페이지(계정 단위라 Jira 사이트 URL 과 무관한 **고정 주소**).
@@ -493,14 +502,51 @@ def now_iso() -> str:
 # ---------------------------------------------------------------------------
 
 
-def validate_user_answers(raw: Mapping) -> V.ValidationResult:
+def schema_for(config: Any = None) -> tuple:
+    """이 배포에 맞는 per-user 스키마 — **forge 가 없으면 개인 forge 토큰을 묻지 않는다**.
+
+    ``forge.kind: none`` 인 배포에서 개인 PAT 를 필수로 요구하면, 발급할 수 없는 값을
+    강요하는 것이라 합류 자체가 불가능해진다(설치 스키마가 ``forge.token_ref`` 를 무조건
+    요구해 설치자가 더미 토큰을 만들게 했던 것과 **같은 결함**이다). 그래서 그 배포에서는
+    선택 항목으로 내린다 — 값을 주면 그대로 쓰고, 없으면 git 자신의 자격에 맡긴다.
+
+    ``config`` 를 주지 않으면 :data:`USER_SCHEMA` 그대로다(하위호환 — 기존 호출부).
+    """
+    if config is None or forge.supports_change_requests(forge.resolve_kind(config)):
+        return USER_SCHEMA
+    return tuple(
+        S.SchemaSection(
+            name=section.name, title=section.title, description=section.description,
+            fields=tuple(
+                _optional_forge_token(f) if f.key == "forge_token" else f
+                for f in section.fields
+            ),
+        )
+        for section in USER_SCHEMA
+    )
+
+
+def _optional_forge_token(field: S.SchemaField) -> S.SchemaField:
+    """``forge_token`` 을 선택 항목으로 낮춘 사본(설명도 함께 고친다 — 조용히 바뀌면 안 된다)."""
+    from dataclasses import replace
+
+    return replace(
+        field, required=False,
+        description=(field.description
+                     + " ⚠️ 이 배포에는 forge 가 없어(forge.kind: none) **선택 항목**이다 "
+                       "— 비워 두면 push 자격은 git 자신이 관리한다."),
+    )
+
+
+def validate_user_answers(raw: Mapping, config: Any = None) -> V.ValidationResult:
     """합류자 답변을 :data:`USER_SCHEMA` 에 대고 검증한다(**공개 진입점**).
 
     :func:`app.setup_validate.validate_answers` 를 그대로 쓴다 — 필수·조건부 필수·타입·
     허용값·동의 게이트의 판정 논리가 설치 관문과 **한 벌**로 남게 하기 위해서다.
     다른 점은 셋뿐이며 전부 인자로 표현된다:
 
-        - ``sections=USER_SCHEMA`` — 필드 집합이 다르다.
+        - ``sections=schema_for(config)`` — 필드 집합이 다르다(그리고 forge 가 없는
+          배포에서는 개인 forge 토큰이 선택으로 내려간다).
         - ``allow_secret_values=True`` — 여기서는 토큰 **값**을 실제로 받는다(모듈 상단
           시크릿 규율 참조).
         - ``consent_key=CONSENT_KEY`` — 동의하는 사람이 설치자가 아니라 **본인**이다.
@@ -515,7 +561,7 @@ def validate_user_answers(raw: Mapping) -> V.ValidationResult:
     """
     return V.validate_answers(
         raw,
-        sections=USER_SCHEMA,
+        sections=schema_for(config),
         consent_key=CONSENT_KEY,
         consent_hint=CONSENT_HINT,
         accepted_at_key=CONSENT_AT_KEY,

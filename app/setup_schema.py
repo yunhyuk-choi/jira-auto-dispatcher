@@ -214,18 +214,54 @@ DEPLOY_PROFILES: Tuple = tuple(PROFILE_DEFAULTS.keys())
 #: 없었다). 미설정이면 완료 전이에 그 필드를 **보내지 않으며**, 워크플로우가 요구하면
 #: Jira 가 "필수입니다"라고 정확히 말해 준다 — 남의 id 를 보내 400 을 맞는 것보다 낫다.
 #: 자기 값은 ``python -m app.setup discover --only custom_fields`` 로 실측해 채운다.
+#:
+#: ⚠️ 네 번째 원소 ``required`` 는 **설치를 멈출 자격이 있는가**를 말한다. 리허설 실측:
+#: 룰북의 "후보가 여럿이면 멈추고 물어라"가 ``actual_start``·``actual_end`` 처럼
+#: **미설정이 정상**인 필드에도 걸려, 안 써도 되는 값 때문에 설치 전체가 멈추게 돼 있었다.
+#: 필수/선택을 사람의 판단이 아니라 **선언**으로 가른다 — 판단에 맡기면 갈라진다.
+#: (필수 항목의 정지 규칙은 그대로다. 잘못 고른 id 는 검증도 진단도 통과한 뒤 운영에서
+#: 터지므로, 되돌리는 비용이 기다리는 비용보다 훨씬 크다.)
 JIRA_CUSTOM_FIELD_KEYS: Tuple = (
-    ("start_date", "착수 시 필수인 '시작날짜' 필드 id", "customfield_10015"),
-    ("due_date", "착수 시 필수인 '마감일' 필드 id", "duedate"),
-    ("actual_start", "완료 전이 시 필수인 '실제 시작일' 필드 id(없으면 비워 둔다)", ""),
-    ("actual_end", "완료 전이 시 필수인 '실제 종료일' 필드 id(없으면 비워 둔다)", ""),
+    ("start_date", "착수 시 필수인 '시작날짜' 필드 id", "customfield_10015", True),
+    ("due_date", "착수 시 필수인 '마감일' 필드 id", "duedate", True),
+    ("actual_start", "완료 전이 시 필수인 '실제 시작일' 필드 id(없으면 비워 둔다)", "", False),
+    ("actual_end", "완료 전이 시 필수인 '실제 종료일' 필드 id(없으면 비워 둔다)", "", False),
 )
 
-#: 지원 forge 종류.
-FORGE_KINDS: Tuple = ("gitlab", "github")
+#: 논리 키 → 필수 여부(위 선언에서 파생 — 소비처가 인덱스를 세지 않게 한다).
+JIRA_CUSTOM_FIELD_REQUIRED: dict = {
+    key: required for key, _desc, _default, required in JIRA_CUSTOM_FIELD_KEYS
+}
+
+#: 지원 forge 종류. ``none`` 은 **forge 없음** — 순수 git 원격(사내 git 서버·베어
+#: 리포·``file://``)에 push 만 하는 배포다. 이 값이 없던 시절에는 "forge 없음"을 표현할
+#: 방법이 없어서, 리허설 설치자가 ``gitlab`` 을 의미 없이 채우고 **더미 토큰 파일**을
+#: 만들었다(거짓 설정이 config 에 남았다). 스키마가 거짓말을 강요하면 그건 스키마의 결함이다.
+#: 없을 때 무엇이 꺼지는지는 :data:`app.forge.DEGRADED_WITHOUT_FORGE`.
+FORGE_KINDS: Tuple = ("gitlab", "github", "none")
+
+#: 변경요청(MR/PR) API 가 있는 forge 종류 — ``forge.token_ref`` 가 **필요한** 경우다.
+FORGE_KINDS_WITH_API: Tuple = ("gitlab", "github")
+
+#: "forge 없음" 식별자(정본 구현은 :data:`app.forge.KIND_NONE` — 순환 import 회피용 재선언.
+#: 두 곳이 갈라지지 않도록 ``tests/test_setup_schema.py`` 가 동일성을 강제한다).
+FORGE_KIND_NONE = "none"
 
 #: 지원 알림 채널. ``none`` 이 기본 — 알림 없이도 시스템은 완전히 동작한다.
 NOTIFIER_PROVIDERS: Tuple = ("none", "google_chat", "slack", "generic_webhook")
+
+#: 풀 퍼미션 동의가 올 수 있는 **채널**(정본 구현은 :mod:`app.setup_consent`).
+#: 여기에 문자열을 다시 적는 이유는 스키마가 :mod:`app.setup_consent` 를 import 하면
+#: 순환이 생기기 때문이다(consent → schema 방향은 없지만 validate·render 가 둘 다
+#: 읽는다). 두 곳이 갈라지지 않도록 ``tests/test_setup_schema.py`` 가 동일성을 강제한다.
+CONSENT_CHANNEL_HUMAN = "human_interactive"
+CONSENT_CHANNEL_RELAY = "orchestrator_relay"
+CONSENT_CHANNELS: Tuple = (CONSENT_CHANNEL_HUMAN, CONSENT_CHANNEL_RELAY)
+
+#: ``consent.channel`` 필드가 허용하는 값 — 위 둘 **+ 빈 값**. 빈 값은 "출처 불명"이며
+#: 출처 키가 없던 시절의 기존 배포가 그 상태다(하위호환). 빈 값이 통과한다고 해서 동의
+#: 자체가 통과하는 것은 아니다 — 그 게이트는 **동의 증서**가 따로 본다.
+CONSENT_CHANNEL_CHOICES: Tuple = ("",) + CONSENT_CHANNELS
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +284,11 @@ _FORGE = SchemaSection(
             choices=FORGE_KINDS,
             required=True,
             default="gitlab",
-            description="코드 호스팅 종류. 브랜치/MR·PR API 어댑터 선택에 쓰인다.",
+            description=(
+                "코드 호스팅 종류. 브랜치/MR·PR API 어댑터 선택에 쓰인다. "
+                "``none`` = forge 없음(순수 git 원격에 push 만 한다) — 그 경우 "
+                "``forge.token_ref`` 는 필요 없고 변경요청 자동 생성이 꺼진다."
+            ),
             example="gitlab",
         ),
         SchemaField(
@@ -265,7 +305,11 @@ _FORGE = SchemaSection(
             key="forge.token_ref",
             type=FieldType.STRING,
             secret_ref=True,
-            required_if=RequiredIf("forge.kind", truthy=True),
+            # ⚠️ 예전에는 ``RequiredIf("forge.kind", truthy=True)`` 였다. kind 는 required
+            #    이고 기본값이 있어 **항상 truthy** 라, 결과적으로 토큰 참조가 무조건
+            #    필수였다 — forge 가 없는 배포는 doctor 가 exit 0 에 도달할 수 없었다.
+            #    이제 **API 가 있는 forge 일 때만** 필수다.
+            required_if=RequiredIf("forge.kind", equals=FORGE_KINDS_WITH_API),
             default="",
             legacy_keys=("run.repo_resolver_gitlab_token_ref",),
             description=(
@@ -737,6 +781,45 @@ _CONSENT = SchemaSection(
             default="",
             description="동의 시각(ISO-8601, 예: 2026-08-25T09:00:00+09:00). 감사 흔적.",
             example="2026-08-25T09:00:00+09:00",
+        ),
+        # --- 동의의 **출처**(누가·어느 채널로) ---------------------------------
+        # ⚠️ 아래 세 항목은 **묻는 항목이 아니다.** `python -m app.setup consent` 가 만든
+        #    동의 증서(setup-consent.json)에서 render 가 그대로 옮겨 적는다. 그래서
+        #    required 로 선언하지 않는다 — 게이트는 "답변에 이 키가 있는가"가 아니라
+        #    **증서가 실재하는가**이고(consent_unattested), 게이트가 두 벌이면 반드시
+        #    갈라진다. 답변 파일에 손으로 적어도 증서가 없으면 통과하지 못한다. 3차
+        #    리허설에서 온보딩 서브가 동의를 **자기 승인**한 실측 결함을 닫은 자리다.
+        SchemaField(
+            key="consent.channel",
+            type=FieldType.ENUM,
+            choices=CONSENT_CHANNEL_CHOICES,
+            default="",
+            description=(
+                "동의가 온 채널. ``human_interactive`` = 터미널 앞의 사람이 직접 입력 / "
+                "``orchestrator_relay`` = 사용자 채널을 가진 상위가 사람에게서 받아 중계. "
+                "**서브 에이전트는 어느 쪽도 만들 수 없다**(app/setup_consent.py)."
+            ),
+            example="human_interactive",
+        ),
+        SchemaField(
+            key="consent.granted_by",
+            type=FieldType.STRING,
+            default="",
+            description="동의한 **사람**의 식별자(이름 또는 이메일). 감사 흔적.",
+            example="installer@your-org.example",
+        ),
+        SchemaField(
+            key="consent.relayed_by",
+            type=FieldType.STRING,
+            required_if=RequiredIf("consent.channel",
+                                   equals=(CONSENT_CHANNEL_RELAY,)),
+            default="",
+            description=(
+                "중계한 오케스트레이터 식별자(``consent.channel`` 이 "
+                "``orchestrator_relay`` 일 때만). 사람이 직접 입력한 동의가 아님을 "
+                "설정 파일에서도 드러내기 위한 항목이다."
+            ),
+            example="orchestrator",
         ),
     ),
 )

@@ -16,6 +16,16 @@ secrets/
 # 설치 마법사가 모은 답변(중단·재개용). 시크릿 값은 없지만 그 조직의 URL·프로젝트 키·
 # 계정이 들어 있으므로 추적하지 않는다.
 setup-answers.json
+# 풀 퍼미션 동의 증서(app/setup_consent.py). 시크릿 값은 없지만 **사람 이름과 그 사람의
+# 원문**이 들어간다. 그리고 이건 이 머신에서 그 사람이 동의했다는 개인 기록이지 팀이
+# 공유할 설정이 아니다 — 다른 머신에 복사해 재사용하면 그 순간 자기 승인이 된다.
+setup-consent.json
+# 설치 관문 `discover` 의 조회 결과(JSON). 시크릿 **값**은 없지만 그 조직의 accountId ·
+# 커스텀필드 id 전량 · 라벨 목록 · 상태/전이 이름 같은 **내부 메타데이터**가 통째로 들어
+# 있다. 실수로 커밋되면 공개 레포에 조직 구조가 그대로 드러난다. 룰북
+# (skill-templates/.../SKILL.template.md)과 CLI 예시가 쓰는 두 이름을 명시한다.
+jira-discover.json
+jira-fields.json
 workspace/
 .env
 

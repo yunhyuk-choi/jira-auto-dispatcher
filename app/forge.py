@@ -57,6 +57,11 @@ log = logging.getLogger("jad.forge")
 # --- 종류 식별자(정본은 app/setup_schema.FORGE_KINDS) ------------------------
 KIND_GITLAB = "gitlab"
 KIND_GITHUB = "github"
+#: **forge 없음** — 순수 git 원격(사내 git 서버·베어 리포·``file://``)에 push 만 한다.
+#: 리허설 실측: 이 값이 없어서 설치자가 ``forge.kind: gitlab`` 을 의미 없이 채우고 더미
+#: 토큰 파일을 만들었다. **거짓 설정을 강요하는 스키마는 그 자체로 결함**이므로 "없음"을
+#: 1급 값으로 둔다. 무엇이 degrade 되는지는 :data:`DEGRADED_WITHOUT_FORGE`.
+KIND_NONE = "none"
 
 # 변경요청 닫기 API 호출 타임아웃(초) — 취소 롤백은 부수적이므로 짧게 클램프.
 CLOSE_TIMEOUT_SEC = 30
@@ -71,17 +76,32 @@ DEFAULT_KIND = KIND_GITLAB
 _TOKEN_USERNAME = {
     KIND_GITLAB: "oauth2",
     KIND_GITHUB: "x-access-token",
+    # KIND_NONE 은 **일부러 없다** — forge 가 없으면 주입할 토큰 사용자명도 없다.
+    # with_token 이 그 경우 URL 을 그대로 돌려준다(아래).
 }
 
 #: 마스킹이 알아야 하는 자격 사용자명 전체(:func:`app.repos._mask` 가 소비).
 CRED_USERNAMES: tuple = tuple(sorted(set(_TOKEN_USERNAME.values())))
 
 #: 사람이 읽는 forge 이름(프롬프트·로그 문구용).
-_LABEL = {KIND_GITLAB: "GitLab", KIND_GITHUB: "GitHub"}
+_LABEL = {KIND_GITLAB: "GitLab", KIND_GITHUB: "GitHub",
+          KIND_NONE: "git 원격(forge 없음)"}
 
 #: 변경요청 약어/정식 명칭(프롬프트·알림 문구용).
-_CHANGE_ABBR = {KIND_GITLAB: "MR", KIND_GITHUB: "PR"}
-_CHANGE_TERM = {KIND_GITLAB: "Merge Request", KIND_GITHUB: "Pull Request"}
+#: ⚠️ ``KIND_NONE`` 도 **명시로** 적는다. 적지 않으면 ``.get(k, 기본)`` 폴백이 "MR" 을
+#: 돌려주고, forge 가 없는 배포의 에이전트가 존재하지 않는 것을 찾게 된다(조용한 오설정).
+_CHANGE_ABBR = {KIND_GITLAB: "MR", KIND_GITHUB: "PR", KIND_NONE: "변경요청"}
+_CHANGE_TERM = {KIND_GITLAB: "Merge Request", KIND_GITHUB: "Pull Request",
+                KIND_NONE: "변경요청(이 배포에는 forge 가 없어 자동 생성되지 않는다)"}
+
+#: ``forge.kind: none`` 일 때 **무엇이 꺼지는가** — 사람이 읽는 목록.
+#: 진단(SKIP 사유)·문서·프롬프트가 같은 문장을 쓴다(단일 원천 — 갈라지면 한쪽만 거짓말한다).
+DEGRADED_WITHOUT_FORGE: tuple = (
+    "변경요청(MR/PR) 자동 생성·닫기 — 에이전트는 브랜치를 push 하는 데까지만 간다",
+    "forge API 토큰 진단(doctor 의 forge_token 검사) — 붙을 곳이 없어 SKIP 된다",
+    "변경요청 링크 수집 — 잡 결과·알림에 링크 대신 브랜치명이 남는다",
+    "per-user forge PAT 안내 — 관리 UI 온보딩이 토큰 발급 링크를 보여 주지 않는다",
+)
 
 #: 호스트명에 이 조각이 들어 있으면 그 forge 로 **결정**한다(순서 = 검사 순서).
 _HOST_HINTS = ((KIND_GITHUB, "github"), (KIND_GITLAB, "gitlab"))
@@ -366,7 +386,12 @@ def with_token(url: str, token: str, *, kind: Any = None, config: Any = None) ->
         return url
     if "@" in rest:  # 기존 user[:pass]@ 제거
         rest = rest.split("@", 1)[1]
-    username = token_username(kind_for(url=url, kind=kind, config=config))
+    resolved = kind_for(url=url, kind=kind, config=config)
+    if resolved == KIND_NONE:
+        # forge 가 없는 배포다 — 토큰 인증이라는 개념 자체가 없으므로 원문 그대로 둔다.
+        # (자격은 git 자신이 관리한다: ssh 키·credential helper·베어 원격의 파일 권한.)
+        return url
+    username = token_username(resolved)
     return f"{scheme}{username}:{token}@{rest}"
 
 
@@ -385,9 +410,20 @@ def change_term(kind: Any = None) -> str:
     return _CHANGE_TERM.get(normalize_kind(kind) or DEFAULT_KIND, _CHANGE_TERM[DEFAULT_KIND])
 
 
+def supports_change_requests(kind: Any = None) -> bool:
+    """이 forge 에 **변경요청(MR/PR) API 가 있는가**.
+
+    ``forge.kind: none``(순수 git 원격)이면 False — 브랜치 push 까지가 전부다. 호출부는
+    이 술어로 갈라서 "만들 수 없는 것을 만들라"고 지시하지 않는다.
+    """
+    return (normalize_kind(kind) or DEFAULT_KIND) != KIND_NONE
+
+
 def change_url_pattern(kind: Any = None):
     """그 forge 의 변경요청 URL 정규식(모르면 통합 패턴)."""
     k = normalize_kind(kind)
+    # ⚠️ KIND_NONE 은 _CHANGE_URL_PATTERN 에 없다 → 통합 폴백으로 떨어진다. 의도한
+    #    동작이다: forge 가 없는 배포라도 레포별로 남의 forge 링크가 로그에 섞일 수 있다.
     return _CHANGE_URL_PATTERN.get(k, _ANY_CHANGE_URL) if k else _ANY_CHANGE_URL
 
 
@@ -402,7 +438,7 @@ def search_change_url(text: str, kind: Any = None) -> Optional[str]:
     if not body:
         return None
     k = normalize_kind(kind)
-    if k:
+    if k in _CHANGE_URL_PATTERN:          # KIND_NONE 은 네이티브 패턴이 없다
         m = _CHANGE_URL_PATTERN[k].search(body)
         if m:
             return m.group(0)
@@ -494,6 +530,9 @@ def close_change_request(url: str, token: str, *, config: Any = None,
     """
     if not (url or "").strip() or not (token or "").strip():
         return False
-    if kind_for(url=url, kind=kind, config=config) == KIND_GITHUB:
+    resolved = kind_for(url=url, kind=kind, config=config)
+    if resolved == KIND_NONE:
+        return False                      # 닫을 변경요청이라는 것이 없는 배포다
+    if resolved == KIND_GITHUB:
         return _close_github_pr(url, token, http=http)
     return _close_gitlab_mr(url, token, http=http)

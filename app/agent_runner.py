@@ -479,8 +479,12 @@ def build_prompt(job: Any, config: Any = None) -> str:
     # forge 용어(GitLab=MR / GitHub=PR)와 호스팅 이름을 설정에서 가져온다 — 프롬프트에
     # "GitLab"·"MR" 을 박아 두면 GitHub 배포의 에이전트가 존재하지 않는 것을 찾는다.
     forge_kind = forge.resolve_kind(config)
-    cr = forge.change_abbr(forge_kind)          # "MR" | "PR"
-    forge_label = forge.label(forge_kind)       # "GitLab" | "GitHub"
+    cr = forge.change_abbr(forge_kind)          # "MR" | "PR" | "변경요청"(forge 없음)
+    forge_label = forge.label(forge_kind)       # "GitLab" | "GitHub" | "git 원격(forge 없음)"
+    # ⚠️ forge 가 없는 배포(forge.kind: none)에서는 **만들 수 없는 것을 만들라고 하지
+    #    않는다.** 예전에는 이 값을 표현할 방법이 없어 아무 forge 나 골라야 했고, 그
+    #    거짓 설정 때문에 에이전트가 존재하지 않는 API 를 찾았다.
+    has_change_requests = forge.supports_change_requests(forge_kind)
 
     # 자율 실행 공통 불변식: '완료(Done)' 전이는 절대 금지. 완료 전이는 로컬
     # 오케스트레이터가 리뷰·머지 시점에 사람 루프로 수행한다(자율 실행은 거기까지
@@ -518,6 +522,15 @@ def build_prompt(job: Any, config: Any = None) -> str:
             f"브랜치명({branch})과 runs/{ticket}/ 저널 위치를 티켓 코멘트로 남기고"
             "('로컬에서 fetch해 이어서 완성' 안내 포함), 티켓을 '진행 중'으로 유지한 채 "
             "'리뷰 대기'로 종료하라."
+        )
+
+    if not has_change_requests:
+        # 모드와 무관하게 **사실을 먼저** 알린다(모드별 문구를 각각 고치면 갈라진다).
+        closing = (
+            f"이 배포에는 forge 가 없다(forge.kind: none) — {cr}(MR/PR)을 만들 수 있는 "
+            f"API 가 존재하지 않는다. 만들려고 시도하지 말고, {branch} 브랜치를 원격에 "
+            f"push 한 뒤 그 브랜치명을 결과로 보고하라. 그 위의 문장 중 {cr} 생성·링크에 "
+            f"관한 지시는 이 배포에 적용되지 않는다.\n" + closing
         )
 
     lines = [
