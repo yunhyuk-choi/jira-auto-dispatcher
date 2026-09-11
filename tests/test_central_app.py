@@ -284,8 +284,11 @@ def test_index_html_does_not_hardcode_onboarding_guidance(central_client):
     화면 경로를 보여 준다.
     """
     body = central_client.get("/").get_data(as_text=True)
-    # 온보딩 섹션 마크업만 본다(아래 '폴백 로그인' 섹션은 별개의 옛 기능 안내다).
-    section = body[body.index('id="onboard-section"'):body.index('id="users-section"')]
+    # 온보딩 섹션 마크업만 본다 — 다른 섹션(「토큰 회전」·「폴백 로그인」)은 별개의
+    # 안내라 같은 단어를 쓴다. 경계는 **닫는 태그**로 잡는다 — 「다음 섹션의 id」로
+    # 잡으면 섹션 순서를 바꾸는 순간 이 테스트가 엉뚱한 것을 읽는다.
+    start = body.index('id="onboard-section"')
+    section = body[start:body.index("</section>", start)]
     for hardcoded in ("Edit profile", "Developer settings", "id.atlassian.com",
                       "setup-token", "accountId", "PROJECT_KEY"):
         assert hardcoded not in section, hardcoded
