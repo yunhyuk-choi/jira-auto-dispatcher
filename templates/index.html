@@ -709,10 +709,13 @@
       }
 
       /* =====================================================================
-         접히는 패널(일반 패턴) + 상단 액션 바.
+         다이얼로그 패널(일반 패턴) + 상단 액션 바.
+         가끔 쓰는 것은 문서 흐름을 바꾸지 않고 **기존 화면 위에 모달로** 띄운다 —
+         네이티브 `<dialog>` 라 포커스 트랩·Esc·바깥 inert·배경판(::backdrop)이
+         전부 브라우저 몫이고, top layer 에 올라가므로 z-index·overflow 경쟁이 없다.
          **섹션 특화 규칙을 만들지 않는다** — `data-panel` / `data-panel-toggle`
-         선언만 붙이면 어떤 섹션에도 그대로 적용된다(다른 콘솔로 이식할 때
-         선언만 옮기고 없는 패널은 지우면 된다). 색은 전부 기존 토큰.
+         선언만 붙이면 어떤 다이얼로그에도 그대로 적용된다(다른 콘솔로 이식할 때
+         선언만 옮기고 없는 것은 지우면 된다). 색은 전부 기존 토큰.
          ===================================================================== */
       .console-head {
         margin: 0 0 var(--sp-4);
@@ -741,15 +744,25 @@
         background-color: var(--surface-3);
         border-color: var(--hairline-tertiary);
       }
-      .action-bar button[aria-expanded="true"] {
-        background-color: var(--action);
-        border-color: var(--action);
-        color: var(--on-action);
+      /* 모달 면은 섹션과 같은 표면 사다리를 쓴다 — 같은 콘솔의 같은 층이다.
+         닫힌 `<dialog>` 는 UA 기본이 `display:none` 이라 기본 화면 배치에 전혀
+         관여하지 않는다(레이아웃·클릭·포커스 순서 모두 그대로). */
+      dialog[data-panel] {
+        width: min(900px, calc(100vw - var(--sp-5) * 2));
+        max-height: 85vh;
+        overflow: auto; /* 긴 폼은 페이지가 아니라 다이얼로그 안에서 스크롤한다. */
+        background-color: var(--surface-1);
+        color: var(--ink-muted);
+        border: 1px solid var(--hairline-strong);
+        border-radius: var(--r-lg);
+        padding: var(--sp-4) var(--sp-4) var(--sp-5);
+        box-shadow: inset 0 1px 0 var(--edge-highlight);
       }
-
-      /* 접힘 = `hidden` 속성(DOM 에는 그대로 남는다 — 초기화 코드가 계속 돈다). */
-      [data-panel][hidden] {
-        display: none;
+      /* 사용자가 말한 "불투명한 판" — 브라우저가 top layer 바로 아래에 깔아 준다.
+         새 색을 만들지 않는다: 페이지 바탕색을 그대로 반투명하게 쓴다. */
+      dialog[data-panel]::backdrop {
+        background-color: var(--canvas);
+        opacity: 0.72;
       }
       .panel-head {
         display: flex;
@@ -801,7 +814,8 @@
         body {
           padding: var(--sp-4) var(--sp-3) 48px;
         }
-        section {
+        section,
+        dialog[data-panel] {
           padding: var(--sp-3);
         }
         .flex-form {
@@ -813,14 +827,14 @@
   <body>
     <header class="console-head">
       <h2>⚙️ jira-auto-dispatcher — central 관리 콘솔</h2>
-      <!-- 상단 액션 바 — 가끔 쓰는 패널을 여는 유일한 진입점.
+      <!-- 상단 액션 바 — 가끔 쓰는 다이얼로그를 여는 유일한 진입점.
            ⚠️ 버튼은 **항상 보인다** — "최초 1회만" 같은 게이팅을 넣지 않는다.
            언제든 한 번 클릭이면 열려야 한다. -->
       <div class="action-bar" id="action-bar">
-        <button type="button" data-panel-toggle="onboard" aria-controls="onboard-section" aria-expanded="false">+ 사용자 등록</button>
-        <button type="button" data-panel-toggle="rotate" aria-controls="rotate-section" aria-expanded="false">토큰 갱신</button>
-        <button type="button" data-panel-toggle="login" aria-controls="login-section" aria-expanded="false">Claude 인증</button>
-        <button type="button" data-panel-toggle="help" aria-controls="help-section" aria-expanded="false">? 도움말</button>
+        <button type="button" data-panel-toggle="onboard">+ 사용자 등록</button>
+        <button type="button" data-panel-toggle="rotate">토큰 갱신</button>
+        <button type="button" data-panel-toggle="login">Claude 인증</button>
+        <button type="button" data-panel-toggle="help">? 도움말</button>
       </div>
     </header>
 
@@ -840,7 +854,7 @@
          ⚠️ 이 안의 안내·입력칸은 HTML 에 박아 두지 않는다. GET /api/onboarding/guide 가
          스키마(app/user_schema.py) + 이 인스턴스 설정에서 렌더한 것을 그대로 그린다 —
          forge 를 GitHub 으로 바꾸면 토큰 안내도 따라 바뀐다. -->
-    <section id="onboard-section" data-panel="onboard" role="region" aria-labelledby="onboard-heading" hidden>
+    <dialog id="onboard-section" data-panel="onboard" aria-labelledby="onboard-heading">
       <div class="panel-head">
         <h3 id="onboard-heading">팀 합류 — 사용자 온보딩</h3>
         <button type="button" class="panel-close" data-panel-close aria-label="사용자 온보딩 패널 닫기">닫기</button>
@@ -860,11 +874,11 @@
         </div>
         <p id="onboard-msg"></p>
       </form>
-    </section>
+    </dialog>
 
     <!-- 2. 토큰 회전 — 온보딩(/onboard)은 create-only 라 **이미 등록된 사람**의 토큰을
          바꿀 경로가 여기밖에 없다. 값은 URL 이 아니라 JSON body 로만 나간다. -->
-    <section id="rotate-section" data-panel="rotate" role="region" aria-labelledby="rotate-heading" hidden>
+    <dialog id="rotate-section" data-panel="rotate" aria-labelledby="rotate-heading">
       <div class="panel-head">
         <h3 id="rotate-heading">토큰 회전 (기존 사용자)</h3>
         <button type="button" class="panel-close" data-panel-close aria-label="토큰 회전 패널 닫기">닫기</button>
@@ -928,10 +942,10 @@
         </div>
         <p id="rotate-msg"></p>
       </form>
-    </section>
+    </dialog>
 
     <!-- 3. Claude 인증(폴백) — 브라우저 로그인 (Phase 0 — 동작) -->
-    <section id="login-section" data-panel="login" role="region" aria-labelledby="login-heading" hidden>
+    <dialog id="login-section" data-panel="login" aria-labelledby="login-heading">
       <div class="panel-head">
         <h3 id="login-heading">Claude 인증(폴백)</h3>
         <button type="button" class="panel-close" data-panel-close aria-label="Claude 인증 패널 닫기">닫기</button>
@@ -964,12 +978,12 @@
           <button id="complete-login-btn">인증 완료</button>
         </div>
       </div>
-    </section>
+    </dialog>
 
     <!-- 4. 도움말(용어집) — 표 헤더만 보고는 알 수 없는 값들의 뜻.
          값은 전부 코드가 실제로 내는 것이다(app/queue.py · app/spawner.py ·
          app/setup_doctor.py · app/user_schema.py) — 지어낸 항목이 없어야 한다. -->
-    <section id="help-section" data-panel="help" role="region" aria-labelledby="help-heading" hidden>
+    <dialog id="help-section" data-panel="help" aria-labelledby="help-heading">
       <div class="panel-head">
         <h3 id="help-heading">도움말 — 이 화면의 용어</h3>
         <button type="button" class="panel-close" data-panel-close aria-label="도움말 닫기">닫기</button>
@@ -1062,7 +1076,7 @@
           <tr><td>skip</td><td>이 환경에서는 판정할 수 없다(설정이 없거나 관점이 다름).</td></tr>
         </tbody>
       </table>
-    </section>
+    </dialog>
 
     <!-- 5. 사용자 목록 -->
     <section id="users-section">
@@ -1957,34 +1971,33 @@
         }, 1500);
       });
 
-      // --- [접히는 패널 — 일반 패턴] ---
-      // 매일 보는 것(자가진단 · 등록 사용자 · 잡 현황)만 기본으로 펼쳐 두고, 가끔 쓰는
-      // 것은 상단 액션 바 버튼으로 **제자리에서** 펼친다. 모달이 아니다 — 온보딩 폼이
-      // 길어서 모달에 넣으면 내부 스크롤이 또 생기고, 프레임워크 없는 단일 파일에서
-      // 포커스 트랩·스크롤 락을 직접 만드는 비용이 이득보다 크다.
+      // --- [다이얼로그 패널 — 일반 패턴] ---
+      // 매일 보는 것(자가진단 · 등록 사용자 · 잡 현황)만 페이지에 두고, 가끔 쓰는 것은
+      // 상단 액션 바 버튼으로 **기존 화면 위에** 모달로 띄운다. 네이티브 `<dialog>` 의
+      // `showModal()` 이라 포커스 트랩 · Esc · 바깥 요소 inert · 배경판(::backdrop) ·
+      // 포커스 복귀가 전부 브라우저 몫이다 — 우리가 짤 코드가 없고 라이브러리도 없다.
+      // 접힘(hidden 토글)과 달리 문서 흐름을 건드리지 않으므로 기존 화면은 재배치되지
+      // 않고, "열었다가 원래대로 되돌리기" 같은 상태 복원 로직이 아예 필요 없다.
       //
-      // ⚠️ 여기에 **섹션 이름이 박힌 코드는 없다.** `data-panel="<이름>"` 인 요소와
+      // ⚠️ 여기에 **섹션 이름이 박힌 코드는 없다.** `data-panel="<이름>"` 인 다이얼로그와
       // `data-panel-toggle="<이름>"` 인 버튼을 선언하면 그대로 붙는다 — 다른 콘솔로
-      // 옮길 때 선언만 옮기고, 없는 패널은 지우면 된다.
+      // 옮길 때 선언만 옮기고, 없는 것은 지우면 된다.
       //
-      // ⚠️ 접힘은 `hidden` 속성이고 패널은 **DOM 에 그대로 남는다.** 그래서 loadUsers 가
-      // 채우는 datalist, loadGuide 가 그리는 온보딩 폼 같은 초기화가 접힌 상태에서도
-      // 평소대로 다 돈다(열었을 때 비어 있지 않다).
-      const PANEL_SEL = "[data-panel]";
+      // ⚠️ 다이얼로그는 닫혀 있어도 **DOM 에 그대로 있다.** 그래서 loadUsers 가 채우는
+      // datalist, loadGuide 가 그리는 온보딩 폼 같은 초기화가 닫힌 상태에서도 평소대로
+      // 다 돈다(열었을 때 비어 있지 않다).
+      const PANEL_SEL = "dialog[data-panel]";
       const PANEL_NAME_RE = /^[A-Za-z0-9_-]+$/; // 해시에서 온 이름을 선택자에 넣기 전 검증.
 
       function panelByName(name) {
         if (!PANEL_NAME_RE.test(String(name || ""))) return null;
-        return document.querySelector('[data-panel="' + name + '"]');
-      }
-
-      function togglesFor(name) {
-        if (!PANEL_NAME_RE.test(String(name || ""))) return [];
-        return document.querySelectorAll('[data-panel-toggle="' + name + '"]');
+        return document.querySelector('dialog[data-panel="' + name + '"]');
       }
 
       // 열었을 때 포커스를 줄 곳: 보이는 첫 입력칸 → 없으면 보이는 첫 조작 요소 →
-      // 그것도 없으면 닫기 버튼(빈 패널에서도 키보드가 갈 곳은 있어야 한다).
+      // 그것도 없으면 닫기 버튼(빈 다이얼로그에서도 키보드가 갈 곳은 있어야 한다).
+      // `showModal()` 의 기본 포커스는 DOM 상 첫 조작 요소(= 헤더의 닫기 버튼)라
+      // 폼에서는 쓸모가 없다 — 그래서 연 뒤 한 번 옮긴다.
       function firstField(panel) {
         const els = panel.querySelectorAll(
           'input:not([type="hidden"]), select, textarea, button, a[href]'
@@ -2011,65 +2024,77 @@
       function isIdleFocus(panel) {
         const a = document.activeElement;
         if (!a || a === document.body) return true;
-        if (!panel.contains(a)) return false; // 패널 밖으로 나갔으면 건드리지 않는다.
+        if (!panel.contains(a)) return false; // 다이얼로그 밖으로 나갔으면 건드리지 않는다.
         const t = a.tagName;
         return t !== "INPUT" && t !== "SELECT" && t !== "TEXTAREA";
+      }
+
+      // 사람이 입력한 것이 남아 있는가 — **필드 이름을 모르는 채로** 판정한다.
+      // 기준은 "현재 값 ≠ 마크업이 준 기본값"이라 동적으로 렌더된 칸에도 그대로 맞는다.
+      function isDirty(panel) {
+        const els = panel.querySelectorAll("input, select, textarea");
+        for (let i = 0; i < els.length; i++) {
+          const el = els[i];
+          if (el.disabled || el.type === "hidden") continue;
+          if (el.type === "checkbox" || el.type === "radio") {
+            if (el.checked !== el.defaultChecked) return true;
+          } else if (el.tagName === "SELECT") {
+            for (let k = 0; k < el.options.length; k++) {
+              if (el.options[k].selected !== el.options[k].defaultSelected) return true;
+            }
+          } else if (el.value !== el.defaultValue) {
+            return true;
+          }
+        }
+        return false;
       }
 
       function setPanel(name, open, opts) {
         const panel = panelByName(name);
         if (!panel) return false;
         const o = opts || {};
-        panel.hidden = !open;
-        const toggles = togglesFor(name);
-        for (let i = 0; i < toggles.length; i++) {
-          toggles[i].setAttribute("aria-expanded", open ? "true" : "false");
-        }
         if (open) {
-          if (o.scroll !== false) panel.scrollIntoView({ block: "start" });
+          if (!panel.open) panel.showModal(); // 이미 열린 것에 다시 부르면 예외가 난다.
           const target = firstField(panel);
           // soft = 딥링크 재적용용. 안내/폼이 아직 fetch 중이라 진짜 첫 칸이 없던
           // 시점에 한 번 열렸으므로, 칸이 생긴 뒤 **사람이 손대지 않았을 때만** 옮긴다.
           if (target && (!o.soft || isIdleFocus(panel))) target.focus({ preventScroll: true });
-        } else if (o.refocus && toggles[0]) {
-          toggles[0].focus(); // 닫으면 연 버튼으로 돌아간다(키보드 흐름 유지).
+        } else if (panel.open) {
+          panel.close(); // 포커스는 브라우저가 연 버튼으로 되돌린다.
         }
         return true;
       }
 
-      function closeAllPanels() {
+      // Esc(= `cancel`) 는 네이티브 기본이 "닫기"다. 그런데 입력 중인 폼이라면 한 번의
+      // Esc 로 입력이 날아가선 안 된다 — 남은 입력이 있으면 막고 확인을 받는다.
+      // 입력칸이 없는 다이얼로그(도움말)는 판정이 항상 false 라 그냥 닫힌다.
+      // ⚠️ 닫기 **버튼**은 사람이 의도적으로 누른 것이므로 확인하지 않는다.
+      (function wireCancelGuard() {
         const ps = document.querySelectorAll(PANEL_SEL);
         for (let i = 0; i < ps.length; i++) {
-          if (!ps[i].hidden) setPanel(ps[i].dataset.panel, false);
+          ps[i].addEventListener("cancel", (ev) => {
+            const panel = ev.currentTarget;
+            if (!isDirty(panel)) return; // 잃을 것이 없다 → 네이티브 기본(닫기).
+            ev.preventDefault();
+            if (window.confirm("입력한 내용이 사라집니다. 닫을까요?")) panel.close();
+          });
         }
-      }
+      })();
 
-      // 액션 바 버튼 · 패널 닫기 버튼 — 위임 하나로 받는다(버튼이 늘어도 코드는 그대로).
+      // 액션 바 버튼 · 닫기 버튼 — 위임 하나로 받는다(버튼이 늘어도 코드는 그대로).
       document.addEventListener("click", (ev) => {
         const toggle = ev.target.closest("[data-panel-toggle]");
         if (toggle) {
           const name = toggle.dataset.panelToggle;
           const panel = panelByName(name);
-          if (panel) setPanel(name, panel.hidden, { refocus: true });
+          if (panel) setPanel(name, !panel.open);
           return;
         }
         const closer = ev.target.closest("[data-panel-close]");
         if (closer) {
           const panel = closer.closest(PANEL_SEL);
-          if (panel) setPanel(panel.dataset.panel, false, { refocus: true });
+          if (panel) panel.close();
         }
-      });
-
-      // Esc — 포커스가 든 패널을 닫고 그 버튼으로 돌아간다. 패널 밖이면 열린 것을 모두 닫는다.
-      document.addEventListener("keydown", (ev) => {
-        if (ev.key !== "Escape") return;
-        const a = document.activeElement;
-        const inPanel = a && a.closest ? a.closest(PANEL_SEL) : null;
-        if (inPanel && !inPanel.hidden) {
-          setPanel(inPanel.dataset.panel, false, { refocus: true });
-          return;
-        }
-        closeAllPanels();
       });
 
       // 해시 딥링크(#onboard · #rotate · #login · #help) — "이 링크 눌러서 토큰
