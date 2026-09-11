@@ -996,13 +996,13 @@
           <tr><th>값</th><th>뜻</th></tr>
         </thead>
         <tbody>
-          <tr><td>queued</td><td>대기(claim 직후). 스케줄러가 레포락·동시성을 보고 집어간다.</td></tr>
+          <tr><td>queued</td><td>대기(claim 직후). 스케줄러가 레포락과 <b>서버 자원 헤드룸</b>(메모리·부하)을 보고 집어간다 — 잡 수 상한은 없다.</td></tr>
           <tr><td>running</td><td>dispatch 됨 — worker 가 실행 중. 레포락을 점유한다.</td></tr>
           <tr><td>interrupted</td><td>토큰·사용량 한도 등으로 중단. <code>reset_at</code> 이후 재개 대상.</td></tr>
           <tr><td>cancelling</td><td>실행 중 잡에 취소 요청이 접수됨 — worker 의 abort·롤백 회신 대기(아직 레포락 점유).</td></tr>
           <tr><td>cancelled</td><td>취소 확정(abort+롤백, 또는 큐 대기분 드롭). <b>종결</b> — 단 재오픈 대비로 dedup 는 풀린다.</td></tr>
           <tr><td>handing_off</td><td>담당자 변경 핸드오프 접수 — worker 가 WIP 를 커밋·push(checkpoint) 하는 중. <b>취소와 다르다: 롤백하지 않는다.</b></td></tr>
-          <tr><td>handed_off</td><td>핸드오프 확정 — WIP 보존 + 소유권 이관으로 <b>종결</b>.</td></tr>
+          <tr><td>handed_off</td><td>핸드오프 회신을 받았지만 <b>인수자가 없거나 비활성</b>이라 WIP 를 보존한 채 park 된 <b>종결</b> 상태(dedup 는 풀린다). 인수자가 가용하면 이 상태로 남지 않고 같은 티켓이 인수자 소유의 <code>queued</code> 로 되살아난다.</td></tr>
           <tr><td>done</td><td>완료.</td></tr>
           <tr><td>failed</td><td>복구 불가 실패. 이 상태에만 「재실행」 버튼이 나온다.</td></tr>
         </tbody>
@@ -1017,8 +1017,8 @@
           <tr><td><span class="badge badge-cancelled">취소됨</span> status_cancelled</td><td>Jira 상태가 「취소됨」 — 사람이 티켓을 취소했다. 중단 + 롤백.</td></tr>
           <tr><td><span class="badge badge-optout">추적해제</span> untracked_optout</td><td>추적 해제 라벨(opt-out) — <b>자동화만</b> 중단한다. 티켓은 살아 있다.</td></tr>
           <tr><td><span class="badge badge-reassigned">재배정</span> reassigned</td><td>담당자 재배정으로 <b>큐 대기분</b>을 드롭(park). 실행 중이던 잡은 취소가 아니라 핸드오프로 간다.</td></tr>
-          <tr><td><span class="badge badge-manual">수동</span> manual</td><td>관리 UI 에서 사람이 취소.</td></tr>
-          <tr><td><span class="badge badge-other">기타</span> other</td><td>기타·미분류. 사유가 없는 취소도 이 배지로 보인다.</td></tr>
+          <tr><td><span class="badge badge-manual">수동</span> manual</td><td>사람이 수동으로 취소한 경우를 위해 <b>예약된 값</b>. 이 배포에는 아직 수동 취소 경로(엔드포인트·버튼)가 없어 실제로는 나타나지 않는다.</td></tr>
+          <tr><td><span class="badge badge-other">기타</span> other</td><td>사유가 없거나 아는 값이 아닐 때 쓰는 <b>폴백 배지</b>(그때 라벨은 「취소」로 뜬다). 취소 사유를 읽지 못했다는 뜻이지 별도의 취소 종류가 아니며, <code>other</code> 값을 기록하는 코드도 없다.</td></tr>
         </tbody>
       </table>
 
