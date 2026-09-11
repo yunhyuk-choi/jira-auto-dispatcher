@@ -991,10 +991,10 @@
               name="username"
               id="rotate-username"
               list="rotate-user-list"
-              placeholder="위 표의 username"
+              placeholder="등록된 username"
             />
             <datalist id="rotate-user-list"></datalist>
-            <span class="hint">회전할 기존 사용자(위 「등록 사용자」 표의 username).</span>
+            <span class="hint">회전할 기존 사용자 — 이 칸의 자동완성 목록에서 등록된 username 을 고를 수 있다.</span>
           </div>
           <div>
             <label>claude_setup_token</label>
@@ -1951,7 +1951,9 @@
         const rerunBtn = ev.target.closest('button[data-act="rerun"]');
         if (rerunBtn) {
           rerunBtn.disabled = true;
-          // 종결/중단 잡을 queued로 되돌려 재-dispatch(수동 재실행).
+          // 서버는 상태 게이트 없이 받는다 — 종결/중단 잡을 queued 로 되돌려
+          // 재-dispatch 한다(unknown 티켓만 404). UI 는 그중 failed 에만 이 버튼을
+          // 내보내므로(canRerun), 실제로 눌리는 것은 failed 뿐이다.
           const ticket = rerunBtn.dataset.ticket;
           const r = await post(
             "/api/jobs/" + encodeURIComponent(ticket) + "/rerun",
