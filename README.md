@@ -16,8 +16,17 @@
 > 막는다(온보딩 에이전트가 대신 눌러 주는 것을 닫았다. 상세: `SECURITY.md` §1.1).
 >
 > **관리 UI(8787)와 worker 컨테이너는 그 자체로 원격 코드 실행(RCE) 표면이다.**
+>
+> 🔓 **관리 UI 에는 인증이 없다 — 포트에 닿는 것이 곧 권한이다.** 로그인도 API 키도 없다.
+> 열린 포트에 도달하는 사람은 누구나 사용자를 등록하고, **자격증명을 회전시키고**
+> (`PUT /users/<u>/secrets` — 토큰을 서버 파일에 쓰고 worker 컨테이너를 재생성한다),
+> 워커를 기동·중지할 수 있다. 이 배포본은 **사내망/신뢰 네트워크 한정**을 전제로 만들어졌고,
+> 그 전제가 곧 접근 통제다. 인증을 붙이고 싶다면 앞단에 **당신의** 리버스 프록시/SSO 를 두되,
+> 그 프록시가 인터넷에 노출되지 않는지는 여전히 당신 책임이다.
+>
 > - 🚫 **인터넷에 노출하지 말 것.** 퍼블릭 IP·포트포워딩·리버스 프록시로 열지 말 것.
 > - ✅ **신뢰 네트워크 한정** — 사설망/VPN 안에서만. 원격 접근이 필요하면 **SSH 터널**을 쓴다.
+> - ✅ 공개 호스트라면 compose 의 포트 매핑을 `127.0.0.1:8787:8787` 로 묶어라(INSTALL.md §4).
 > - ✅ 전용 계정·전용 토큰으로 돌리고, 권한 범위를 필요한 레포로 좁힌다.
 >
 > 위험 모델·보완 통제의 정본은 **[SECURITY.md](SECURITY.md)**, 설치는 **[INSTALL.md](INSTALL.md)**.
@@ -133,7 +142,8 @@ Jira(jira.project)          │                                                 
 |---|---|---|---|
 | GET | `/healthz` | 프로브 | 역할/사용자 헬스 (워커 컨테이너의 **유일한** 서빙 표면) |
 | POST | `/webhook/jira` | Jira→central | 이벤트 구동 단일 티켓 트리거(헤더 토큰 인증, 폴링은 백스톱) |
-| POST | `/onboard` | UI→central | 사용자 등록 + worker spawn |
+| POST | `/onboard` | UI→central | 사용자 등록 + worker spawn (**create-only** — 중복이면 409) |
+| PUT | `/users/<u>/secrets` | UI→central | **토큰 회전** — 채운 토큰만 0600 으로 덮어쓰고, enabled 면 worker 재생성(remove→ensure)해 새 토큰 반영 |
 
 > ⚠️ **은퇴**: `GET /dispatch/<user>/next` · `POST /dispatch/<user>/<job>/status` ·
 > `GET /dispatch/<user>/<job>/control` 과 그 `X-Worker-Secret` 인증은 레거시 워커 폴링
