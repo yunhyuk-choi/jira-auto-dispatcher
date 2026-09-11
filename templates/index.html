@@ -607,7 +607,8 @@
         line-height: 1.55;
         color: var(--danger-ink);
       }
-      #onboard-msg {
+      #onboard-msg,
+      #rotate-msg {
         font-size: 12px;
         line-height: 1.5;
         margin: var(--sp-2) 0 0;
@@ -786,6 +787,71 @@
           <tr><td colspan="7">불러오는 중…</td></tr>
         </tbody>
       </table>
+    </section>
+
+    <!-- 2b. 토큰 회전 — 온보딩(/onboard)은 create-only 라 **이미 등록된 사람**의 토큰을
+         바꿀 경로가 여기밖에 없다. 값은 URL 이 아니라 JSON body 로만 나간다. -->
+    <section id="rotate-section">
+      <h3>토큰 회전 (기존 사용자)</h3>
+      <div class="info-box">
+        🔄 이미 등록된 사용자의 <b>Claude setup-token</b>(또는 Jira·forge 토큰)을
+        교체한다. 만료(setup-token 은 약 1년)·계정 이전·토큰 회수로 잡이 전부 실패할 때
+        쓰는 복구 경로다 — 그 상태에서도 컨테이너는 <code>healthy</code> 로 보인다.
+        채운 칸만 <b>덮어쓰고</b> 비운 칸은 그대로 둔다. 사용자가
+        <b>enabled 면 worker 를 재생성</b>해 새 토큰을 즉시 반영한다(토큰은 컨테이너
+        생성 시점에만 주입되므로 재시작으로는 바뀌지 않는다). disabled 면 다음 활성화에서
+        반영된다. 값은 서버 파일(0600)에만 저장되고 응답·로그에 실리지 않는다.
+      </div>
+      <form id="rotate-form" onsubmit="return false;">
+        <div class="grid-form">
+          <div>
+            <label>username *</label>
+            <input
+              type="text"
+              name="username"
+              id="rotate-username"
+              list="rotate-user-list"
+              placeholder="위 표의 username"
+            />
+            <datalist id="rotate-user-list"></datalist>
+            <span class="hint">회전할 기존 사용자(위 「등록 사용자」 표의 username).</span>
+          </div>
+          <div>
+            <label>claude_setup_token</label>
+            <input
+              type="password"
+              name="claude_setup_token"
+              id="rotate-claude-token"
+              placeholder="새 Claude setup-token"
+            />
+            <span class="hint">본인 터미널의 <code>claude setup-token</code> 결과(새 값).</span>
+          </div>
+          <div>
+            <label>jira_token</label>
+            <input
+              type="password"
+              name="jira_token"
+              id="rotate-jira-token"
+              placeholder="새 Jira API 토큰"
+            />
+            <span class="hint">교체할 때만 입력. 비우면 기존 값 유지.</span>
+          </div>
+          <div>
+            <label>forge_token</label>
+            <input
+              type="password"
+              name="forge_token"
+              id="rotate-forge-token"
+              placeholder="새 forge PAT (GitLab · GitHub)"
+            />
+            <span class="hint">교체할 때만 입력. 비우면 기존 값 유지.</span>
+          </div>
+        </div>
+        <div class="flex-form">
+          <button id="rotate-btn" type="submit">토큰 회전</button>
+        </div>
+        <p id="rotate-msg"></p>
+      </form>
     </section>
 
     <!-- 3. 잡 현황 -->
@@ -1213,6 +1279,71 @@
         }
       });
 
+      // --- [토큰 회전] — 온보딩이 create-only 라 기존 사용자의 유일한 교체 경로 ---
+      const rotateForm = document.getElementById("rotate-form");
+      const rotateBtn = document.getElementById("rotate-btn");
+      const rotateMsg = document.getElementById("rotate-msg");
+
+      rotateBtn.addEventListener("click", async () => {
+        const fd = new FormData(rotateForm);
+        const username = String(fd.get("username") || "").trim();
+        if (!username) {
+          rotateMsg.style.color = "var(--danger)";
+          rotateMsg.innerText = "username 을 입력하세요.";
+          return;
+        }
+        // 비어 있지 않은 토큰만 담는다. ⚠️ 값은 URL 이 아니라 **JSON body** 로만 나간다
+        // (URL 은 접근 로그·히스토리에 남는다).
+        const payload = {};
+        ["claude_setup_token", "jira_token", "forge_token"].forEach((k) => {
+          const v = String(fd.get(k) || "").trim();
+          if (v) payload[k] = v;
+        });
+        if (!Object.keys(payload).length) {
+          rotateMsg.style.color = "var(--danger)";
+          rotateMsg.innerText = "회전할 토큰을 최소 하나 입력하세요.";
+          return;
+        }
+        rotateBtn.disabled = true;
+        rotateMsg.style.color = "var(--accent-light)";
+        rotateMsg.innerText = "회전 중…";
+        try {
+          const res = await fetch(
+            "/users/" + encodeURIComponent(username) + "/secrets",
+            {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            }
+          );
+          const data = await res.json();
+          if (res.ok) {
+            rotateMsg.style.color = "var(--ok)";
+            rotateMsg.innerText =
+              "회전 완료: " +
+              data.username +
+              " [" +
+              (data.rotated || []).join(", ") +
+              "] " +
+              (data.respawned
+                ? "— worker 재생성됨(새 토큰 반영)"
+                : data.respawn_error
+                ? "— 재생성 실패(" + data.respawn_error + "): 다음 기동에서 반영"
+                : "— disabled: 다음 활성화에서 반영");
+            if (rotateForm.reset) rotateForm.reset();
+            loadUsers();
+          } else {
+            rotateMsg.style.color = "var(--danger)";
+            rotateMsg.innerText = "실패: " + (data.error || res.status);
+          }
+        } catch (e) {
+          rotateMsg.style.color = "var(--danger)";
+          rotateMsg.innerText = "네트워크 오류: " + e;
+        } finally {
+          rotateBtn.disabled = false;
+        }
+      });
+
       // --- [사용자 목록/토글] (Phase 6) ---
       function esc(s) {
         return String(s == null ? "" : s).replace(
@@ -1273,6 +1404,13 @@
               );
             })
             .join("");
+          // 토큰 회전 폼의 username 자동완성 — 표에 있는 이름을 그대로 쓴다.
+          const dl = document.getElementById("rotate-user-list");
+          if (dl) {
+            dl.innerHTML = users
+              .map((u) => '<option value="' + esc(u.username) + '"></option>')
+              .join("");
+          }
         } catch (e) {
           tbody.innerHTML = '<tr><td colspan="7">불러오기 실패: ' + esc(e) + "</td></tr>";
         }

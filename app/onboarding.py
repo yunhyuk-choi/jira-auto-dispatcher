@@ -3,7 +3,9 @@
 역할:
     관리 UI(templates/index.html)에서 신규 사용자를 등록(자격증명 수신 →
     시크릿 파일 저장 → 레지스트리 upsert)하고, enabled(자동 트리거)·autonomy
-    (A|B)·worker 컨테이너(start/stop)를 토글한다.
+    (A|B)·worker 컨테이너(start/stop)를 토글한다. 등록은 **create-only** 이므로
+    이미 등록된 사람의 토큰 교체는 별도 회전 경로(``PUT /users/<u>/secrets``,
+    :func:`register_onboarding_api.user_rotate_secrets`)가 맡는다.
 
 역할 소속: **central**.
 
@@ -369,6 +371,120 @@ def register_onboarding_api(app, comps: dict) -> None:
             # 경고(레거시 필드 이름 사용 등)는 막지 않지만 알려는 준다.
             "warnings": [f.to_dict() for f in result.warnings],
         }), 201
+
+    @app.route("/users/<username>/secrets", methods=["PUT"])
+    @_json_errors
+    def user_rotate_secrets(username):
+        """기존 사용자의 시크릿(토큰) 교체 — **회전(rotation)** 경로.
+
+        왜 있는가: :func:`onboard` 는 **create-only** 다(중복이면 409). 그래서 이미 등록된
+        사람의 토큰을 바꿀 길이 **아예 없었다** — Claude setup-token 만료(약 1년)·계정 플랜
+        이전·토큰 회수가 일어나면 컨테이너는 ``healthy`` 인 채 잡만 전부 실패하고, 운영자는
+        레지스트리에서 사람을 지웠다 다시 등록하는 것 말고는 손쓸 방법이 없었다. 그
+        "삭제 후 재등록" 은 감사 흔적(동의 시각)·scope·autonomy 를 같이 날린다.
+
+        동작:
+            - ``{claude_setup_token, jira_token, forge_token}`` 중 **제공된 비어있지 않은
+              값만** 골라 0600 으로 덮어쓴다(:func:`_write_secret` 재사용 — 파일 소유·권한·
+              인코딩 의미가 온보딩과 **같은 한 곳**에서 나온다). 안 준 값은 **건드리지
+              않는다**.
+            - 옛 폼 이름(``gitlab_token``)도 계속 받는다(:data:`_LEGACY_SECRET_FIELDS`).
+            - ``secrets_ref`` 는 :meth:`app.registry.UserRecord.from_dict` 로 다시 조립해
+              갱신한다 — forge↔gitlab 레거시 미러를 수렴시키는 판정이 거기 한 벌뿐이라
+              여기서 손으로 두 필드를 맞추면 반드시 갈라진다.
+
+        ⚠️ **worker 는 재생성(remove→ensure)해야 새 토큰이 반영된다.** 토큰은 컨테이너
+        **생성 시점**에만 env(``CLAUDE_CODE_OAUTH_TOKEN``)로 주입되는데
+        (:meth:`app.spawner.Spawner.build_spec`), :meth:`~app.spawner.Spawner.ensure_worker`
+        는 **이미 있는 컨테이너를 재사용**한다(멈춰 있으면 start 만 한다). 그래서
+        ``stop_worker`` → ``ensure_worker`` 로는 **옛 env 를 그대로 단 컨테이너가 다시
+        뜰 뿐**이다 — 회전한 티가 안 나는 조용한 실패다. 반드시 ``remove_worker`` 로
+        지우고 새로 만든다. ``disabled`` 사용자는 파일만 쓰고 다음 enable 에서 반영된다.
+        재생성 실패는 **비치명**(시크릿은 이미 기록됨) — ``respawned=false`` 로 보고한다.
+
+        ⚠️ 자가진단 게이트(:func:`_doctor_gate`)를 **걸지 않는다.** 그 게이트가 막는 대표
+        항목이 "시크릿이 없다/틀렸다" 인데, 이 엔드포인트가 바로 그걸 고치는 경로다 —
+        게이트를 걸면 고칠 방법을 고장 난 상태로 잠그는 자충수가 된다.
+
+        ⚠️ 토큰 "값" 은 응답·로그 어디에도 싣지 않는다(온보딩과 같은 규율). 회전된
+        **필드 이름**만 돌려준다.
+        """
+        rec = registry.get(username)
+        if rec is None:
+            return jsonify({"error": "unknown user"}), 404
+
+        data = request.get_json(silent=True) or request.form.to_dict() or {}
+
+        base_dir = config.secrets.base_dir or ""
+        if not base_dir:
+            return jsonify({"error": "secrets.base_dir 미설정(서버 구성 오류)"}), 500
+
+        # 제공된 비어있지 않은 토큰만 회전 대상. 값은 파일로만 다룬다(로깅 금지).
+        # 기존 참조는 그대로 두고 덮어쓸 키만 갈아 끼운다 — 안 준 토큰은 파일도 참조도
+        # 건드리지 않는다.
+        record = rec.to_dict()
+        refs = dict(record.get("secrets_ref") or {})
+        rotated = []
+        for field, (filename, ref_key) in _SECRET_FILES.items():
+            value = str(data.get(field, "") or "").strip()
+            if not value:
+                for alias in _LEGACY_SECRET_FIELDS.get(field, ()):
+                    value = str(data.get(alias, "") or "").strip()
+                    if value:
+                        break
+            if not value:
+                continue
+            refs[ref_key] = _write_secret(base_dir, username, filename, value)
+            rotated.append(field)
+
+        if not rotated:
+            return jsonify({
+                "error": "회전할 토큰이 하나도 없습니다 — "
+                         "claude_setup_token · jira_token · forge_token 중 최소 하나를 채우세요.",
+            }), 400
+
+        # 참조가 갱신됐을 수 있으니 영속. from_dict 를 거쳐 forge↔gitlab 미러를 수렴시킨다.
+        record["secrets_ref"] = refs
+        rec = UserRecord.from_dict(record)
+        try:
+            registry.upsert(rec)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        log.info("사용자 시크릿 회전: %s (fields=%s)", username, rotated)  # 값 로깅 금지
+
+        # enabled 면 새 env 주입을 위해 worker 를 **재생성**(remove→ensure). 실패는 비치명.
+        respawned = False
+        if rec.enabled:
+            sp, err = _spawner_or_501()
+            if err:
+                # spawner 가 없으면 파일은 이미 기록됨 — 재생성만 못 한다(비치명).
+                return jsonify({
+                    "status": "rotated",
+                    "username": username,
+                    "rotated": rotated,
+                    "respawned": False,
+                    "respawn_error": "spawner unavailable",
+                })
+            try:
+                sp.remove_worker(username)
+                sp.ensure_worker(rec)
+                respawned = True
+            except Exception as exc:  # noqa: BLE001 — 재생성 실패해도 시크릿은 기록됨
+                log.exception("시크릿 회전 후 worker 재생성 실패: %s", username)
+                return jsonify({
+                    "status": "rotated",
+                    "username": username,
+                    "rotated": rotated,
+                    "respawned": False,
+                    "respawn_error": type(exc).__name__,
+                })
+
+        return jsonify({
+            "status": "rotated",
+            "username": username,
+            "rotated": rotated,
+            "respawned": respawned,
+        })
 
     @app.route("/api/onboarding/guide", methods=["GET"])
     @_json_errors

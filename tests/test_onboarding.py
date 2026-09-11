@@ -264,6 +264,203 @@ def test_container_without_spawner_501(tmp_path, isolated_state):
     assert client.post("/users/testuser/container/start").status_code == 501
 
 
+# --- 토큰 회전(PUT /users/<u>/secrets) — 온보딩이 create-only 라 생긴 유일한 교체 경로 ---
+
+
+def test_rotate_updates_secret_file_and_returns_fields(tmp_path, isolated_state):
+    """시크릿 파일을 새 값으로 덮어쓰고(0600) 회전된 **필드 이름**만 돌려준다."""
+    client, reg, base = _wire(tmp_path)
+    client.post("/onboard", json=_FULL)  # CLAUDE-TOK-VAL 저장됨
+
+    res = client.put("/users/testuser/secrets",
+                     json={"claude_setup_token": "NEW-CLAUDE-VAL"})
+    assert res.status_code == 200
+    body = res.get_json()
+    assert body["status"] == "rotated"
+    assert body["username"] == "testuser"
+    assert body["rotated"] == ["claude_setup_token"]
+    assert body["respawned"] is False  # 온보딩 직후는 disabled(안전 기본) → 재생성 없음
+
+    path = os.path.join(base, "testuser", "claude-oauth-token")
+    assert open(path, encoding="utf-8").read() == "NEW-CLAUDE-VAL"
+    if os.name == "posix":
+        assert oct(os.stat(path).st_mode & 0o777) == oct(0o600)
+
+    # 참조는 그대로(같은 파일을 덮어쓴 것이지 자리를 옮긴 게 아니다).
+    assert reg.get("testuser").secrets_ref.claude_oauth_token == "testuser/claude-oauth-token"
+
+
+def test_rotate_only_provided_fields_others_untouched(tmp_path, isolated_state):
+    """제공된 부분집합만 회전 — 빈 값·미전송 필드는 **원값 그대로** 남는다."""
+    client, reg, base = _wire(tmp_path)
+    client.post("/onboard", json=_FULL)
+
+    res = client.put("/users/testuser/secrets", json={
+        "jira_token": "NEW-JIRA",
+        "forge_token": "",                     # 빈 값 → 무시
+        "claude_setup_token": "NEW-CLAUDE",
+    })
+    assert res.status_code == 200
+    assert set(res.get_json()["rotated"]) == {"jira_token", "claude_setup_token"}
+
+    assert open(os.path.join(base, "testuser", "jira-token"),
+                encoding="utf-8").read() == "NEW-JIRA"
+    assert open(os.path.join(base, "testuser", "claude-oauth-token"),
+                encoding="utf-8").read() == "NEW-CLAUDE"
+    # forge 는 온보딩 원값 유지 — 안 준 토큰을 조용히 날리면 그 워커는 MR 을 못 만든다.
+    assert open(os.path.join(base, "testuser", "forge-token"),
+                encoding="utf-8").read() == "GL-TOK-VAL"
+    # 참조도 전부 살아 있다(부분 회전이 레코드를 깎지 않는다).
+    refs = reg.get("testuser").secrets_ref
+    assert refs.jira_token == "testuser/jira-token"
+    assert refs.forge_token == "testuser/forge-token"
+    assert refs.gitlab_token == "testuser/forge-token"   # 레거시 미러 수렴 유지
+
+
+def test_rotate_accepts_legacy_gitlab_token_field(tmp_path, isolated_state):
+    """옛 폼 이름(gitlab_token)으로 와도 forge-token 파일을 회전한다(하위호환)."""
+    client, _, base = _wire(tmp_path)
+    client.post("/onboard", json=_FULL)
+
+    res = client.put("/users/testuser/secrets", json={"gitlab_token": "NEW-FORGE"})
+    assert res.status_code == 200
+    assert res.get_json()["rotated"] == ["forge_token"]
+    assert open(os.path.join(base, "testuser", "forge-token"),
+                encoding="utf-8").read() == "NEW-FORGE"
+
+
+def test_rotate_preserves_record_fields(tmp_path, isolated_state):
+    """회전은 자격증명만 건드린다 — 동의 시각·scope·autonomy 는 그대로.
+
+    이게 "지웠다 다시 등록" 대신 회전 경로를 둔 이유다(그 우회로는 감사 흔적을 날린다).
+    """
+    client, reg, _ = _wire(tmp_path)
+    client.post("/onboard", json=_FULL)
+    before = reg.get("testuser").to_dict()
+
+    assert client.put("/users/testuser/secrets",
+                      json={"claude_setup_token": "ROT"}).status_code == 200
+    after = reg.get("testuser").to_dict()
+
+    assert after["consent"] == before["consent"]
+    assert after["scope"] == before["scope"]
+    assert after["autonomy_mode"] == before["autonomy_mode"]
+    assert after["container"] == before["container"]
+    assert after["jira_account_id"] == before["jira_account_id"]
+
+
+def test_rotate_unknown_user_404(tmp_path, isolated_state):
+    client, _, _ = _wire(tmp_path)
+    assert client.put("/users/nobody/secrets",
+                      json={"claude_setup_token": "X"}).status_code == 404
+
+
+def test_rotate_without_any_token_400(tmp_path, isolated_state):
+    """토큰이 하나도 없으면(빈 body·공백만) 400 — 조용한 no-op 을 만들지 않는다."""
+    client, _, _ = _wire(tmp_path)
+    client.post("/onboard", json=_FULL)
+    assert client.put("/users/testuser/secrets", json={}).status_code == 400
+    res = client.put("/users/testuser/secrets",
+                     json={"jira_token": "  ", "forge_token": ""})
+    assert res.status_code == 400
+
+
+def test_rotate_never_leaks_token_value(tmp_path, isolated_state, caplog):
+    """토큰 **값**은 응답 JSON·로그·레지스트리 어디에도 나타나지 않는다(필드 이름만)."""
+    import logging
+
+    client, reg, _ = _wire(tmp_path)
+    client.post("/onboard", json=_FULL)
+
+    with caplog.at_level(logging.DEBUG):
+        res = client.put("/users/testuser/secrets", json={
+            "claude_setup_token": "SECRET-ROT-VAL",
+            "jira_token": "SECRET-JIRA-VAL",
+        })
+    assert res.status_code == 200
+    raw = res.get_data(as_text=True)
+    assert "SECRET-ROT-VAL" not in raw
+    assert "SECRET-JIRA-VAL" not in raw
+    assert "SECRET-ROT-VAL" not in caplog.text
+    assert "SECRET-JIRA-VAL" not in caplog.text
+    # 회전된 "필드 이름" 은 나와도 된다(무엇이 바뀌었는지는 운영자가 알아야 한다).
+    assert "claude_setup_token" in raw
+    # 영속되는 레지스트리에도 값이 아니라 참조만.
+    dumped = json.dumps(reg.get("testuser").to_dict())
+    assert "SECRET-ROT-VAL" not in dumped
+    assert "SECRET-JIRA-VAL" not in dumped
+
+
+def test_rotate_respawns_worker_when_enabled(tmp_path, isolated_state):
+    """enabled 사용자는 remove→ensure 로 **재생성**한다.
+
+    ⚠️ stop→ensure 로는 안 된다 — ensure_worker 는 이미 있는 컨테이너를 **재사용**하므로
+    (app/spawner.py) 옛 env 를 그대로 단 컨테이너가 다시 뜰 뿐이다. 토큰은 컨테이너
+    **생성 시점**에만 주입된다.
+    """
+    spawner = MagicMock()
+    client, _, _ = _wire(tmp_path, spawner=spawner)
+    client.post("/onboard", json=_FULL)
+    client.post("/users/testuser/enable")
+    spawner.ensure_worker.reset_mock()
+
+    res = client.put("/users/testuser/secrets", json={"claude_setup_token": "ROT-VAL"})
+    assert res.status_code == 200
+    assert res.get_json()["respawned"] is True
+    spawner.remove_worker.assert_called_once_with("testuser")
+    spawner.ensure_worker.assert_called_once()
+    spawner.stop_worker.assert_not_called()   # stop 은 env 를 갈아 끼우지 못한다
+    passed = spawner.ensure_worker.call_args.args[0]
+    assert passed.username == "testuser"
+
+
+def test_rotate_disabled_does_not_respawn(tmp_path, isolated_state):
+    """disabled 면 파일만 쓰고 컨테이너를 건드리지 않는다(다음 enable 에서 반영)."""
+    spawner = MagicMock()
+    client, _, _ = _wire(tmp_path, spawner=spawner)
+    client.post("/onboard", json=_FULL)  # enabled=false 안전 기본
+
+    res = client.put("/users/testuser/secrets", json={"claude_setup_token": "ROT-VAL"})
+    assert res.status_code == 200
+    assert res.get_json()["respawned"] is False
+    spawner.remove_worker.assert_not_called()
+    spawner.ensure_worker.assert_not_called()
+
+
+def test_rotate_respawn_failure_is_nonfatal(tmp_path, isolated_state):
+    """재생성이 실패해도 시크릿은 이미 기록됐다 — 200 + respawned=false 로 드러낸다."""
+    spawner = MagicMock()
+    spawner.ensure_worker.side_effect = RuntimeError("boom")
+    client, reg, base = _wire(tmp_path, spawner=spawner)
+    client.post("/onboard", json=_FULL)
+    client.post("/users/testuser/enable")  # 여기서 이미 502(enabled 는 true 로 남는다)
+    assert reg.get("testuser").enabled is True
+
+    res = client.put("/users/testuser/secrets", json={"claude_setup_token": "ROT-VAL"})
+    assert res.status_code == 200
+    body = res.get_json()
+    assert body["rotated"] == ["claude_setup_token"]
+    assert body["respawned"] is False
+    assert body["respawn_error"] == "RuntimeError"
+    assert open(os.path.join(base, "testuser", "claude-oauth-token"),
+                encoding="utf-8").read() == "ROT-VAL"
+
+
+def test_rotate_without_spawner_still_writes_secret(tmp_path, isolated_state):
+    """spawner 가 없는 배포에서도 회전 자체는 성공한다(재생성만 못 한다)."""
+    client, reg, base = _wire(tmp_path, spawner=None)
+    client.post("/onboard", json=_FULL)
+    reg.set_enabled("testuser", True)
+
+    res = client.put("/users/testuser/secrets", json={"jira_token": "ROT-JIRA"})
+    assert res.status_code == 200
+    body = res.get_json()
+    assert body["respawned"] is False
+    assert body["respawn_error"] == "spawner unavailable"
+    assert open(os.path.join(base, "testuser", "jira-token"),
+                encoding="utf-8").read() == "ROT-JIRA"
+
+
 def test_onboard_error_returns_json_not_html(tmp_path, isolated_state):
     """예상치 못한 예외는 HTML 500이 아니라 JSON 500으로(프론트 파싱 실패 방지).
 
