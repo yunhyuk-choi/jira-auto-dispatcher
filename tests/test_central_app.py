@@ -10,6 +10,7 @@ TemplateNotFound으로 HTTP 500이 나던 문제. 수정 후 200 + index.html �
 
 from __future__ import annotations
 
+import re
 import textwrap
 import time
 
@@ -284,11 +285,14 @@ def test_index_html_does_not_hardcode_onboarding_guidance(central_client):
     화면 경로를 보여 준다.
     """
     body = central_client.get("/").get_data(as_text=True)
-    # 온보딩 섹션 마크업만 본다 — 다른 섹션(「토큰 회전」·「폴백 로그인」)은 별개의
-    # 안내라 같은 단어를 쓴다. 경계는 **닫는 태그**로 잡는다 — 「다음 섹션의 id」로
-    # 잡으면 섹션 순서를 바꾸는 순간 이 테스트가 엉뚱한 것을 읽는다.
+    # 온보딩 마크업만 본다 — 다른 구역(「토큰 회전」·「폴백 로그인」)은 별개의 안내라
+    # 같은 단어를 쓴다. 경계는 **그 요소 자신의 닫는 태그**로 잡는다. 「다음 구역의 id」로
+    # 잡으면 순서를 바꾸는 순간 엉뚱한 것을 읽고, 닫는 태그를 `</section>` 으로 **박아
+    # 두면** 온보딩이 다른 태그(예: `<dialog>`)로 바뀌는 순간 경계가 무너져 뒤쪽 구역까지
+    # 빨아들인다. 그래서 여는 태그에서 태그 이름을 읽어 그 짝을 경계로 쓴다.
     start = body.index('id="onboard-section"')
-    section = body[start:body.index("</section>", start)]
+    tag = re.search(r"<(\w+)", body[body.rindex("<", 0, start):]).group(1)
+    section = body[start:body.index("</%s>" % tag, start)]
     for hardcoded in ("Edit profile", "Developer settings", "id.atlassian.com",
                       "setup-token", "accountId", "PROJECT_KEY"):
         assert hardcoded not in section, hardcoded

@@ -709,10 +709,13 @@
       }
 
       /* =====================================================================
-         접히는 패널(일반 패턴) + 상단 액션 바.
+         다이얼로그 패널(일반 패턴) + 상단 액션 바.
+         가끔 쓰는 것은 문서 흐름을 바꾸지 않고 **기존 화면 위에 모달로** 띄운다 —
+         네이티브 `<dialog>` 라 포커스 트랩·Esc·바깥 inert·배경판(::backdrop)이
+         전부 브라우저 몫이고, top layer 에 올라가므로 z-index·overflow 경쟁이 없다.
          **섹션 특화 규칙을 만들지 않는다** — `data-panel` / `data-panel-toggle`
-         선언만 붙이면 어떤 섹션에도 그대로 적용된다(다른 콘솔로 이식할 때
-         선언만 옮기고 없는 패널은 지우면 된다). 색은 전부 기존 토큰.
+         선언만 붙이면 어떤 다이얼로그에도 그대로 적용된다(다른 콘솔로 이식할 때
+         선언만 옮기고 없는 것은 지우면 된다). 색은 전부 기존 토큰.
          ===================================================================== */
       .console-head {
         margin: 0 0 var(--sp-4);
@@ -741,15 +744,25 @@
         background-color: var(--surface-3);
         border-color: var(--hairline-tertiary);
       }
-      .action-bar button[aria-expanded="true"] {
-        background-color: var(--action);
-        border-color: var(--action);
-        color: var(--on-action);
+      /* 모달 면은 섹션과 같은 표면 사다리를 쓴다 — 같은 콘솔의 같은 층이다.
+         닫힌 `<dialog>` 는 UA 기본이 `display:none` 이라 기본 화면 배치에 전혀
+         관여하지 않는다(레이아웃·클릭·포커스 순서 모두 그대로). */
+      dialog[data-panel] {
+        width: min(900px, calc(100vw - var(--sp-5) * 2));
+        max-height: 85vh;
+        overflow: auto; /* 긴 폼은 페이지가 아니라 다이얼로그 안에서 스크롤한다. */
+        background-color: var(--surface-1);
+        color: var(--ink-muted);
+        border: 1px solid var(--hairline-strong);
+        border-radius: var(--r-lg);
+        padding: var(--sp-4) var(--sp-4) var(--sp-5);
+        box-shadow: inset 0 1px 0 var(--edge-highlight);
       }
-
-      /* 접힘 = `hidden` 속성(DOM 에는 그대로 남는다 — 초기화 코드가 계속 돈다). */
-      [data-panel][hidden] {
-        display: none;
+      /* 사용자가 말한 "불투명한 판" — 브라우저가 top layer 바로 아래에 깔아 준다.
+         새 색을 만들지 않는다: 페이지 바탕색을 그대로 반투명하게 쓴다. */
+      dialog[data-panel]::backdrop {
+        background-color: var(--canvas);
+        opacity: 0.72;
       }
       .panel-head {
         display: flex;
@@ -788,6 +801,92 @@
         overflow-wrap: anywhere;
       }
 
+      /* =====================================================================
+         안내 투어 — 어두운 판 한 장 + 말풍선 하나.
+         전 화면에 판을 깔고 **이번 단계의 대상만** 그 위로 올린다(z-index). 그래서
+         대상은 계속 조작할 수 있고 나머지는 클릭이 막힌다. 단계 목록은 스크립트의
+         `TOUR_STEPS` 선언 하나가 전부이고 여기에 섹션 이름이 박힌 규칙은 없다.
+         ⚠️ 투어가 꺼져 있으면 두 요소 모두 `hidden` 이라 기존 화면의 레이아웃·클릭·
+         포커스 순서에 **전혀** 관여하지 않는다. 색은 전부 기존 토큰.
+         ===================================================================== */
+      #tour-scrim[hidden],
+      #tour-bubble[hidden] {
+        display: none;
+      }
+      /* 새 색을 만들지 않는다 — 페이지 바탕색을 그대로 반투명하게 쓴다
+         (다이얼로그 `::backdrop` 과 같은 처방). */
+      #tour-scrim {
+        position: fixed;
+        inset: 0;
+        z-index: 9000;
+        background-color: var(--canvas);
+        opacity: 0.72;
+      }
+      #tour-bubble {
+        position: fixed;
+        z-index: 9002; /* 대상(9001)보다도 위 — 말풍선이 가려지면 안 된다. */
+        width: min(340px, calc(100vw - var(--sp-4) * 2));
+        background-color: var(--surface-2);
+        color: var(--ink-muted);
+        border: 1px solid var(--hairline-tertiary);
+        border-radius: var(--r-md);
+        padding: var(--sp-3);
+        box-shadow: inset 0 1px 0 var(--edge-highlight);
+      }
+      #tour-bubble:focus-visible {
+        outline: 2px solid var(--focus-ring);
+        outline-offset: 2px;
+      }
+      #tour-title {
+        margin: 0 0 var(--sp-1);
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: -0.2px;
+        color: var(--accent-light);
+      }
+      #tour-body {
+        margin: 0 0 var(--sp-3);
+        font-size: 12px;
+        line-height: 1.55;
+      }
+      .tour-foot {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--sp-2);
+      }
+      #tour-progress {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--ink-subtle);
+      }
+      .tour-btns {
+        display: flex;
+        gap: var(--sp-2);
+      }
+      .tour-btns button {
+        font-size: 11px;
+        padding: 4px 10px;
+      }
+      /* 1차 액션은 「다음」 하나 — 건너뛰기·이전은 보조 버튼. */
+      #tour-skip,
+      #tour-prev {
+        background-color: var(--surface-3);
+        border-color: var(--hairline-strong);
+        color: var(--ink);
+      }
+      #tour-skip:hover,
+      #tour-prev:hover {
+        background-color: var(--surface-4);
+        border-color: var(--hairline-tertiary);
+      }
+      /* 대상 강조 — 자리를 밀지 않도록 레이아웃에 영향 없는 outline 만 쓴다. */
+      .tour-spot {
+        outline: 2px solid var(--accent);
+        outline-offset: 3px;
+        border-radius: var(--r-md);
+      }
+
       /* --- 반응형 — 좁은 폭에서 표가 페이지를 가로로 밀지 않는다. --- */
       @media (max-width: 900px) {
         .grid-form {
@@ -801,7 +900,8 @@
         body {
           padding: var(--sp-4) var(--sp-3) 48px;
         }
-        section {
+        section,
+        dialog[data-panel] {
           padding: var(--sp-3);
         }
         .flex-form {
@@ -813,14 +913,15 @@
   <body>
     <header class="console-head">
       <h2>⚙️ jira-auto-dispatcher — central 관리 콘솔</h2>
-      <!-- 상단 액션 바 — 가끔 쓰는 패널을 여는 유일한 진입점.
+      <!-- 상단 액션 바 — 가끔 쓰는 다이얼로그를 여는 유일한 진입점.
            ⚠️ 버튼은 **항상 보인다** — "최초 1회만" 같은 게이팅을 넣지 않는다.
            언제든 한 번 클릭이면 열려야 한다. -->
       <div class="action-bar" id="action-bar">
-        <button type="button" data-panel-toggle="onboard" aria-controls="onboard-section" aria-expanded="false">+ 사용자 등록</button>
-        <button type="button" data-panel-toggle="rotate" aria-controls="rotate-section" aria-expanded="false">토큰 갱신</button>
-        <button type="button" data-panel-toggle="login" aria-controls="login-section" aria-expanded="false">Claude 인증</button>
-        <button type="button" data-panel-toggle="help" aria-controls="help-section" aria-expanded="false">? 도움말</button>
+        <button type="button" data-panel-toggle="onboard">+ 사용자 등록</button>
+        <button type="button" data-panel-toggle="rotate">토큰 갱신</button>
+        <button type="button" data-panel-toggle="login">Claude 인증</button>
+        <button type="button" data-panel-toggle="help">? 도움말</button>
+        <button type="button" id="tour-start" data-tour-start>안내 투어</button>
       </div>
     </header>
 
@@ -840,7 +941,7 @@
          ⚠️ 이 안의 안내·입력칸은 HTML 에 박아 두지 않는다. GET /api/onboarding/guide 가
          스키마(app/user_schema.py) + 이 인스턴스 설정에서 렌더한 것을 그대로 그린다 —
          forge 를 GitHub 으로 바꾸면 토큰 안내도 따라 바뀐다. -->
-    <section id="onboard-section" data-panel="onboard" role="region" aria-labelledby="onboard-heading" hidden>
+    <dialog id="onboard-section" data-panel="onboard" aria-labelledby="onboard-heading">
       <div class="panel-head">
         <h3 id="onboard-heading">팀 합류 — 사용자 온보딩</h3>
         <button type="button" class="panel-close" data-panel-close aria-label="사용자 온보딩 패널 닫기">닫기</button>
@@ -860,11 +961,11 @@
         </div>
         <p id="onboard-msg"></p>
       </form>
-    </section>
+    </dialog>
 
     <!-- 2. 토큰 회전 — 온보딩(/onboard)은 create-only 라 **이미 등록된 사람**의 토큰을
          바꿀 경로가 여기밖에 없다. 값은 URL 이 아니라 JSON body 로만 나간다. -->
-    <section id="rotate-section" data-panel="rotate" role="region" aria-labelledby="rotate-heading" hidden>
+    <dialog id="rotate-section" data-panel="rotate" aria-labelledby="rotate-heading">
       <div class="panel-head">
         <h3 id="rotate-heading">토큰 회전 (기존 사용자)</h3>
         <button type="button" class="panel-close" data-panel-close aria-label="토큰 회전 패널 닫기">닫기</button>
@@ -928,10 +1029,10 @@
         </div>
         <p id="rotate-msg"></p>
       </form>
-    </section>
+    </dialog>
 
     <!-- 3. Claude 인증(폴백) — 브라우저 로그인 (Phase 0 — 동작) -->
-    <section id="login-section" data-panel="login" role="region" aria-labelledby="login-heading" hidden>
+    <dialog id="login-section" data-panel="login" aria-labelledby="login-heading">
       <div class="panel-head">
         <h3 id="login-heading">Claude 인증(폴백)</h3>
         <button type="button" class="panel-close" data-panel-close aria-label="Claude 인증 패널 닫기">닫기</button>
@@ -964,12 +1065,12 @@
           <button id="complete-login-btn">인증 완료</button>
         </div>
       </div>
-    </section>
+    </dialog>
 
     <!-- 4. 도움말(용어집) — 표 헤더만 보고는 알 수 없는 값들의 뜻.
          값은 전부 코드가 실제로 내는 것이다(app/queue.py · app/spawner.py ·
          app/setup_doctor.py · app/user_schema.py) — 지어낸 항목이 없어야 한다. -->
-    <section id="help-section" data-panel="help" role="region" aria-labelledby="help-heading" hidden>
+    <dialog id="help-section" data-panel="help" aria-labelledby="help-heading">
       <div class="panel-head">
         <h3 id="help-heading">도움말 — 이 화면의 용어</h3>
         <button type="button" class="panel-close" data-panel-close aria-label="도움말 닫기">닫기</button>
@@ -996,13 +1097,13 @@
           <tr><th>값</th><th>뜻</th></tr>
         </thead>
         <tbody>
-          <tr><td>queued</td><td>대기(claim 직후). 스케줄러가 레포락·동시성을 보고 집어간다.</td></tr>
+          <tr><td>queued</td><td>대기(claim 직후). 스케줄러가 레포락과 <b>서버 자원 헤드룸</b>(메모리·부하)을 보고 집어간다 — 잡 수 상한은 없다.</td></tr>
           <tr><td>running</td><td>dispatch 됨 — worker 가 실행 중. 레포락을 점유한다.</td></tr>
           <tr><td>interrupted</td><td>토큰·사용량 한도 등으로 중단. <code>reset_at</code> 이후 재개 대상.</td></tr>
           <tr><td>cancelling</td><td>실행 중 잡에 취소 요청이 접수됨 — worker 의 abort·롤백 회신 대기(아직 레포락 점유).</td></tr>
           <tr><td>cancelled</td><td>취소 확정(abort+롤백, 또는 큐 대기분 드롭). <b>종결</b> — 단 재오픈 대비로 dedup 는 풀린다.</td></tr>
           <tr><td>handing_off</td><td>담당자 변경 핸드오프 접수 — worker 가 WIP 를 커밋·push(checkpoint) 하는 중. <b>취소와 다르다: 롤백하지 않는다.</b></td></tr>
-          <tr><td>handed_off</td><td>핸드오프 확정 — WIP 보존 + 소유권 이관으로 <b>종결</b>.</td></tr>
+          <tr><td>handed_off</td><td>핸드오프 회신을 받았지만 <b>인수자가 없거나 비활성</b>이라 WIP 를 보존한 채 park 된 <b>종결</b> 상태(dedup 는 풀린다). 인수자가 가용하면 이 상태로 남지 않고 같은 티켓이 인수자 소유의 <code>queued</code> 로 되살아난다.</td></tr>
           <tr><td>done</td><td>완료.</td></tr>
           <tr><td>failed</td><td>복구 불가 실패. 이 상태에만 「재실행」 버튼이 나온다.</td></tr>
         </tbody>
@@ -1017,8 +1118,8 @@
           <tr><td><span class="badge badge-cancelled">취소됨</span> status_cancelled</td><td>Jira 상태가 「취소됨」 — 사람이 티켓을 취소했다. 중단 + 롤백.</td></tr>
           <tr><td><span class="badge badge-optout">추적해제</span> untracked_optout</td><td>추적 해제 라벨(opt-out) — <b>자동화만</b> 중단한다. 티켓은 살아 있다.</td></tr>
           <tr><td><span class="badge badge-reassigned">재배정</span> reassigned</td><td>담당자 재배정으로 <b>큐 대기분</b>을 드롭(park). 실행 중이던 잡은 취소가 아니라 핸드오프로 간다.</td></tr>
-          <tr><td><span class="badge badge-manual">수동</span> manual</td><td>관리 UI 에서 사람이 취소.</td></tr>
-          <tr><td><span class="badge badge-other">기타</span> other</td><td>기타·미분류. 사유가 없는 취소도 이 배지로 보인다.</td></tr>
+          <tr><td><span class="badge badge-manual">수동</span> manual</td><td>사람이 수동으로 취소한 경우를 위해 <b>예약된 값</b>. 이 배포에는 아직 수동 취소 경로(엔드포인트·버튼)가 없어 실제로는 나타나지 않는다.</td></tr>
+          <tr><td><span class="badge badge-other">기타</span> other</td><td>사유가 없거나 아는 값이 아닐 때 쓰는 <b>폴백 배지</b>(그때 라벨은 「취소」로 뜬다). 취소 사유를 읽지 못했다는 뜻이지 별도의 취소 종류가 아니며, <code>other</code> 값을 기록하는 코드도 없다.</td></tr>
         </tbody>
       </table>
 
@@ -1062,7 +1163,7 @@
           <tr><td>skip</td><td>이 환경에서는 판정할 수 없다(설정이 없거나 관점이 다름).</td></tr>
         </tbody>
       </table>
-    </section>
+    </dialog>
 
     <!-- 5. 사용자 목록 -->
     <section id="users-section">
@@ -1141,6 +1242,23 @@
         </table>
       </div>
     </section>
+
+    <!-- 7. 안내 투어 — 어두운 판 + 말풍선. 투어가 꺼져 있으면 둘 다 `hidden` 이라
+         기존 화면에 아무 영향이 없다(레이아웃·클릭·포커스 순서 그대로). 문구는
+         전부 스크립트가 `textContent` 로 채운다. -->
+    <div id="tour-scrim" hidden></div>
+    <div id="tour-bubble" role="dialog" aria-labelledby="tour-title" tabindex="-1" hidden>
+      <p id="tour-title"></p>
+      <p id="tour-body"></p>
+      <div class="tour-foot">
+        <span id="tour-progress"></span>
+        <span class="tour-btns">
+          <button type="button" id="tour-skip">건너뛰기</button>
+          <button type="button" id="tour-prev">이전</button>
+          <button type="button" id="tour-next">다음</button>
+        </span>
+      </div>
+    </div>
 
     <script>
       // --- [로그인 로직] (Phase 0 — 동작, claude-hacker 계승) ---
@@ -1957,34 +2075,33 @@
         }, 1500);
       });
 
-      // --- [접히는 패널 — 일반 패턴] ---
-      // 매일 보는 것(자가진단 · 등록 사용자 · 잡 현황)만 기본으로 펼쳐 두고, 가끔 쓰는
-      // 것은 상단 액션 바 버튼으로 **제자리에서** 펼친다. 모달이 아니다 — 온보딩 폼이
-      // 길어서 모달에 넣으면 내부 스크롤이 또 생기고, 프레임워크 없는 단일 파일에서
-      // 포커스 트랩·스크롤 락을 직접 만드는 비용이 이득보다 크다.
+      // --- [다이얼로그 패널 — 일반 패턴] ---
+      // 매일 보는 것(자가진단 · 등록 사용자 · 잡 현황)만 페이지에 두고, 가끔 쓰는 것은
+      // 상단 액션 바 버튼으로 **기존 화면 위에** 모달로 띄운다. 네이티브 `<dialog>` 의
+      // `showModal()` 이라 포커스 트랩 · Esc · 바깥 요소 inert · 배경판(::backdrop) ·
+      // 포커스 복귀가 전부 브라우저 몫이다 — 우리가 짤 코드가 없고 라이브러리도 없다.
+      // 접힘(hidden 토글)과 달리 문서 흐름을 건드리지 않으므로 기존 화면은 재배치되지
+      // 않고, "열었다가 원래대로 되돌리기" 같은 상태 복원 로직이 아예 필요 없다.
       //
-      // ⚠️ 여기에 **섹션 이름이 박힌 코드는 없다.** `data-panel="<이름>"` 인 요소와
+      // ⚠️ 여기에 **섹션 이름이 박힌 코드는 없다.** `data-panel="<이름>"` 인 다이얼로그와
       // `data-panel-toggle="<이름>"` 인 버튼을 선언하면 그대로 붙는다 — 다른 콘솔로
-      // 옮길 때 선언만 옮기고, 없는 패널은 지우면 된다.
+      // 옮길 때 선언만 옮기고, 없는 것은 지우면 된다.
       //
-      // ⚠️ 접힘은 `hidden` 속성이고 패널은 **DOM 에 그대로 남는다.** 그래서 loadUsers 가
-      // 채우는 datalist, loadGuide 가 그리는 온보딩 폼 같은 초기화가 접힌 상태에서도
-      // 평소대로 다 돈다(열었을 때 비어 있지 않다).
-      const PANEL_SEL = "[data-panel]";
+      // ⚠️ 다이얼로그는 닫혀 있어도 **DOM 에 그대로 있다.** 그래서 loadUsers 가 채우는
+      // datalist, loadGuide 가 그리는 온보딩 폼 같은 초기화가 닫힌 상태에서도 평소대로
+      // 다 돈다(열었을 때 비어 있지 않다).
+      const PANEL_SEL = "dialog[data-panel]";
       const PANEL_NAME_RE = /^[A-Za-z0-9_-]+$/; // 해시에서 온 이름을 선택자에 넣기 전 검증.
 
       function panelByName(name) {
         if (!PANEL_NAME_RE.test(String(name || ""))) return null;
-        return document.querySelector('[data-panel="' + name + '"]');
-      }
-
-      function togglesFor(name) {
-        if (!PANEL_NAME_RE.test(String(name || ""))) return [];
-        return document.querySelectorAll('[data-panel-toggle="' + name + '"]');
+        return document.querySelector('dialog[data-panel="' + name + '"]');
       }
 
       // 열었을 때 포커스를 줄 곳: 보이는 첫 입력칸 → 없으면 보이는 첫 조작 요소 →
-      // 그것도 없으면 닫기 버튼(빈 패널에서도 키보드가 갈 곳은 있어야 한다).
+      // 그것도 없으면 닫기 버튼(빈 다이얼로그에서도 키보드가 갈 곳은 있어야 한다).
+      // `showModal()` 의 기본 포커스는 DOM 상 첫 조작 요소(= 헤더의 닫기 버튼)라
+      // 폼에서는 쓸모가 없다 — 그래서 연 뒤 한 번 옮긴다.
       function firstField(panel) {
         const els = panel.querySelectorAll(
           'input:not([type="hidden"]), select, textarea, button, a[href]'
@@ -2011,65 +2128,77 @@
       function isIdleFocus(panel) {
         const a = document.activeElement;
         if (!a || a === document.body) return true;
-        if (!panel.contains(a)) return false; // 패널 밖으로 나갔으면 건드리지 않는다.
+        if (!panel.contains(a)) return false; // 다이얼로그 밖으로 나갔으면 건드리지 않는다.
         const t = a.tagName;
         return t !== "INPUT" && t !== "SELECT" && t !== "TEXTAREA";
+      }
+
+      // 사람이 입력한 것이 남아 있는가 — **필드 이름을 모르는 채로** 판정한다.
+      // 기준은 "현재 값 ≠ 마크업이 준 기본값"이라 동적으로 렌더된 칸에도 그대로 맞는다.
+      function isDirty(panel) {
+        const els = panel.querySelectorAll("input, select, textarea");
+        for (let i = 0; i < els.length; i++) {
+          const el = els[i];
+          if (el.disabled || el.type === "hidden") continue;
+          if (el.type === "checkbox" || el.type === "radio") {
+            if (el.checked !== el.defaultChecked) return true;
+          } else if (el.tagName === "SELECT") {
+            for (let k = 0; k < el.options.length; k++) {
+              if (el.options[k].selected !== el.options[k].defaultSelected) return true;
+            }
+          } else if (el.value !== el.defaultValue) {
+            return true;
+          }
+        }
+        return false;
       }
 
       function setPanel(name, open, opts) {
         const panel = panelByName(name);
         if (!panel) return false;
         const o = opts || {};
-        panel.hidden = !open;
-        const toggles = togglesFor(name);
-        for (let i = 0; i < toggles.length; i++) {
-          toggles[i].setAttribute("aria-expanded", open ? "true" : "false");
-        }
         if (open) {
-          if (o.scroll !== false) panel.scrollIntoView({ block: "start" });
+          if (!panel.open) panel.showModal(); // 이미 열린 것에 다시 부르면 예외가 난다.
           const target = firstField(panel);
           // soft = 딥링크 재적용용. 안내/폼이 아직 fetch 중이라 진짜 첫 칸이 없던
           // 시점에 한 번 열렸으므로, 칸이 생긴 뒤 **사람이 손대지 않았을 때만** 옮긴다.
           if (target && (!o.soft || isIdleFocus(panel))) target.focus({ preventScroll: true });
-        } else if (o.refocus && toggles[0]) {
-          toggles[0].focus(); // 닫으면 연 버튼으로 돌아간다(키보드 흐름 유지).
+        } else if (panel.open) {
+          panel.close(); // 포커스는 브라우저가 연 버튼으로 되돌린다.
         }
         return true;
       }
 
-      function closeAllPanels() {
+      // Esc(= `cancel`) 는 네이티브 기본이 "닫기"다. 그런데 입력 중인 폼이라면 한 번의
+      // Esc 로 입력이 날아가선 안 된다 — 남은 입력이 있으면 막고 확인을 받는다.
+      // 입력칸이 없는 다이얼로그(도움말)는 판정이 항상 false 라 그냥 닫힌다.
+      // ⚠️ 닫기 **버튼**은 사람이 의도적으로 누른 것이므로 확인하지 않는다.
+      (function wireCancelGuard() {
         const ps = document.querySelectorAll(PANEL_SEL);
         for (let i = 0; i < ps.length; i++) {
-          if (!ps[i].hidden) setPanel(ps[i].dataset.panel, false);
+          ps[i].addEventListener("cancel", (ev) => {
+            const panel = ev.currentTarget;
+            if (!isDirty(panel)) return; // 잃을 것이 없다 → 네이티브 기본(닫기).
+            ev.preventDefault();
+            if (window.confirm("입력한 내용이 사라집니다. 닫을까요?")) panel.close();
+          });
         }
-      }
+      })();
 
-      // 액션 바 버튼 · 패널 닫기 버튼 — 위임 하나로 받는다(버튼이 늘어도 코드는 그대로).
+      // 액션 바 버튼 · 닫기 버튼 — 위임 하나로 받는다(버튼이 늘어도 코드는 그대로).
       document.addEventListener("click", (ev) => {
         const toggle = ev.target.closest("[data-panel-toggle]");
         if (toggle) {
           const name = toggle.dataset.panelToggle;
           const panel = panelByName(name);
-          if (panel) setPanel(name, panel.hidden, { refocus: true });
+          if (panel) setPanel(name, !panel.open);
           return;
         }
         const closer = ev.target.closest("[data-panel-close]");
         if (closer) {
           const panel = closer.closest(PANEL_SEL);
-          if (panel) setPanel(panel.dataset.panel, false, { refocus: true });
+          if (panel) panel.close();
         }
-      });
-
-      // Esc — 포커스가 든 패널을 닫고 그 버튼으로 돌아간다. 패널 밖이면 열린 것을 모두 닫는다.
-      document.addEventListener("keydown", (ev) => {
-        if (ev.key !== "Escape") return;
-        const a = document.activeElement;
-        const inPanel = a && a.closest ? a.closest(PANEL_SEL) : null;
-        if (inPanel && !inPanel.hidden) {
-          setPanel(inPanel.dataset.panel, false, { refocus: true });
-          return;
-        }
-        closeAllPanels();
       });
 
       // 해시 딥링크(#onboard · #rotate · #login · #help) — "이 링크 눌러서 토큰
@@ -2092,6 +2221,253 @@
       setInterval(loadDoctor, 5000);
       setInterval(loadUsers, 5000);
       setInterval(loadJobs, 5000);
+
+      // --- [안내 투어 — 일반 패턴] ---
+      // 전 화면에 어두운 판(scrim)을 한 장 깔고 **이번 단계의 대상만** 그 위로 올린다
+      // (z-index). 그래서 대상은 계속 조작할 수 있고 나머지는 클릭이 막힌다.
+      //
+      // ⚠️ 단계는 아래 `TOUR_STEPS` 선언이 전부다 — 단계마다 코드를 짜지 않는다.
+      // ⚠️ **대상이 없는 단계는 조용히 건너례다.** 그래서 다른 콘솔로 옮길 때 이 배열만
+      //    옮기면 되고, 그 콘솔에 없는 구역이 섞여 있어도 깨지지 않는다.
+      // ⚠️ 대상은 **기본 화면 요소만** 고른다. 다이얼로그 안을 가리키지 않으므로 투어가
+      //    무엇을 열고 닫고 되돌릴 일이 없다(다이얼로그 안 설명은 도움말이 맡는다).
+      // ⚠️ 스크롤 컨테이너(`#jobs-scroll`) 는 **통째로** 가리킨다 — 그 안의 행을 대상으로
+      //    잡으면 z-index 를 올려도 컨테이너가 잘라낸다.
+      const TOUR_STEPS = [
+        {
+          target: "#action-bar",
+          title: "여기서 시작한다",
+          body:
+            "가끔 쓰는 것은 전부 이 줄에 있다 — 사용자 등록 · 토큰 갱신 · Claude 인증 · " +
+            "도움말. 누르면 화면 위에 창으로 뜨고, 닫으면 화면은 그대로다. 버튼은 항상 " +
+            "보이므로 언제든 다시 열 수 있다.",
+        },
+        {
+          target: "#doctor-panel",
+          title: "설정 자가진단",
+          body:
+            "central 이 컨테이너 안에서 스스로 돌린 설정 점검 결과다. 여기에 치명적인 " +
+            "FAIL 이 있으면 신규 사용자 등록이 막힌다 — 잘못된 설정으로 워커를 띄우면 " +
+            "조용히 실패하는 잡만 쌓이기 때문이다. 고친 뒤 「다시 진단」을 누른다.",
+        },
+        {
+          target: "#users-section",
+          title: "등록 사용자",
+          body:
+            "등록된 사람의 자동 트리거 on/off · autonomy(A/B) · worker 컨테이너 " +
+            "start/stop 을 여기서 바꿈다. 등록은 enabled=false 로 만들어지므로, 새로 " +
+            "합류한 사람은 이 표에서 한 번 켜 줘야 폴러가 그 사람 티켓을 집는다.",
+        },
+        {
+          target: "#running-panel",
+          title: "지금 돌고 있는 것",
+          body:
+            "running 잡만 따로 올려 둔 자리다. 어떤 티켓을 누가, 어느 레포에서 " +
+            "돌리고 있는지 한눈에 본다. 아래 필터·검색이 이 목록에도 그대로 걸린다.",
+        },
+        {
+          target: "#jobs-controls",
+          title: "필터와 검색",
+          body:
+            "사용자로 좁히거나 티켓 · 요약 · user 부분일치로 찾는다. 다시 불러오지 않고 " +
+            "바로 다시 그리며, 위의 「진행 중」과 아래 전체 목록 **두 곳에 모두** 걸린다.",
+        },
+        {
+          target: "#jobs-scroll",
+          title: "전체 잡 목록",
+          body:
+            "모든 상태의 잡이 여기 쌓인다. 「재개」는 중단(interrupted) 잡 전용, " +
+            "「재실행」은 실패(failed) 잡 전용이다. status · 취소 사유 배지처럼 표 " +
+            "머리만 보고는 알 수 없는 값은 액션 바의 「? 도움말」에 용어집으로 있다.",
+        },
+      ];
+
+      const TOUR_SEEN_KEY = "jad.console.tour.seen.v1";
+      const tourScrim = document.getElementById("tour-scrim");
+      const tourBubble = document.getElementById("tour-bubble");
+      const tourTitleEl = document.getElementById("tour-title");
+      const tourBodyEl = document.getElementById("tour-body");
+      const tourProgressEl = document.getElementById("tour-progress");
+      const tourPrevBtn = document.getElementById("tour-prev");
+      const tourNextBtn = document.getElementById("tour-next");
+      const tourSkipBtn = document.getElementById("tour-skip");
+
+      let tourSteps = []; // 이번 실행에서 실제로 보여 줄 단계(대상이 있는 것만)
+      let tourIdx = -1;   // -1 = 꺼짐
+      let tourSpot = null;
+      let tourSpotPrev = null; // 대상의 인라인 스타일 원복용
+
+      function tourReduceMotion() {
+        try {
+          return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        } catch (e) {
+          return false;
+        }
+      }
+
+      // localStorage 는 **접근 자체가 예외를 던지는** 환경이 있다(프라이빗 모드·사이트
+      // 데이터 차단). 읽기·쓰기를 모두 감싸고, 못 읽으면 `false` 로 구분한다 —
+      // "없음(null)" 이면 자동 시작, "못 읽음(false)" 이면 자동 시작만 하지 않는다.
+      // 어느 쪽이든 화면과 시작 버튼은 정상이다.
+      function tourSeenRead() {
+        try {
+          return window.localStorage.getItem(TOUR_SEEN_KEY);
+        } catch (e) {
+          return false;
+        }
+      }
+      function tourSeenWrite() {
+        try {
+          window.localStorage.setItem(TOUR_SEEN_KEY, "1");
+        } catch (e) {
+          /* 못 써도 그만 — 다음에 한 번 더 뜨을 뿐이다. */
+        }
+      }
+
+      function tourClearSpot() {
+        if (!tourSpot) return;
+        tourSpot.classList.remove("tour-spot");
+        tourSpot.style.position = tourSpotPrev.position;
+        tourSpot.style.zIndex = tourSpotPrev.zIndex;
+        tourSpot = null;
+        tourSpotPrev = null;
+      }
+
+      function tourRaiseSpot(el) {
+        tourClearSpot();
+        tourSpotPrev = { position: el.style.position, zIndex: el.style.zIndex };
+        // static 요소에는 z-index 가 먹지 않는다. 자리를 옮기지 않는 relative 로만 올린다.
+        if (window.getComputedStyle(el).position === "static") el.style.position = "relative";
+        el.style.zIndex = "9001"; // 판(9000) 위 · 말풍선(9002) 아래
+        el.classList.add("tour-spot");
+        tourSpot = el;
+      }
+
+      // 말풍선은 대상 옆에 붙이되 **화면 밖으로 나가지 않는다**: 아래→위→오른쪽→왼쪽
+      // 순으로 들어가는 자리를 고르고, 어느 것도 못 들어가면 마지막에 화면 안으로 가둔다.
+      function tourPlaceBubble(el) {
+        const M = 12;
+        const r = el.getBoundingClientRect();
+        const bw = tourBubble.offsetWidth;
+        const bh = tourBubble.offsetHeight;
+        const vw = document.documentElement.clientWidth;
+        const vh = document.documentElement.clientHeight;
+        const cands = [
+          { top: r.bottom + M, left: r.left },
+          { top: r.top - bh - M, left: r.left },
+          { top: r.top, left: r.right + M },
+          { top: r.top, left: r.left - bw - M },
+        ];
+        let pick = null;
+        for (let i = 0; i < cands.length; i++) {
+          const c = cands[i];
+          if (c.top >= M && c.top + bh <= vh - M && c.left >= M && c.left + bw <= vw - M) {
+            pick = c;
+            break;
+          }
+        }
+        if (!pick) pick = cands[0];
+        tourBubble.style.left = Math.max(M, Math.min(pick.left, vw - bw - M)) + "px";
+        tourBubble.style.top = Math.max(M, Math.min(pick.top, vh - bh - M)) + "px";
+      }
+
+      // 스크롤·리사이즈 중에도 말풍선을 대상에 붙여 둔다(부드러운 스크롤 동안에도).
+      function tourReposition() {
+        if (tourIdx < 0 || !tourSpot) return;
+        tourPlaceBubble(tourSpot);
+      }
+
+      function tourShow(i, dir) {
+        const step = dir || 1;
+        // 대상이 없는 단계는 **진행 방향으로** 조용히 건너례다(시작 후 사라진 경우 포함).
+        while (i >= 0 && i < tourSteps.length && !document.querySelector(tourSteps[i].target)) {
+          i += step;
+        }
+        if (i < 0 || i >= tourSteps.length) {
+          tourEnd();
+          return;
+        }
+        const st = tourSteps[i];
+        const el = document.querySelector(st.target);
+        tourIdx = i;
+        tourTitleEl.textContent = st.title;
+        tourBodyEl.textContent = st.body;
+        tourProgressEl.textContent = i + 1 + " / " + tourSteps.length;
+        tourPrevBtn.disabled = i === 0;
+        tourNextBtn.textContent = i === tourSteps.length - 1 ? "마침" : "다음";
+        tourRaiseSpot(el);
+        const r = el.getBoundingClientRect();
+        const vh = document.documentElement.clientHeight;
+        if (r.top < 0 || r.bottom > vh) {
+          el.scrollIntoView({
+            behavior: tourReduceMotion() ? "auto" : "smooth",
+            block: "center",
+          });
+        }
+        tourPlaceBubble(el);
+        tourBubble.focus({ preventScroll: true });
+      }
+
+      function tourStart() {
+        if (tourIdx >= 0) return;
+        tourSteps = TOUR_STEPS.filter((s) => !!document.querySelector(s.target));
+        if (!tourSteps.length) return; // 가리킬 것이 하나도 없으면 아무 일도 하지 않는다.
+        tourSeenWrite();
+        tourScrim.hidden = false;
+        tourBubble.hidden = false;
+        window.addEventListener("scroll", tourReposition, true);
+        window.addEventListener("resize", tourReposition);
+        document.addEventListener("keydown", tourKeydown);
+        tourShow(0, 1);
+      }
+
+      function tourEnd() {
+        if (tourIdx < 0) return;
+        tourClearSpot();
+        tourIdx = -1;
+        tourScrim.hidden = true;
+        tourBubble.hidden = true;
+        window.removeEventListener("scroll", tourReposition, true);
+        window.removeEventListener("resize", tourReposition);
+        document.removeEventListener("keydown", tourKeydown);
+        const btn = document.querySelector("[data-tour-start]");
+        if (btn) btn.focus(); // 키보드 흐름 유지 — 시작한 버튼으로 돌아간다.
+      }
+
+      function tourKeydown(ev) {
+        if (tourIdx < 0) return;
+        if (ev.key === "Escape") {
+          ev.preventDefault();
+          tourEnd();
+          return;
+        }
+        const a = document.activeElement;
+        // 대상 안 입력칸에서 타이핑 중이면 방향키·Enter 는 그쪽 것이다.
+        if (a && (a.tagName === "INPUT" || a.tagName === "SELECT" || a.tagName === "TEXTAREA")) return;
+        // 말풍선 버튼에 포커스가 있으면 Enter 는 네이티브 클릭이 처리한다(두 번 넘어가지 않게).
+        if (a && a.tagName === "BUTTON" && tourBubble.contains(a)) return;
+        if (ev.key === "ArrowRight" || ev.key === "Enter") {
+          ev.preventDefault();
+          tourShow(tourIdx + 1, 1);
+        } else if (ev.key === "ArrowLeft") {
+          ev.preventDefault();
+          tourShow(tourIdx - 1, -1);
+        }
+      }
+
+      tourNextBtn.addEventListener("click", () => tourShow(tourIdx + 1, 1));
+      tourPrevBtn.addEventListener("click", () => tourShow(tourIdx - 1, -1));
+      tourSkipBtn.addEventListener("click", tourEnd);
+      document.addEventListener("click", (ev) => {
+        if (ev.target.closest("[data-tour-start]")) tourStart();
+      });
+
+      // 첫 방문에 한 번 자동으로 띄운다. ⚠️ 이 플래그가 막는 것은 **자동 시작뿐**이다 —
+      // 액션 바의 시작 버튼은 항상 살아 있어 언제든 다시 볼 수 있다. 표·진단이 채워진
+      // 뒤에 가리키도록 한 박자 늦춘다.
+      if (tourSeenRead() === null) {
+        window.setTimeout(tourStart, 600);
+      }
     </script>
   </body>
 </html>
