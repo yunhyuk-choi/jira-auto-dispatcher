@@ -801,6 +801,92 @@
         overflow-wrap: anywhere;
       }
 
+      /* =====================================================================
+         안내 투어 — 어두운 판 한 장 + 말풍선 하나.
+         전 화면에 판을 깔고 **이번 단계의 대상만** 그 위로 올린다(z-index). 그래서
+         대상은 계속 조작할 수 있고 나머지는 클릭이 막힌다. 단계 목록은 스크립트의
+         `TOUR_STEPS` 선언 하나가 전부이고 여기에 섹션 이름이 박힌 규칙은 없다.
+         ⚠️ 투어가 꺼져 있으면 두 요소 모두 `hidden` 이라 기존 화면의 레이아웃·클릭·
+         포커스 순서에 **전혀** 관여하지 않는다. 색은 전부 기존 토큰.
+         ===================================================================== */
+      #tour-scrim[hidden],
+      #tour-bubble[hidden] {
+        display: none;
+      }
+      /* 새 색을 만들지 않는다 — 페이지 바탕색을 그대로 반투명하게 쓴다
+         (다이얼로그 `::backdrop` 과 같은 처방). */
+      #tour-scrim {
+        position: fixed;
+        inset: 0;
+        z-index: 9000;
+        background-color: var(--canvas);
+        opacity: 0.72;
+      }
+      #tour-bubble {
+        position: fixed;
+        z-index: 9002; /* 대상(9001)보다도 위 — 말풍선이 가려지면 안 된다. */
+        width: min(340px, calc(100vw - var(--sp-4) * 2));
+        background-color: var(--surface-2);
+        color: var(--ink-muted);
+        border: 1px solid var(--hairline-tertiary);
+        border-radius: var(--r-md);
+        padding: var(--sp-3);
+        box-shadow: inset 0 1px 0 var(--edge-highlight);
+      }
+      #tour-bubble:focus-visible {
+        outline: 2px solid var(--focus-ring);
+        outline-offset: 2px;
+      }
+      #tour-title {
+        margin: 0 0 var(--sp-1);
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: -0.2px;
+        color: var(--accent-light);
+      }
+      #tour-body {
+        margin: 0 0 var(--sp-3);
+        font-size: 12px;
+        line-height: 1.55;
+      }
+      .tour-foot {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--sp-2);
+      }
+      #tour-progress {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--ink-subtle);
+      }
+      .tour-btns {
+        display: flex;
+        gap: var(--sp-2);
+      }
+      .tour-btns button {
+        font-size: 11px;
+        padding: 4px 10px;
+      }
+      /* 1차 액션은 「다음」 하나 — 건너뛰기·이전은 보조 버튼. */
+      #tour-skip,
+      #tour-prev {
+        background-color: var(--surface-3);
+        border-color: var(--hairline-strong);
+        color: var(--ink);
+      }
+      #tour-skip:hover,
+      #tour-prev:hover {
+        background-color: var(--surface-4);
+        border-color: var(--hairline-tertiary);
+      }
+      /* 대상 강조 — 자리를 밀지 않도록 레이아웃에 영향 없는 outline 만 쓴다. */
+      .tour-spot {
+        outline: 2px solid var(--accent);
+        outline-offset: 3px;
+        border-radius: var(--r-md);
+      }
+
       /* --- 반응형 — 좁은 폭에서 표가 페이지를 가로로 밀지 않는다. --- */
       @media (max-width: 900px) {
         .grid-form {
@@ -835,6 +921,7 @@
         <button type="button" data-panel-toggle="rotate">토큰 갱신</button>
         <button type="button" data-panel-toggle="login">Claude 인증</button>
         <button type="button" data-panel-toggle="help">? 도움말</button>
+        <button type="button" id="tour-start" data-tour-start>안내 투어</button>
       </div>
     </header>
 
@@ -1155,6 +1242,23 @@
         </table>
       </div>
     </section>
+
+    <!-- 7. 안내 투어 — 어두운 판 + 말풍선. 투어가 꺼져 있으면 둘 다 `hidden` 이라
+         기존 화면에 아무 영향이 없다(레이아웃·클릭·포커스 순서 그대로). 문구는
+         전부 스크립트가 `textContent` 로 채운다. -->
+    <div id="tour-scrim" hidden></div>
+    <div id="tour-bubble" role="dialog" aria-labelledby="tour-title" tabindex="-1" hidden>
+      <p id="tour-title"></p>
+      <p id="tour-body"></p>
+      <div class="tour-foot">
+        <span id="tour-progress"></span>
+        <span class="tour-btns">
+          <button type="button" id="tour-skip">건너뛰기</button>
+          <button type="button" id="tour-prev">이전</button>
+          <button type="button" id="tour-next">다음</button>
+        </span>
+      </div>
+    </div>
 
     <script>
       // --- [로그인 로직] (Phase 0 — 동작, claude-hacker 계승) ---
@@ -2117,6 +2221,253 @@
       setInterval(loadDoctor, 5000);
       setInterval(loadUsers, 5000);
       setInterval(loadJobs, 5000);
+
+      // --- [안내 투어 — 일반 패턴] ---
+      // 전 화면에 어두운 판(scrim)을 한 장 깔고 **이번 단계의 대상만** 그 위로 올린다
+      // (z-index). 그래서 대상은 계속 조작할 수 있고 나머지는 클릭이 막힌다.
+      //
+      // ⚠️ 단계는 아래 `TOUR_STEPS` 선언이 전부다 — 단계마다 코드를 짜지 않는다.
+      // ⚠️ **대상이 없는 단계는 조용히 건너례다.** 그래서 다른 콘솔로 옮길 때 이 배열만
+      //    옮기면 되고, 그 콘솔에 없는 구역이 섞여 있어도 깨지지 않는다.
+      // ⚠️ 대상은 **기본 화면 요소만** 고른다. 다이얼로그 안을 가리키지 않으므로 투어가
+      //    무엇을 열고 닫고 되돌릴 일이 없다(다이얼로그 안 설명은 도움말이 맡는다).
+      // ⚠️ 스크롤 컨테이너(`#jobs-scroll`) 는 **통째로** 가리킨다 — 그 안의 행을 대상으로
+      //    잡으면 z-index 를 올려도 컨테이너가 잘라낸다.
+      const TOUR_STEPS = [
+        {
+          target: "#action-bar",
+          title: "여기서 시작한다",
+          body:
+            "가끔 쓰는 것은 전부 이 줄에 있다 — 사용자 등록 · 토큰 갱신 · Claude 인증 · " +
+            "도움말. 누르면 화면 위에 창으로 뜨고, 닫으면 화면은 그대로다. 버튼은 항상 " +
+            "보이므로 언제든 다시 열 수 있다.",
+        },
+        {
+          target: "#doctor-panel",
+          title: "설정 자가진단",
+          body:
+            "central 이 컨테이너 안에서 스스로 돌린 설정 점검 결과다. 여기에 치명적인 " +
+            "FAIL 이 있으면 신규 사용자 등록이 막힌다 — 잘못된 설정으로 워커를 띄우면 " +
+            "조용히 실패하는 잡만 쌓이기 때문이다. 고친 뒤 「다시 진단」을 누른다.",
+        },
+        {
+          target: "#users-section",
+          title: "등록 사용자",
+          body:
+            "등록된 사람의 자동 트리거 on/off · autonomy(A/B) · worker 컨테이너 " +
+            "start/stop 을 여기서 바꿈다. 등록은 enabled=false 로 만들어지므로, 새로 " +
+            "합류한 사람은 이 표에서 한 번 켜 줘야 폴러가 그 사람 티켓을 집는다.",
+        },
+        {
+          target: "#running-panel",
+          title: "지금 돌고 있는 것",
+          body:
+            "running 잡만 따로 올려 둔 자리다. 어떤 티켓을 누가, 어느 레포에서 " +
+            "돌리고 있는지 한눈에 본다. 아래 필터·검색이 이 목록에도 그대로 걸린다.",
+        },
+        {
+          target: "#jobs-controls",
+          title: "필터와 검색",
+          body:
+            "사용자로 좁히거나 티켓 · 요약 · user 부분일치로 찾는다. 다시 불러오지 않고 " +
+            "바로 다시 그리며, 위의 「진행 중」과 아래 전체 목록 **두 곳에 모두** 걸린다.",
+        },
+        {
+          target: "#jobs-scroll",
+          title: "전체 잡 목록",
+          body:
+            "모든 상태의 잡이 여기 쌓인다. 「재개」는 중단(interrupted) 잡 전용, " +
+            "「재실행」은 실패(failed) 잡 전용이다. status · 취소 사유 배지처럼 표 " +
+            "머리만 보고는 알 수 없는 값은 액션 바의 「? 도움말」에 용어집으로 있다.",
+        },
+      ];
+
+      const TOUR_SEEN_KEY = "jad.console.tour.seen.v1";
+      const tourScrim = document.getElementById("tour-scrim");
+      const tourBubble = document.getElementById("tour-bubble");
+      const tourTitleEl = document.getElementById("tour-title");
+      const tourBodyEl = document.getElementById("tour-body");
+      const tourProgressEl = document.getElementById("tour-progress");
+      const tourPrevBtn = document.getElementById("tour-prev");
+      const tourNextBtn = document.getElementById("tour-next");
+      const tourSkipBtn = document.getElementById("tour-skip");
+
+      let tourSteps = []; // 이번 실행에서 실제로 보여 줄 단계(대상이 있는 것만)
+      let tourIdx = -1;   // -1 = 꺼짐
+      let tourSpot = null;
+      let tourSpotPrev = null; // 대상의 인라인 스타일 원복용
+
+      function tourReduceMotion() {
+        try {
+          return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        } catch (e) {
+          return false;
+        }
+      }
+
+      // localStorage 는 **접근 자체가 예외를 던지는** 환경이 있다(프라이빗 모드·사이트
+      // 데이터 차단). 읽기·쓰기를 모두 감싸고, 못 읽으면 `false` 로 구분한다 —
+      // "없음(null)" 이면 자동 시작, "못 읽음(false)" 이면 자동 시작만 하지 않는다.
+      // 어느 쪽이든 화면과 시작 버튼은 정상이다.
+      function tourSeenRead() {
+        try {
+          return window.localStorage.getItem(TOUR_SEEN_KEY);
+        } catch (e) {
+          return false;
+        }
+      }
+      function tourSeenWrite() {
+        try {
+          window.localStorage.setItem(TOUR_SEEN_KEY, "1");
+        } catch (e) {
+          /* 못 써도 그만 — 다음에 한 번 더 뜨을 뿐이다. */
+        }
+      }
+
+      function tourClearSpot() {
+        if (!tourSpot) return;
+        tourSpot.classList.remove("tour-spot");
+        tourSpot.style.position = tourSpotPrev.position;
+        tourSpot.style.zIndex = tourSpotPrev.zIndex;
+        tourSpot = null;
+        tourSpotPrev = null;
+      }
+
+      function tourRaiseSpot(el) {
+        tourClearSpot();
+        tourSpotPrev = { position: el.style.position, zIndex: el.style.zIndex };
+        // static 요소에는 z-index 가 먹지 않는다. 자리를 옮기지 않는 relative 로만 올린다.
+        if (window.getComputedStyle(el).position === "static") el.style.position = "relative";
+        el.style.zIndex = "9001"; // 판(9000) 위 · 말풍선(9002) 아래
+        el.classList.add("tour-spot");
+        tourSpot = el;
+      }
+
+      // 말풍선은 대상 옆에 붙이되 **화면 밖으로 나가지 않는다**: 아래→위→오른쪽→왼쪽
+      // 순으로 들어가는 자리를 고르고, 어느 것도 못 들어가면 마지막에 화면 안으로 가둔다.
+      function tourPlaceBubble(el) {
+        const M = 12;
+        const r = el.getBoundingClientRect();
+        const bw = tourBubble.offsetWidth;
+        const bh = tourBubble.offsetHeight;
+        const vw = document.documentElement.clientWidth;
+        const vh = document.documentElement.clientHeight;
+        const cands = [
+          { top: r.bottom + M, left: r.left },
+          { top: r.top - bh - M, left: r.left },
+          { top: r.top, left: r.right + M },
+          { top: r.top, left: r.left - bw - M },
+        ];
+        let pick = null;
+        for (let i = 0; i < cands.length; i++) {
+          const c = cands[i];
+          if (c.top >= M && c.top + bh <= vh - M && c.left >= M && c.left + bw <= vw - M) {
+            pick = c;
+            break;
+          }
+        }
+        if (!pick) pick = cands[0];
+        tourBubble.style.left = Math.max(M, Math.min(pick.left, vw - bw - M)) + "px";
+        tourBubble.style.top = Math.max(M, Math.min(pick.top, vh - bh - M)) + "px";
+      }
+
+      // 스크롤·리사이즈 중에도 말풍선을 대상에 붙여 둔다(부드러운 스크롤 동안에도).
+      function tourReposition() {
+        if (tourIdx < 0 || !tourSpot) return;
+        tourPlaceBubble(tourSpot);
+      }
+
+      function tourShow(i, dir) {
+        const step = dir || 1;
+        // 대상이 없는 단계는 **진행 방향으로** 조용히 건너례다(시작 후 사라진 경우 포함).
+        while (i >= 0 && i < tourSteps.length && !document.querySelector(tourSteps[i].target)) {
+          i += step;
+        }
+        if (i < 0 || i >= tourSteps.length) {
+          tourEnd();
+          return;
+        }
+        const st = tourSteps[i];
+        const el = document.querySelector(st.target);
+        tourIdx = i;
+        tourTitleEl.textContent = st.title;
+        tourBodyEl.textContent = st.body;
+        tourProgressEl.textContent = i + 1 + " / " + tourSteps.length;
+        tourPrevBtn.disabled = i === 0;
+        tourNextBtn.textContent = i === tourSteps.length - 1 ? "마침" : "다음";
+        tourRaiseSpot(el);
+        const r = el.getBoundingClientRect();
+        const vh = document.documentElement.clientHeight;
+        if (r.top < 0 || r.bottom > vh) {
+          el.scrollIntoView({
+            behavior: tourReduceMotion() ? "auto" : "smooth",
+            block: "center",
+          });
+        }
+        tourPlaceBubble(el);
+        tourBubble.focus({ preventScroll: true });
+      }
+
+      function tourStart() {
+        if (tourIdx >= 0) return;
+        tourSteps = TOUR_STEPS.filter((s) => !!document.querySelector(s.target));
+        if (!tourSteps.length) return; // 가리킬 것이 하나도 없으면 아무 일도 하지 않는다.
+        tourSeenWrite();
+        tourScrim.hidden = false;
+        tourBubble.hidden = false;
+        window.addEventListener("scroll", tourReposition, true);
+        window.addEventListener("resize", tourReposition);
+        document.addEventListener("keydown", tourKeydown);
+        tourShow(0, 1);
+      }
+
+      function tourEnd() {
+        if (tourIdx < 0) return;
+        tourClearSpot();
+        tourIdx = -1;
+        tourScrim.hidden = true;
+        tourBubble.hidden = true;
+        window.removeEventListener("scroll", tourReposition, true);
+        window.removeEventListener("resize", tourReposition);
+        document.removeEventListener("keydown", tourKeydown);
+        const btn = document.querySelector("[data-tour-start]");
+        if (btn) btn.focus(); // 키보드 흐름 유지 — 시작한 버튼으로 돌아간다.
+      }
+
+      function tourKeydown(ev) {
+        if (tourIdx < 0) return;
+        if (ev.key === "Escape") {
+          ev.preventDefault();
+          tourEnd();
+          return;
+        }
+        const a = document.activeElement;
+        // 대상 안 입력칸에서 타이핑 중이면 방향키·Enter 는 그쪽 것이다.
+        if (a && (a.tagName === "INPUT" || a.tagName === "SELECT" || a.tagName === "TEXTAREA")) return;
+        // 말풍선 버튼에 포커스가 있으면 Enter 는 네이티브 클릭이 처리한다(두 번 넘어가지 않게).
+        if (a && a.tagName === "BUTTON" && tourBubble.contains(a)) return;
+        if (ev.key === "ArrowRight" || ev.key === "Enter") {
+          ev.preventDefault();
+          tourShow(tourIdx + 1, 1);
+        } else if (ev.key === "ArrowLeft") {
+          ev.preventDefault();
+          tourShow(tourIdx - 1, -1);
+        }
+      }
+
+      tourNextBtn.addEventListener("click", () => tourShow(tourIdx + 1, 1));
+      tourPrevBtn.addEventListener("click", () => tourShow(tourIdx - 1, -1));
+      tourSkipBtn.addEventListener("click", tourEnd);
+      document.addEventListener("click", (ev) => {
+        if (ev.target.closest("[data-tour-start]")) tourStart();
+      });
+
+      // 첫 방문에 한 번 자동으로 띄운다. ⚠️ 이 플래그가 막는 것은 **자동 시작뿐**이다 —
+      // 액션 바의 시작 버튼은 항상 살아 있어 언제든 다시 볼 수 있다. 표·진단이 채워진
+      // 뒤에 가리키도록 한 박자 늦춘다.
+      if (tourSeenRead() === null) {
+        window.setTimeout(tourStart, 600);
+      }
     </script>
   </body>
 </html>
